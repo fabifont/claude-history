@@ -20,6 +20,7 @@ pub mod path;
 pub mod pi;
 pub mod pi_loader;
 mod rename;
+mod session_loader;
 
 pub(crate) use messages::{MessageOrdinals, Placement};
 

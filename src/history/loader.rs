@@ -189,78 +189,66 @@ fn load_all_streaming_inner(
     debug_level: Option<DebugLevel>,
     time: TimeFilter,
 ) {
-    let pi_root = super::pi_loader::session_root().ok();
-    let pi_available = pi_root.as_ref().is_some_and(|root| root.path.exists());
-    let (mut pi_conversations, pi_error) =
-        match super::pi_loader::load_pi_conversations(show_last, debug_level) {
-            Ok(conversations) => (conversations, None),
-            Err(error) => (Vec::new(), Some(error)),
+    thread::scope(|scope| {
+        let claude = scope.spawn(|| load_claude_streaming(&tx, show_last, debug_level, time));
+        let mut paths = std::collections::HashSet::new();
+        let mut emit = |mut conversations: Vec<Conversation>| {
+            conversations.retain(|conversation| {
+                let path = conversation
+                    .path
+                    .canonicalize()
+                    .unwrap_or_else(|_| conversation.path.clone());
+                paths.insert(path) && (!time.is_active() || time.matches(conversation.timestamp))
+            });
+            if !conversations.is_empty() {
+                let _ = tx.send(LoaderMessage::Batch(conversations));
+            }
         };
-    let omp_root = super::omp_loader::session_root().ok();
-    let omp_available = omp_root.as_ref().is_some_and(|root| root.path.exists());
-    let (mut omp_conversations, omp_error) =
-        match super::omp_loader::load_omp_conversations(show_last, debug_level) {
-            Ok(conversations) => (conversations, None),
-            Err(error) => (Vec::new(), Some(error)),
-        };
-    let auxiliary_usable =
-        (pi_available && pi_error.is_none()) || (omp_available && omp_error.is_none());
-    pi_conversations.append(&mut omp_conversations);
-    deduplicate_conversations(&mut pi_conversations);
-    if time.is_active() {
-        pi_conversations.retain(|conversation| time.matches(conversation.timestamp));
-    }
-    if !pi_conversations.is_empty() {
-        let _ = tx.send(LoaderMessage::Batch(pi_conversations));
-    }
+        let pi_root = super::pi_loader::session_root().ok();
+        let pi_available = pi_root.as_ref().is_some_and(|root| root.path.exists());
+        let pi_error =
+            super::pi_loader::stream_pi_conversations(show_last, debug_level, &mut emit).err();
+        let omp_root = super::omp_loader::session_root().ok();
+        let omp_available = omp_root.as_ref().is_some_and(|root| root.path.exists());
+        let omp_error =
+            super::omp_loader::stream_omp_conversations(show_last, debug_level, &mut emit).err();
+        let auxiliary_usable =
+            (pi_available && pi_error.is_none()) || (omp_available && omp_error.is_none());
 
-    let root = match super::get_claude_projects_root() {
-        Ok(root) => root,
-        Err(error) => {
-            if auxiliary_usable {
-                let _ = tx.send(LoaderMessage::Done);
-            } else {
+        let claude_result = claude.join().expect("Claude loader thread");
+        match claude_result {
+            Ok(()) => {
+                for error in [pi_error, omp_error].into_iter().flatten() {
+                    debug::warn(
+                        debug_level,
+                        &format!("Failed to load auxiliary history: {error}"),
+                    );
+                    let _ = tx.send(LoaderMessage::ProjectError);
+                }
+            }
+            Err(error) if !auxiliary_usable => {
                 let _ = tx.send(LoaderMessage::Fatal(
                     pi_error.or(omp_error).unwrap_or(error),
                 ));
+                return;
             }
-            return;
+            Err(_) => {}
         }
-    };
+        let _ = tx.send(LoaderMessage::Done);
+    });
+}
 
+fn load_claude_streaming(
+    tx: &Sender<LoaderMessage>,
+    show_last: bool,
+    debug_level: Option<DebugLevel>,
+    time: TimeFilter,
+) -> Result<()> {
+    let root = super::get_claude_projects_root()?;
     if !root.exists() {
-        if auxiliary_usable {
-            let _ = tx.send(LoaderMessage::Done);
-        } else {
-            let error = pi_error
-                .or(omp_error)
-                .unwrap_or_else(|| AppError::ProjectsDirNotFound(root.display().to_string()));
-            let _ = tx.send(LoaderMessage::Fatal(error));
-        }
-        return;
+        return Err(AppError::ProjectsDirNotFound(root.display().to_string()));
     }
-
-    if let Some(error) = pi_error {
-        debug::warn(debug_level, &format!("Failed to load Pi history: {error}"));
-        let _ = tx.send(LoaderMessage::ProjectError);
-    }
-    if let Some(error) = omp_error {
-        debug::warn(debug_level, &format!("Failed to load OMP history: {error}"));
-        let _ = tx.send(LoaderMessage::ProjectError);
-    }
-
-    let projects = match list_projects(&root) {
-        Ok(p) => p,
-        Err(error) => {
-            if auxiliary_usable {
-                let _ = tx.send(LoaderMessage::Done);
-            } else {
-                let _ = tx.send(LoaderMessage::Fatal(error));
-            }
-            return;
-        }
-    };
-
+    let projects = list_projects(&root)?;
     debug::info(
         debug_level,
         &format!("Loading global history from {} projects", projects.len()),
@@ -308,7 +296,7 @@ fn load_all_streaming_inner(
         }
     });
 
-    let _ = tx.send(LoaderMessage::Done);
+    Ok(())
 }
 
 /// Find a session JSONL file by UUID across all projects.

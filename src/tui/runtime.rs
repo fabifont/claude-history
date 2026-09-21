@@ -214,6 +214,7 @@ pub fn run_with_loader(
     loop {
         if let Some(rx) = loader_rx.take() {
             let mut keep_receiver = true;
+            let receive_started = std::time::Instant::now();
             loop {
                 match rx.try_recv() {
                     Ok(LoaderMessage::Fatal(err)) => {
@@ -279,7 +280,7 @@ pub fn run_with_loader(
                         break;
                     }
                 }
-                if !keep_receiver {
+                if !keep_receiver || receive_started.elapsed() >= Duration::from_millis(8) {
                     break;
                 }
             }

@@ -296,6 +296,15 @@ pub fn entry_from_conversation(
 
 /// Reconstruct a Conversation from a CacheEntry
 pub fn conversation_from_entry(entry: &CacheEntry, path: PathBuf, show_last: bool) -> Conversation {
+    conversation_from_owned_entry(entry.clone(), path, show_last)
+}
+
+/// Reconstruct a conversation by transferring ownership of cached text.
+pub fn conversation_from_owned_entry(
+    entry: CacheEntry,
+    path: PathBuf,
+    show_last: bool,
+) -> Conversation {
     let timestamp = Local
         .timestamp_millis_opt(entry.timestamp_epoch_ms)
         .single()
@@ -316,32 +325,32 @@ pub fn conversation_from_entry(entry: &CacheEntry, path: PathBuf, show_last: boo
         index: 0,
         timestamp,
         preview,
-        preview_first: entry.preview_first.clone(),
-        preview_last: entry.preview_last.clone(),
-        full_text: entry.full_text.clone(),
-        agent_search_text: entry.agent_search_text.clone(),
-        semantic_route_text: entry.semantic_route_text.clone(),
-        semantic_turns: entry.semantic_turns.clone(),
-        semantic_turn_ranges: entry.semantic_turn_ranges.clone(),
-        search_text_lower: entry.search_text_lower.clone(),
+        preview_first: entry.preview_first,
+        preview_last: entry.preview_last,
+        full_text: entry.full_text,
+        agent_search_text: entry.agent_search_text,
+        semantic_route_text: entry.semantic_route_text,
+        semantic_turns: entry.semantic_turns,
+        semantic_turn_ranges: entry.semantic_turn_ranges,
+        search_text_lower: entry.search_text_lower,
         project_name: None,
         project_path: None,
-        cwd: entry.cwd.clone(),
+        cwd: entry.cwd,
         message_count: entry.message_count,
         parse_errors: entry
             .parse_errors
-            .iter()
+            .into_iter()
             .map(|e| ParseError {
                 line_number: e.line_number,
-                line_content: e.line_content.clone(),
-                error_message: e.error_message.clone(),
-                context_before: e.context_before.clone(),
-                context_after: e.context_after.clone(),
+                line_content: e.line_content,
+                error_message: e.error_message,
+                context_before: e.context_before,
+                context_after: e.context_after,
             })
             .collect(),
-        summary: entry.summary.clone(),
-        custom_title: entry.custom_title.clone(),
-        model: entry.model.clone(),
+        summary: entry.summary,
+        custom_title: entry.custom_title,
+        model: entry.model,
         total_tokens: entry.total_tokens,
         duration_minutes: entry.duration_minutes,
     }
