@@ -37,6 +37,8 @@ tempfile = "3"
 indicatif = "0.17"
 fastembed = { version = "6.0", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"], optional = true }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+memmap2 = "0.9"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

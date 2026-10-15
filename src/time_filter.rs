@@ -411,7 +411,7 @@ impl TimeFilter {
     }
 
     /// Whether `timestamp` falls inside both bounds. Bounds are inclusive.
-    pub fn matches(&self, timestamp: DateTime<Local>) -> bool {
+    pub fn matches<Tz: TimeZone>(&self, timestamp: DateTime<Tz>) -> bool {
         if self.after.is_some_and(|after| timestamp < after) {
             return false;
         }

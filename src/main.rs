@@ -13,6 +13,7 @@ mod pager;
 pub mod search;
 mod semantic;
 mod semantic_cli;
+mod store;
 mod syntax;
 mod text_match;
 mod time_filter;

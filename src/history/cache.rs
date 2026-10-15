@@ -84,19 +84,24 @@ pub struct CachedParseError {
     pub context_after: Vec<String>,
 }
 
-/// Get the cache directory for per-project cache files.
-/// Respects CLAUDE_CONFIG_DIR to namespace caches per config root.
-fn cache_dir() -> Option<PathBuf> {
+/// Cache directory for this config root: `~/.cache/claude-history`, or a
+/// `config-<hash>` directory inside it when CLAUDE_CONFIG_DIR is set, to
+/// avoid cross-config cache collisions.
+pub(crate) fn cache_base_dir() -> Option<PathBuf> {
     let base = home::home_dir()?.join(".cache").join("claude-history");
     if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
-        // Namespace by config dir to avoid cross-config cache collisions
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hash::hash(&config_dir, &mut hasher);
         let hash = std::hash::Hasher::finish(&hasher);
-        Some(base.join(format!("config-{:016x}", hash)).join("projects"))
+        Some(base.join(format!("config-{:016x}", hash)))
     } else {
-        Some(base.join("projects"))
+        Some(base)
     }
+}
+
+/// Get the cache directory for per-project cache files.
+fn cache_dir() -> Option<PathBuf> {
+    cache_base_dir().map(|base| base.join("projects"))
 }
 
 /// Get the cache file path for a specific project

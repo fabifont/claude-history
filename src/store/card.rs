@@ -1,0 +1,167 @@
+//! Fixed-width records stored in a generation manifest.
+//!
+//! Every record is `Pod`, so a validated manifest is read in place from its
+//! memory map. Strings live in the manifest's string heap and are referenced
+//! by `StrRef`.
+
+use bytemuck::{Pod, Zeroable};
+
+/// Longest stored preview, in bytes. Previews are cut on a char boundary.
+pub const PREVIEW_CAP: usize = 400;
+
+/// Byte range in the manifest's string heap.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
+pub struct StrRef {
+    pub off: u32,
+    pub len: u32,
+}
+
+impl StrRef {
+    pub(super) fn end(self) -> u64 {
+        u64::from(self.off) + u64::from(self.len)
+    }
+}
+
+/// One conversation in the list, pre-sorted newest first.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct CardRow {
+    /// Hash of the session path, a stable key for the conversation.
+    pub key_hash: u64,
+    /// `Conversation::timestamp` in epoch milliseconds; the sort key.
+    pub timestamp_ms: i64,
+    pub total_tokens: u64,
+    pub path: StrRef,
+    pub session_id: StrRef,
+    pub custom_title: StrRef,
+    pub summary: StrRef,
+    pub model: StrRef,
+    pub cwd: StrRef,
+    pub preview_first: StrRef,
+    pub preview_last: StrRef,
+    /// Index into the manifest's project table.
+    pub project_id: u32,
+    pub message_count: u32,
+    /// Duration in minutes, or `NO_DURATION`.
+    pub duration_minutes: u32,
+    /// `source_to_u8` encoding of `Source`.
+    pub source: u8,
+    /// `card_flags` bits recording which optional fields are present.
+    pub flags: u8,
+    pub _pad: [u8; 2],
+}
+
+pub const NO_DURATION: u32 = u32::MAX;
+
+pub mod card_flags {
+    pub const CUSTOM_TITLE: u8 = 1 << 0;
+    pub const SUMMARY: u8 = 1 << 1;
+    pub const MODEL: u8 = 1 << 2;
+    pub const CWD: u8 = 1 << 3;
+}
+
+/// Project shared by any number of cards.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct ProjectRow {
+    /// `Conversation::project_name`, which `exclude_projects` matches.
+    pub name: StrRef,
+    /// `Conversation::project_path`.
+    pub path: StrRef,
+    /// What the workspace filter compares: the encoded project directory name
+    /// for Claude sessions, or the canonical project path for other sources.
+    pub workspace_key: StrRef,
+    /// `project_flags` bits.
+    pub flags: u8,
+    pub _pad: [u8; 7],
+}
+
+pub mod project_flags {
+    pub const NAME: u8 = 1 << 0;
+    pub const PATH: u8 = 1 << 1;
+    /// `workspace_key` is a canonical path rather than a Claude directory name.
+    pub const PATH_KEY: u8 = 1 << 2;
+}
+
+/// Native file state a card was built from, parallel to the card rows.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
+pub struct Fingerprint {
+    pub size: u64,
+    /// Modification time in epoch nanoseconds, or 0 when the file changed
+    /// while it was being loaded and the card may not match it.
+    pub mtime_ns: i64,
+}
+
+/// Fixed-size manifest header. Section offsets are 8-byte aligned.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct Header {
+    pub magic: [u8; 8],
+    pub version: u32,
+    pub row_size: u32,
+    pub row_count: u32,
+    pub project_count: u32,
+    pub rows_off: u64,
+    pub projects_off: u64,
+    pub fingerprints_off: u64,
+    pub heap_off: u64,
+    pub heap_len: u64,
+}
+
+pub const MAGIC: [u8; 8] = *b"CHGEN\0\0\0";
+pub const VERSION: u32 = 1;
+
+pub fn source_to_u8(source: crate::history::Source) -> u8 {
+    match source {
+        crate::history::Source::Claude => 0,
+        crate::history::Source::Pi => 1,
+        crate::history::Source::Omp => 2,
+    }
+}
+
+pub fn source_from_u8(value: u8) -> Option<crate::history::Source> {
+    match value {
+        0 => Some(crate::history::Source::Claude),
+        1 => Some(crate::history::Source::Pi),
+        2 => Some(crate::history::Source::Omp),
+        _ => None,
+    }
+}
+
+/// Returns at most `PREVIEW_CAP` bytes of `text`, cut on a char boundary.
+pub fn cap_preview(text: &str) -> &str {
+    if text.len() <= PREVIEW_CAP {
+        return text;
+    }
+    let mut end = PREVIEW_CAP;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn records_have_no_implicit_padding() {
+        assert_eq!(std::mem::size_of::<CardRow>(), 104);
+        assert_eq!(std::mem::size_of::<ProjectRow>(), 32);
+        assert_eq!(std::mem::size_of::<Fingerprint>(), 16);
+        assert_eq!(std::mem::size_of::<Header>(), 64);
+    }
+
+    #[test]
+    fn cap_preview_cuts_on_char_boundary() {
+        assert_eq!(cap_preview("short"), "short");
+        let text = format!("{}é", "a".repeat(PREVIEW_CAP - 1));
+        let capped = cap_preview(&text);
+        assert_eq!(capped.len(), PREVIEW_CAP - 1);
+        assert!(capped.chars().all(|c| c == 'a'));
+        let exact = "b".repeat(PREVIEW_CAP + 10);
+        assert_eq!(cap_preview(&exact).len(), PREVIEW_CAP);
+    }
+}
