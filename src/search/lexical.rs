@@ -7,12 +7,13 @@ use crate::search::query::ParsedQuery;
 pub use crate::text_match::normalize_for_search;
 use chrono::{DateTime, Duration, Local};
 use rayon::prelude::*;
+use std::sync::Arc;
 
 /// Precomputed search data for a conversation
 #[derive(Clone)]
 pub struct SearchableConversation {
-    /// Combined text for Stage 1 fast rejection (search_text_lower + project name)
-    pub text_lower: String,
+    /// Normalized body text, shared with the conversation when possible
+    pub body_lower: Arc<str>,
     /// Normalized custom_title only (small, typically <100 chars)
     pub title_lower: String,
     /// Normalized summary only (small, typically <500 chars)
@@ -41,8 +42,8 @@ pub fn is_uuid(query: &str) -> bool {
 }
 
 /// Build searchable index from conversations using pre-normalized search text.
-/// Only appends the (small) project name — the expensive full_text normalization
-/// was already done during parsing/cache load.
+/// The body shares the conversation's search_text_lower; only the small
+/// title, summary, and project fields are normalized here.
 pub fn precompute_search_text(conversations: &[Conversation]) -> Vec<SearchableConversation> {
     precompute_search_text_with(conversations, false)
 }
@@ -74,17 +75,8 @@ fn precompute_search_text_with(
                 .as_ref()
                 .map(|n| normalize_for_search(n))
                 .unwrap_or_default();
-            let body_lower = body_search_text_lower(conv, include_agent_text);
-
-            // Combined for Stage 1: same as before, just append project name
-            let text_lower = if project_lower.is_empty() {
-                body_lower
-            } else {
-                format!("{} {}", body_lower, project_lower)
-            };
-
             SearchableConversation {
-                text_lower,
+                body_lower: body_search_text_lower(conv, include_agent_text),
                 title_lower,
                 summary_lower,
                 project_lower,
@@ -94,15 +86,16 @@ fn precompute_search_text_with(
         .collect()
 }
 
-fn body_search_text_lower(conversation: &Conversation, include_agent_text: bool) -> String {
+fn body_search_text_lower(conversation: &Conversation, include_agent_text: bool) -> Arc<str> {
     if !include_agent_text || conversation.agent_search_text.is_empty() {
-        conversation.search_text_lower.to_string()
+        conversation.search_text_lower.clone()
     } else {
         format!(
             "{} {}",
             conversation.search_text_lower,
             normalize_for_search(&conversation.agent_search_text)
         )
+        .into()
     }
 }
 
@@ -341,7 +334,6 @@ fn search_debug_with_query(
             }
             let debug = score_text_debug(
                 s,
-                &body_search_text_lower(&conversations[s.index], include_agent_text),
                 &query_words,
                 &adjacent_pairs,
                 conversations[s.index].timestamp,
@@ -388,12 +380,11 @@ pub struct FieldDebug {
 
 /// Core scoring implementation used by both score_text and score_text_debug.
 ///
-/// Stage 1: Fast rejection using combined text (AND logic, prefix matching).
+/// Stage 1: Fast rejection using body and project text (AND logic, prefix matching).
 /// Stage 2: Per-field scoring with log-saturated TF, adjacency bonuses, field weights.
 /// Returns None if Stage 1 rejects the conversation.
 fn score_impl(
     s: &SearchableConversation,
-    body_lower: &str,
     query_words: &[&str],
     adjacent_pairs: &[String],
     timestamp: DateTime<Local>,
@@ -403,17 +394,23 @@ fn score_impl(
         return None;
     }
 
-    // Stage 1: Fast rejection — all query words must exist as substrings
+    let body_lower: &str = &s.body_lower;
+    let project_lower: &str = &s.project_lower;
+
+    // Stage 1: Fast rejection — all query words must exist as substrings.
+    // Query words contain no whitespace, so a match never spans two fields.
     for &qw in query_words {
-        if !s.text_lower.contains(qw) {
+        if !body_lower.contains(qw) && !project_lower.contains(qw) {
             return None;
         }
     }
 
-    // Stage 1: Prefix matching on combined text (AND logic).
-    // If any word has 0 prefix matches in text_lower, reject.
+    // Stage 1: Prefix matching on body and project (AND logic).
+    // If any word has 0 prefix matches in either field, reject.
     for &qw in query_words {
-        if count_prefix_matches(&s.text_lower, qw, 1) == 0 {
+        if count_prefix_matches(body_lower, qw, 1) == 0
+            && count_prefix_matches(project_lower, qw, 1) == 0
+        {
             // CJK fallback: substring matching is acceptable for CJK text
             let has_cjk = query_words
                 .iter()
@@ -435,7 +432,7 @@ fn score_impl(
     let fields: &[(&str, f64, &'static str)] = &[
         (&s.title_lower, WEIGHT_TITLE, "title"),
         (&s.summary_lower, WEIGHT_SUMMARY, "summary"),
-        (&s.project_lower, WEIGHT_PROJECT, "project"),
+        (project_lower, WEIGHT_PROJECT, "project"),
         (body_lower, WEIGHT_BODY, "body"),
     ];
 
@@ -489,13 +486,12 @@ fn score_impl(
 /// Score with full debug breakdown. Returns None if Stage 1 rejects.
 pub fn score_text_debug(
     s: &SearchableConversation,
-    body_lower: &str,
     query_words: &[&str],
     adjacent_pairs: &[String],
     timestamp: DateTime<Local>,
     now: DateTime<Local>,
 ) -> Option<ScoreDebug> {
-    score_impl(s, body_lower, query_words, adjacent_pairs, timestamp, now)
+    score_impl(s, query_words, adjacent_pairs, timestamp, now)
 }
 
 /// Returns true if `pos` in `text` is at the start of a word (i.e. preceded by
@@ -843,8 +839,8 @@ mod tests {
         let searchable = precompute_search_text(&convs);
 
         assert!(
-            searchable[0]
-                .text_lower
+            !searchable[0]
+                .body_lower
                 .contains("project lexical sentinel")
         );
         assert_eq!(searchable[0].project_lower, "project lexical sentinel");
