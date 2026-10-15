@@ -1442,4 +1442,115 @@ mod tests {
             );
         }
     }
+
+    /// Counts the text bytes handed out.
+    struct CountingTexts<'a> {
+        conversations: &'a [Conversation],
+        bytes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl TextSource for CountingTexts<'_> {
+        fn full_text(&self, doc: u32) -> Cow<'_, str> {
+            let text = &self.conversations[doc as usize].full_text;
+            self.bytes
+                .fetch_add(text.len(), std::sync::atomic::Ordering::Relaxed);
+            Cow::Borrowed(text)
+        }
+    }
+
+    fn percentile(sorted: &[f64], p: f64) -> f64 {
+        sorted[((sorted.len() - 1) as f64 * p).round() as usize]
+    }
+
+    /// Times index queries (first page of 50, and the complete ranking)
+    /// against the in-memory search on the user's conversations, with text
+    /// read from memory. Run with
+    /// `cargo test --release --bin claude-history real_corpus_query_latency -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_corpus_query_latency() {
+        const PAGE: usize = 50;
+        const RUNS: usize = 5;
+        let corpus = real_corpus();
+        let now = Local::now();
+        let median = |mut samples: Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        let mut page_ms = Vec::new();
+        let mut complete_ms = Vec::new();
+        let mut scan_ms = Vec::new();
+        let mut page_reads = Vec::new();
+        let mut complete_reads = Vec::new();
+        for query in REAL_QUERIES {
+            let texts = CountingTexts {
+                conversations: &corpus.conversations,
+                bytes: Default::default(),
+            };
+            let run = |complete: bool| {
+                let started = std::time::Instant::now();
+                let mut ranking =
+                    search(&corpus.index, &corpus.docs, &texts, query, now, &|_| true);
+                let hits = if complete {
+                    ranking.complete().len()
+                } else {
+                    ranking.top(PAGE).len()
+                };
+                (started.elapsed().as_secs_f64() * 1e3, ranking.stats(), hits)
+            };
+            run(false);
+            texts.bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+            let (_, page_stats, _) = run(false);
+            let page_bytes = texts.bytes.load(std::sync::atomic::Ordering::Relaxed);
+            let page = median((0..RUNS).map(|_| run(false).0).collect());
+            texts.bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+            let (_, complete_stats, hits) = run(true);
+            let complete_bytes = texts.bytes.load(std::sync::atomic::Ordering::Relaxed);
+            let complete = median((0..RUNS).map(|_| run(true).0).collect());
+            let scan = median(
+                (0..3)
+                    .map(|_| {
+                        let started = std::time::Instant::now();
+                        crate::search::search(
+                            &corpus.conversations,
+                            &corpus.searchable,
+                            query,
+                            now,
+                        );
+                        started.elapsed().as_secs_f64() * 1e3
+                    })
+                    .collect(),
+            );
+            eprintln!(
+                "{query:?}: {hits} hits, {} candidates | page {page:.2} ms, {} reads \
+                 ({:.1} MB) | complete {complete:.2} ms, {} reads ({:.1} MB) | in-memory \
+                 {scan:.1} ms",
+                page_stats.candidates,
+                page_stats.texts_read,
+                page_bytes as f64 / 1e6,
+                complete_stats.texts_read,
+                complete_bytes as f64 / 1e6,
+            );
+            page_ms.push(page);
+            complete_ms.push(complete);
+            scan_ms.push(scan);
+            page_reads.push(page_stats.texts_read as f64);
+            complete_reads.push(complete_stats.texts_read as f64);
+        }
+        for (name, mut values) in [
+            ("page ms", page_ms),
+            ("complete ms", complete_ms),
+            ("in-memory ms", scan_ms),
+            ("page reads", page_reads),
+            ("complete reads", complete_reads),
+        ] {
+            values.sort_by(f64::total_cmp);
+            eprintln!(
+                "{name}: p50 {:.2} p95 {:.2} max {:.2}",
+                percentile(&values, 0.5),
+                percentile(&values, 0.95),
+                values[values.len() - 1]
+            );
+        }
+    }
 }
