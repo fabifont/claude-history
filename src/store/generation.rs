@@ -597,7 +597,7 @@ fn collect(root: &Path, current: u64, existing: &[(u64, PathBuf)]) {
     }
 }
 
-fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(super) fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = File::create(path)?;
     file.write_all(bytes)?;
     file.sync_all()

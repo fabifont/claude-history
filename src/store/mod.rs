@@ -7,6 +7,8 @@
 
 pub mod card;
 pub mod generation;
+#[cfg_attr(not(test), allow(dead_code))]
+pub mod lexindex;
 
 pub use generation::{Generation, ProjectView, Publish};
 
