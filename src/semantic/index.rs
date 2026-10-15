@@ -622,7 +622,7 @@ mod tests {
     #[test]
     fn literal_filters_require_hit_local_text() {
         let mut first = conversation("/projects/project-a/session-a.jsonl", vec!["visible alpha"]);
-        first.full_text = "visible alpha conversation-level literal needle".to_string();
+        first.full_text = "visible alpha conversation-level literal needle".into();
         let conversations = vec![first];
         let all = candidates_from(&conversations);
         let literals = vec![Literal::new("literal needle".to_string())];
@@ -705,7 +705,7 @@ mod tests {
     fn literal_filter_no_match_is_not_empty_corpus() {
         let mut conversation =
             conversation("/projects/project-a/session-a.jsonl", vec!["visible alpha"]);
-        conversation.full_text = "missing literal".to_string();
+        conversation.full_text = "missing literal".into();
         let all = candidates_from(&[conversation]);
         let literals = vec![Literal::new("absent needle".to_string())];
         let query = "alpha".to_string();

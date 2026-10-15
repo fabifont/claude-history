@@ -490,7 +490,7 @@ pub fn process_conversation_reader<R: BufRead>(
     }
 
     // Normalize whitespace
-    let preview_first = normalize_whitespace(&preview_first);
+    let preview_first: std::sync::Arc<str> = normalize_whitespace(&preview_first).into();
     let preview_last = normalize_whitespace(&preview_last);
     let full_text = normalize_whitespace(&full_text);
     let agent_search_text = normalize_whitespace(&agent_search_parts.join(" "));
@@ -545,13 +545,13 @@ pub fn process_conversation_reader<R: BufRead>(
         timestamp,
         preview: preview_first.clone(),
         preview_first,
-        preview_last,
-        full_text,
-        agent_search_text,
-        semantic_route_text,
-        semantic_turns,
+        preview_last: preview_last.into(),
+        full_text: full_text.into(),
+        agent_search_text: agent_search_text.into(),
+        semantic_route_text: semantic_route_text.into(),
+        semantic_turns: semantic_turns.into(),
         semantic_turn_ranges,
-        search_text_lower,
+        search_text_lower: search_text_lower.into(),
         project_name: None,
         project_path: None,
         cwd: extracted_cwd,
@@ -1475,7 +1475,7 @@ mod tests {
             "Tool result should not be in semantic_turns: {:?}",
             conv.semantic_turns
         );
-        assert_eq!(conv.semantic_turns, vec!["run this", "Done"]);
+        assert_eq!(conv.semantic_turns.to_vec(), vec!["run this", "Done"]);
     }
 
     #[test]
@@ -1551,7 +1551,7 @@ mod tests {
         let semantic = conv.semantic_turns.join(" ");
 
         assert_eq!(
-            conv.semantic_turns,
+            conv.semantic_turns.to_vec(),
             vec![
                 "visible user semantic sentinel",
                 "visible mixed assistant semantic sentinel",
@@ -1617,7 +1617,7 @@ mod tests {
         assert!(conv.full_text.contains("local stdout payload"));
         assert!(conv.search_text_lower.contains("local stdout payload"));
         assert_eq!(
-            conv.semantic_turns,
+            conv.semantic_turns.to_vec(),
             vec![
                 "Real question",
                 "Real answer",
@@ -1648,7 +1648,7 @@ mod tests {
         assert!(!semantic.contains("<command-message>"));
         assert!(!semantic.contains("/goal"));
         assert_eq!(
-            conv.semantic_turns,
+            conv.semantic_turns.to_vec(),
             vec![
                 "Find conversations about semantic search",
                 "Relevant answer",
@@ -1674,7 +1674,7 @@ mod tests {
         assert!(conv.full_text.contains("cargo test"));
         assert!(conv.full_text.contains("Validation passed"));
         assert_eq!(
-            conv.semantic_turns,
+            conv.semantic_turns.to_vec(),
             vec![
                 "Implement semantic cache",
                 "I’ll run cargo test and just check before committing.",
@@ -1765,7 +1765,10 @@ mod tests {
 
         let conv = parse_jsonl(&content).unwrap().unwrap();
 
-        assert_eq!(conv.semantic_turns, vec!["question", "final", "next"]);
+        assert_eq!(
+            conv.semantic_turns.to_vec(),
+            vec!["question", "final", "next"]
+        );
         assert_eq!(
             conv.semantic_turn_ranges,
             vec![
@@ -1798,7 +1801,10 @@ mod tests {
 
         let conv = parse_jsonl(&content).unwrap().unwrap();
 
-        assert_eq!(conv.semantic_turns, vec!["question", "final", "next"]);
+        assert_eq!(
+            conv.semantic_turns.to_vec(),
+            vec!["question", "final", "next"]
+        );
         assert_eq!(
             conv.semantic_turn_ranges,
             vec![
@@ -1842,7 +1848,10 @@ mod tests {
 
         let conv = parse_jsonl(&content).unwrap().unwrap();
 
-        assert_eq!(conv.semantic_turns, vec!["question", "second final"]);
+        assert_eq!(
+            conv.semantic_turns.to_vec(),
+            vec!["question", "second final"]
+        );
         assert_eq!(
             conv.semantic_turn_ranges,
             vec![MessageRange::single(1), MessageRange::single(3)]
@@ -1861,7 +1870,7 @@ mod tests {
         let conv = parse_jsonl(&content).unwrap().unwrap();
 
         assert_eq!(
-            conv.semantic_turns,
+            conv.semantic_turns.to_vec(),
             vec!["first visible", "second visible", "third visible"]
         );
         assert_eq!(
@@ -1887,7 +1896,7 @@ mod tests {
         let conv = parse_jsonl(&content).unwrap().unwrap();
 
         assert_eq!(
-            conv.semantic_turns,
+            conv.semantic_turns.to_vec(),
             vec!["first visible", "final assistant text"]
         );
         assert_eq!(
@@ -1915,7 +1924,7 @@ mod tests {
         let conv = parse_jsonl(&content).unwrap().unwrap();
 
         assert_eq!(
-            conv.semantic_turns,
+            conv.semantic_turns.to_vec(),
             vec!["first visible", "final assistant text"]
         );
         assert_eq!(
@@ -1953,7 +1962,7 @@ mod tests {
         let conv = parse_jsonl(&content).unwrap().unwrap();
 
         assert_eq!(
-            conv.semantic_turns,
+            conv.semantic_turns.to_vec(),
             vec!["first visible", "final assistant text"]
         );
         assert_eq!(
@@ -1972,7 +1981,7 @@ mod tests {
 
         let conversation = parse_jsonl(&content).unwrap().unwrap();
         assert_eq!(conversation.message_count, 2);
-        assert_eq!(conversation.preview_first, "answer");
+        assert_eq!(&*conversation.preview_first, "answer");
         assert_eq!(
             conversation.semantic_turn_ranges,
             vec![MessageRange::single(2)]

@@ -464,7 +464,7 @@ fn literal_evidence_preview(
                     })
                 })
         })
-        .unwrap_or_else(|| conversation.preview.clone())
+        .unwrap_or_else(|| conversation.preview.to_string())
 }
 
 fn evidence_window(text: &str, range: (usize, usize)) -> String {
@@ -801,7 +801,10 @@ mod tests {
         assert_eq!(full_corpus[1].index, 1);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].index, 1);
-        assert_eq!(candidates[0].conversation.semantic_turns, vec!["visible"]);
+        assert_eq!(
+            candidates[0].conversation.semantic_turns.to_vec(),
+            vec!["visible"]
+        );
     }
 
     #[test]

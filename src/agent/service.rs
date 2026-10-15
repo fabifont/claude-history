@@ -11,6 +11,7 @@ use crate::semantic;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 type ResolvedReadRefs = Vec<(agent::refs::ReadRef, agent::refs::ResolvedConversation)>;
 
@@ -679,12 +680,13 @@ fn conversation_from_agent_transcript(
         })
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>();
-    let preview = message_text
+    let preview: Arc<str> = message_text
         .iter()
         .take(3)
         .cloned()
         .collect::<Vec<_>>()
-        .join(" ... ");
+        .join(" ... ")
+        .into();
     let preview_last = message_text
         .iter()
         .rev()
@@ -711,12 +713,12 @@ fn conversation_from_agent_transcript(
         timestamp,
         preview: preview.clone(),
         preview_first: preview,
-        preview_last,
-        search_text_lower: crate::search::normalize_for_search(&full_text),
-        full_text,
-        agent_search_text: String::new(),
-        semantic_route_text,
-        semantic_turns: Vec::new(),
+        preview_last: preview_last.into(),
+        search_text_lower: crate::search::normalize_for_search(&full_text).into(),
+        full_text: full_text.into(),
+        agent_search_text: Arc::from(""),
+        semantic_route_text: semantic_route_text.into(),
+        semantic_turns: Arc::new([]),
         semantic_turn_ranges: Vec::new(),
         project_name: None,
         project_path: None,
@@ -846,7 +848,7 @@ fn run_agent_semantic_hits(
             conversation: std::sync::Arc::new(stripped_semantic_conversation(
                 input.conversation,
                 input.conversation.path.clone(),
-                input.conversation.semantic_turns.clone(),
+                input.conversation.semantic_turns.to_vec(),
                 input.conversation.semantic_turn_ranges.clone(),
             )),
         });
@@ -878,7 +880,7 @@ pub(crate) fn agent_route_semantic_conversation(
             .or(conversation.summary.as_deref())?
             .to_string()
     } else {
-        conversation.semantic_route_text.clone()
+        conversation.semantic_route_text.to_string()
     };
     let file_name = conversation
         .path
@@ -910,15 +912,15 @@ fn stripped_semantic_conversation(
         path,
         index: conversation.index,
         timestamp: conversation.timestamp,
-        preview: String::new(),
-        preview_first: String::new(),
-        preview_last: String::new(),
-        full_text: String::new(),
-        agent_search_text: String::new(),
-        semantic_route_text: String::new(),
-        semantic_turns,
+        preview: Arc::from(""),
+        preview_first: Arc::from(""),
+        preview_last: Arc::from(""),
+        full_text: Arc::from(""),
+        agent_search_text: Arc::from(""),
+        semantic_route_text: Arc::from(""),
+        semantic_turns: semantic_turns.into(),
         semantic_turn_ranges,
-        search_text_lower: String::new(),
+        search_text_lower: Arc::from(""),
         project_name: None,
         project_path: None,
         cwd: None,
@@ -1199,7 +1201,7 @@ fn agent_semantic_conversation<'a>(
         )
     })?;
     conversation.path = conversation.path.with_file_name(file_name);
-    conversation.semantic_turns = semantic_turns;
+    conversation.semantic_turns = semantic_turns.into();
     conversation.semantic_turn_ranges = semantic_turn_ranges;
     Some(conversation)
 }
@@ -1631,9 +1633,10 @@ mod tests {
         .build();
         conversation.full_text =
             "calibration isolation and per-device capability memory from bounded tool evidence"
-                .to_string();
+                .to_string()
+                .into();
         conversation.semantic_route_text =
-            history::semantic_route_text(&conversation.full_text, "");
+            history::semantic_route_text(&conversation.full_text, "").into();
 
         let route = agent_route_semantic_conversation(&conversation).unwrap();
 

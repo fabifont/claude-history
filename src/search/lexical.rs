@@ -96,7 +96,7 @@ fn precompute_search_text_with(
 
 fn body_search_text_lower(conversation: &Conversation, include_agent_text: bool) -> String {
     if !include_agent_text || conversation.agent_search_text.is_empty() {
-        conversation.search_text_lower.clone()
+        conversation.search_text_lower.to_string()
     } else {
         format!(
             "{} {}",
@@ -861,7 +861,7 @@ mod tests {
     fn agent_search_text_includes_progress_without_polluting_full_text() {
         let now = Local::now();
         let mut conv = make_conv("visible dialogue", now);
-        conv.agent_search_text = "subagent_progress_needle".to_string();
+        conv.agent_search_text = "subagent_progress_needle".into();
         let convs = vec![conv];
         let normal_searchable = precompute_search_text(&convs);
         let agent_searchable = precompute_agent_search_text(&convs);
@@ -1095,7 +1095,7 @@ mod tests {
             None,
             now - Duration::hours(3),
         );
-        agent_conv.agent_search_text = "Subagent progress: cache warmup".to_string();
+        agent_conv.agent_search_text = "Subagent progress: cache warmup".into();
         let convs = vec![
             make_conv_full(
                 "error handling in the cache layer, error handling everywhere",

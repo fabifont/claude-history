@@ -27,6 +27,7 @@ pub(crate) use messages::{MessageOrdinals, Placement};
 use crate::error::{AppError, Result};
 use chrono::{DateTime, Local};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 // Re-export public API
@@ -107,18 +108,18 @@ pub struct Conversation {
     pub path: PathBuf,
     pub index: usize,
     pub timestamp: DateTime<Local>,
-    pub preview: String,
+    pub preview: Arc<str>,
     /// Preview showing first 3 messages (used when show_last=false)
-    pub preview_first: String,
+    pub preview_first: Arc<str>,
     /// Preview showing last 3 messages (used when show_last=true)
-    pub preview_last: String,
-    pub full_text: String,
-    pub agent_search_text: String,
-    pub semantic_route_text: String,
-    pub semantic_turns: Vec<String>,
+    pub preview_last: Arc<str>,
+    pub full_text: Arc<str>,
+    pub agent_search_text: Arc<str>,
+    pub semantic_route_text: Arc<str>,
+    pub semantic_turns: Arc<[String]>,
     pub semantic_turn_ranges: Vec<crate::agent::refs::MessageRange>,
     /// Pre-normalized lowercase search text (avoids re-normalizing on every startup)
-    pub search_text_lower: String,
+    pub search_text_lower: Arc<str>,
     pub project_name: Option<String>,
     pub project_path: Option<PathBuf>,
     /// The working directory extracted from the JSONL file (the actual cwd)

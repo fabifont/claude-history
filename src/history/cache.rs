@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CACHE_MAGIC: [u8; 8] = *b"CLHIST01";
@@ -264,14 +265,14 @@ pub fn entry_from_conversation(
         mtime_secs: duration_since_epoch.as_secs(),
         mtime_nsecs: duration_since_epoch.subsec_nanos(),
         is_empty: false,
-        preview_first: conv.preview_first.clone(),
-        preview_last: conv.preview_last.clone(),
-        full_text: conv.full_text.clone(),
-        agent_search_text: conv.agent_search_text.clone(),
-        semantic_route_text: conv.semantic_route_text.clone(),
-        semantic_turns: conv.semantic_turns.clone(),
+        preview_first: conv.preview_first.to_string(),
+        preview_last: conv.preview_last.to_string(),
+        full_text: conv.full_text.to_string(),
+        agent_search_text: conv.agent_search_text.to_string(),
+        semantic_route_text: conv.semantic_route_text.to_string(),
+        semantic_turns: conv.semantic_turns.to_vec(),
         semantic_turn_ranges: conv.semantic_turn_ranges.clone(),
-        search_text_lower: conv.search_text_lower.clone(),
+        search_text_lower: conv.search_text_lower.to_string(),
         cwd: conv.cwd.clone(),
         message_count: conv.message_count,
         parse_errors: conv
@@ -309,10 +310,12 @@ pub fn conversation_from_owned_entry(
         .timestamp_millis_opt(entry.timestamp_epoch_ms)
         .single()
         .unwrap_or_else(Local::now);
+    let preview_first: Arc<str> = entry.preview_first.into();
+    let preview_last: Arc<str> = entry.preview_last.into();
     let preview = if show_last {
-        entry.preview_last.clone()
+        preview_last.clone()
     } else {
-        entry.preview_first.clone()
+        preview_first.clone()
     };
     Conversation {
         source: super::Source::Claude,
@@ -325,14 +328,14 @@ pub fn conversation_from_owned_entry(
         index: 0,
         timestamp,
         preview,
-        preview_first: entry.preview_first,
-        preview_last: entry.preview_last,
-        full_text: entry.full_text,
-        agent_search_text: entry.agent_search_text,
-        semantic_route_text: entry.semantic_route_text,
-        semantic_turns: entry.semantic_turns,
+        preview_first,
+        preview_last,
+        full_text: entry.full_text.into(),
+        agent_search_text: entry.agent_search_text.into(),
+        semantic_route_text: entry.semantic_route_text.into(),
+        semantic_turns: entry.semantic_turns.into(),
         semantic_turn_ranges: entry.semantic_turn_ranges,
-        search_text_lower: entry.search_text_lower,
+        search_text_lower: entry.search_text_lower.into(),
         project_name: None,
         project_path: None,
         cwd: entry.cwd,
@@ -378,15 +381,15 @@ mod tests {
             path: PathBuf::from("/test/conv.jsonl"),
             index: 0,
             timestamp,
-            preview: "Hello world ... Hi there".to_string(),
-            preview_first: "Hello world ... Hi there".to_string(),
-            preview_last: "Hi there ... Hello world".to_string(),
-            full_text: "Hello world Hi there".to_string(),
-            agent_search_text: "subagent cache text".to_string(),
-            semantic_route_text: "semantic route text".to_string(),
-            semantic_turns: vec!["Hello world".to_string(), "Hi there".to_string()],
+            preview: "Hello world ... Hi there".into(),
+            preview_first: "Hello world ... Hi there".into(),
+            preview_last: "Hi there ... Hello world".into(),
+            full_text: "Hello world Hi there".into(),
+            agent_search_text: "subagent cache text".into(),
+            semantic_route_text: "semantic route text".into(),
+            semantic_turns: vec!["Hello world".to_string(), "Hi there".to_string()].into(),
             semantic_turn_ranges: vec![MessageRange::single(1), MessageRange::single(2)],
-            search_text_lower: normalize_for_search("Hello world Hi there"),
+            search_text_lower: normalize_for_search("Hello world Hi there").into(),
             project_name: Some("test-project".to_string()),
             project_path: Some(PathBuf::from("/test/project")),
             cwd: Some(PathBuf::from("/test/cwd")),
@@ -466,10 +469,10 @@ mod tests {
         let entry = entry_from_conversation(&conv, 100, mtime);
 
         let first = conversation_from_entry(&entry, PathBuf::new(), false);
-        assert_eq!(first.preview, "Hello world ... Hi there");
+        assert_eq!(&*first.preview, "Hello world ... Hi there");
 
         let last = conversation_from_entry(&entry, PathBuf::new(), true);
-        assert_eq!(last.preview, "Hi there ... Hello world");
+        assert_eq!(&*last.preview, "Hi there ... Hello world");
     }
 
     #[test]

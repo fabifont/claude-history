@@ -2720,15 +2720,15 @@ mod tests {
             path: PathBuf::from("/tmp/session.jsonl"),
             index: 0,
             timestamp: Local.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
-            preview: "lexical preview sentinel".to_string(),
-            preview_first: "lexical preview sentinel".to_string(),
-            preview_last: "lexical preview sentinel".to_string(),
-            full_text: "tool output sentinel summary sentinel cwd sentinel".to_string(),
-            agent_search_text: String::new(),
-            semantic_route_text: String::new(),
-            semantic_turns: vec!["semantic visible text".to_string()],
+            preview: "lexical preview sentinel".into(),
+            preview_first: "lexical preview sentinel".into(),
+            preview_last: "lexical preview sentinel".into(),
+            full_text: "tool output sentinel summary sentinel cwd sentinel".into(),
+            agent_search_text: "".into(),
+            semantic_route_text: "".into(),
+            semantic_turns: vec!["semantic visible text".to_string()].into(),
             semantic_turn_ranges: vec![crate::agent::refs::MessageRange::single(1)],
-            search_text_lower: "lexical preview sentinel".to_string(),
+            search_text_lower: "lexical preview sentinel".into(),
             project_name: Some("project sentinel".to_string()),
             project_path: None,
             cwd: Some(PathBuf::from("/cwd/sentinel")),
@@ -3357,9 +3357,9 @@ mod tests {
     #[test]
     fn lexical_unquoted_render_shows_cached_hidden_full_text_context() {
         let mut conversation = test_conversation();
-        conversation.preview = "visible lexical preview".to_string();
+        conversation.preview = "visible lexical preview".into();
         conversation.full_text =
-            format!("visible lexical preview {} hiddenneedle", "x ".repeat(200));
+            format!("visible lexical preview {} hiddenneedle", "x ".repeat(200)).into();
         let evidence = crate::search::build_lexical_evidence(
             &conversation,
             &ParsedQuery::parse("hiddenneedle"),
@@ -3388,9 +3388,9 @@ mod tests {
     #[test]
     fn lexical_quoted_render_shows_hidden_literal_context() {
         let mut conversation = test_conversation();
-        conversation.preview = "visible lexical preview".to_string();
+        conversation.preview = "visible lexical preview".into();
         conversation.full_text =
-            format!("visible lexical preview {} hidden_literal", "x ".repeat(80));
+            format!("visible lexical preview {} hidden_literal", "x ".repeat(80)).into();
         let mut app = App::new(
             vec![conversation],
             ToolDisplayMode::Truncated,
@@ -3416,11 +3416,12 @@ mod tests {
         // hides it in full_text (context line). Both must occupy four lines
         // so that click-to-row math stays aligned with what is drawn.
         let mut visible = test_conversation();
-        visible.preview = "preview with hidden_literal shown".to_string();
+        visible.preview = "preview with hidden_literal shown".into();
         visible.full_text = visible.preview.clone();
         let mut hidden = test_conversation();
-        hidden.preview = "visible lexical preview".to_string();
-        hidden.full_text = format!("visible lexical preview {} hidden_literal", "x ".repeat(80));
+        hidden.preview = "visible lexical preview".into();
+        hidden.full_text =
+            format!("visible lexical preview {} hidden_literal", "x ".repeat(80)).into();
         let mut app = App::new(
             vec![visible, hidden],
             ToolDisplayMode::Truncated,
@@ -3451,12 +3452,13 @@ mod tests {
     fn literal_query_click_uses_the_rendered_four_line_pitch() {
         let mut visible = test_conversation();
         visible.project_name = Some("visible-project".to_string());
-        visible.preview = "preview with hidden_literal shown".to_string();
+        visible.preview = "preview with hidden_literal shown".into();
         visible.full_text = visible.preview.clone();
         let mut hidden = test_conversation();
         hidden.project_name = Some("hidden-project".to_string());
-        hidden.preview = "visible lexical preview".to_string();
-        hidden.full_text = format!("visible lexical preview {} hidden_literal", "x ".repeat(80));
+        hidden.preview = "visible lexical preview".into();
+        hidden.full_text =
+            format!("visible lexical preview {} hidden_literal", "x ".repeat(80)).into();
         let mut app = App::new(
             vec![visible, hidden],
             ToolDisplayMode::Truncated,
@@ -3484,8 +3486,9 @@ mod tests {
     #[test]
     fn lexical_mixed_query_cached_context_uses_unquoted_and_literals() {
         let mut conversation = test_conversation();
-        conversation.preview = "visible preview".to_string();
-        conversation.full_text = format!("hidden_unquoted {} exact_literal", "x ".repeat(120));
+        conversation.preview = "visible preview".into();
+        conversation.full_text =
+            format!("hidden_unquoted {} exact_literal", "x ".repeat(120)).into();
         let evidence = crate::search::build_lexical_evidence(
             &conversation,
             &ParsedQuery::parse("hidden_unquoted \"exact_literal\""),
@@ -3519,8 +3522,7 @@ mod tests {
     #[test]
     fn semantic_list_shows_literal_context_when_evidence_lacks_literal() {
         let mut conversation = test_conversation();
-        conversation.full_text =
-            "tool output sentinel includes audio_generation literal".to_string();
+        conversation.full_text = "tool output sentinel includes audio_generation literal".into();
         let mut app = App::new_with_options(
             vec![conversation],
             ToolDisplayMode::Truncated,
@@ -3597,7 +3599,7 @@ mod tests {
     #[test]
     fn semantic_literal_context_requires_all_literals_visible() {
         let mut conversation = test_conversation();
-        conversation.full_text = "alpha_exact near preview. beta_exact hidden deeper.".to_string();
+        conversation.full_text = "alpha_exact near preview. beta_exact hidden deeper.".into();
         let mut app = App::new_with_options(
             vec![conversation],
             ToolDisplayMode::Truncated,

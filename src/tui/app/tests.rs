@@ -12,15 +12,15 @@ fn conversation(project: Option<&str>, project_dir: &str, uuid: &str, text: &str
         path: PathBuf::from(format!("/tmp/claude-projects/{project_dir}/{uuid}.jsonl")),
         index: 0,
         timestamp: Local.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap(),
-        preview: text.to_string(),
-        preview_first: text.to_string(),
-        preview_last: text.to_string(),
-        full_text: text.to_string(),
-        agent_search_text: String::new(),
-        semantic_route_text: String::new(),
-        semantic_turns: vec![text.to_string()],
+        preview: text.to_string().into(),
+        preview_first: text.to_string().into(),
+        preview_last: text.to_string().into(),
+        full_text: text.to_string().into(),
+        agent_search_text: "".into(),
+        semantic_route_text: "".into(),
+        semantic_turns: vec![text.to_string()].into(),
         semantic_turn_ranges: vec![crate::agent::refs::MessageRange::single(1)],
-        search_text_lower: search::normalize_for_search(text),
+        search_text_lower: search::normalize_for_search(text).into(),
         project_name: project.map(str::to_string),
         project_path: None,
         cwd: None,
@@ -732,7 +732,7 @@ fn semantic_dispatch_after_loading_keeps_snapshot_aligned() {
             _ => None,
         })
         .expect("semantic corpus");
-    assert_eq!(corpus[0].semantic_turns, vec!["needle"]);
+    assert_eq!(corpus[0].semantic_turns.to_vec(), vec!["needle"]);
 }
 
 #[test]
@@ -990,7 +990,7 @@ fn semantic_request_uses_live_conversations_not_stale_snapshot() {
         })
         .expect("semantic corpus");
     assert_eq!(corpus.len(), 1);
-    assert_eq!(corpus[0].semantic_turns, vec!["needle"]);
+    assert_eq!(corpus[0].semantic_turns.to_vec(), vec!["needle"]);
 }
 
 #[test]
