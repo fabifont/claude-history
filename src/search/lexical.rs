@@ -5,6 +5,7 @@ use crate::search::literal::{
 };
 use crate::search::query::ParsedQuery;
 pub use crate::text_match::normalize_for_search;
+use crate::text_match::truncate_on_char_boundary;
 use chrono::{DateTime, Duration, Local};
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -231,7 +232,7 @@ fn browse_debug_results(
         .collect()
 }
 
-fn identifier_literals(query: &str) -> Vec<Literal> {
+pub(crate) fn identifier_literals(query: &str) -> Vec<Literal> {
     query
         .split_whitespace()
         .filter(|term| term.contains('_'))
@@ -239,7 +240,7 @@ fn identifier_literals(query: &str) -> Vec<Literal> {
         .collect()
 }
 
-fn normalized_query_words(query: &str) -> String {
+pub(crate) fn normalized_query_words(query: &str) -> String {
     normalize_for_search(
         &query
             .split_whitespace()
@@ -313,14 +314,7 @@ fn search_debug_with_query(
         Some(build_literal_corpus(conversations))
     };
 
-    let adjacent_pairs: Vec<String> = if query_words.len() > 1 {
-        query_words
-            .windows(2)
-            .map(|w| format!("{} {}", w[0], w[1]))
-            .collect()
-    } else {
-        vec![]
-    };
+    let adjacent_pairs = adjacent_pairs(&query_words);
 
     let mut scored: Vec<(usize, ScoreDebug, DateTime<Local>)> = searchable
         .par_iter()
@@ -356,11 +350,30 @@ fn search_debug_with_query(
         .collect()
 }
 
+/// Bytes of the second word of a pair that adjacency compares, so the
+/// suffix index can count adjacent pairs from its terms.
+pub(crate) const PAIR_PREFIX: usize = 3;
+
+/// Strings whose word-start occurrences count as adjacent query words: each
+/// word, a space, and the first `PAIR_PREFIX` bytes of the next word.
+pub(crate) fn adjacent_pairs<S: AsRef<str>>(query_words: &[S]) -> Vec<String> {
+    query_words
+        .windows(2)
+        .map(|w| {
+            format!(
+                "{} {}",
+                w[0].as_ref(),
+                truncate_on_char_boundary(w[1].as_ref(), PAIR_PREFIX)
+            )
+        })
+        .collect()
+}
+
 /// Field weights for scoring
-const WEIGHT_TITLE: f64 = 5.0;
-const WEIGHT_SUMMARY: f64 = 3.0;
-const WEIGHT_PROJECT: f64 = 4.0;
-const WEIGHT_BODY: f64 = 1.0;
+pub(crate) const WEIGHT_TITLE: f64 = 5.0;
+pub(crate) const WEIGHT_SUMMARY: f64 = 3.0;
+pub(crate) const WEIGHT_PROJECT: f64 = 4.0;
+pub(crate) const WEIGHT_BODY: f64 = 1.0;
 
 /// Debug breakdown of a search score
 pub struct ScoreDebug {
@@ -449,7 +462,7 @@ fn score_impl(
         let mut word_details = Vec::new();
         for &qw in query_words {
             let tf = count_prefix_matches(field, qw, 10); // cap at 10
-            let ln_score = if tf > 0 { ((1 + tf) as f64).ln() } else { 0.0 };
+            let ln_score = tf_score(tf);
             field_tf_score += ln_score;
             word_details.push((qw.to_string(), tf, ln_score));
         }
@@ -462,7 +475,7 @@ fn score_impl(
         } else {
             0
         };
-        let weighted_adj = weight * 2.0 * adj_count as f64;
+        let weighted_adj = adjacency_score(weight, adj_count);
         base_score += weighted_adj;
 
         field_debugs.push(FieldDebug {
@@ -481,6 +494,16 @@ fn score_impl(
         freshness: fresh,
         fields: field_debugs,
     })
+}
+
+/// Log-saturated score of one query word's capped term frequency in a field.
+pub(crate) fn tf_score(tf: usize) -> f64 {
+    if tf > 0 { ((1 + tf) as f64).ln() } else { 0.0 }
+}
+
+/// Bonus for `count` adjacent query-word pairs in a field of `weight`.
+pub(crate) fn adjacency_score(weight: f64, count: usize) -> f64 {
+    weight * 2.0 * count as f64
 }
 
 /// Score with full debug breakdown. Returns None if Stage 1 rejects.
@@ -507,7 +530,7 @@ fn is_word_start(text: &str, pos: usize) -> bool {
 }
 
 /// Count prefix matches of `word` in `text`, up to `max_count`.
-fn count_prefix_matches(text: &str, word: &str, max_count: usize) -> usize {
+pub(crate) fn count_prefix_matches(text: &str, word: &str, max_count: usize) -> usize {
     let mut start = 0;
     let mut count = 0;
     while let Some(pos) = text[start..].find(word) {
@@ -525,7 +548,11 @@ fn count_prefix_matches(text: &str, word: &str, max_count: usize) -> usize {
 
 /// Count how many precomputed adjacent pairs appear in text.
 /// Returns count capped at `max_count`.
-fn count_adjacent_pairs(text: &str, adjacent_pairs: &[String], max_count: usize) -> usize {
+pub(crate) fn count_adjacent_pairs(
+    text: &str,
+    adjacent_pairs: &[String],
+    max_count: usize,
+) -> usize {
     let mut count = 0;
     for combined in adjacent_pairs {
         let mut start = 0;
@@ -545,7 +572,7 @@ fn count_adjacent_pairs(text: &str, adjacent_pairs: &[String], max_count: usize)
 
 /// Additive freshness bonus with continuous exponential decay.
 /// Max bonus: 2.0 (brand new), half-life: 7 days.
-fn freshness_bonus(timestamp: DateTime<Local>, now: DateTime<Local>) -> f64 {
+pub(crate) fn freshness_bonus(timestamp: DateTime<Local>, now: DateTime<Local>) -> f64 {
     let age = now.signed_duration_since(timestamp);
     if age < Duration::zero() {
         return 2.0; // future timestamp edge case

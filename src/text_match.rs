@@ -71,6 +71,18 @@ pub fn contains_prefix_match(text: &str, word: &str) -> bool {
     false
 }
 
+/// Returns `s` cut to at most `max` bytes on a char boundary.
+pub fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 pub fn contains_cjk(text: &str) -> bool {
     text.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c))
 }
