@@ -562,6 +562,7 @@ fn freshness_bonus(timestamp: DateTime<Local>, now: DateTime<Local>) -> f64 {
 mod tests {
     use super::*;
     use crate::search::test_fixtures::one_message_conversation;
+    use chrono::TimeZone;
 
     /// Create a test conversation with optional metadata.
     /// Rebuilds search_text_lower to match production behavior:
@@ -1080,6 +1081,148 @@ mod tests {
             1,
             "media and pipeline after punctuation must match"
         );
+    }
+
+    /// Pins the result set, order, and per-field scores of lexical search on a
+    /// fixture corpus that exercises the body/project boundary.
+    #[test]
+    fn score_impl_golden_results() {
+        let now = Local.timestamp_opt(1_760_000_000, 0).unwrap();
+        let mut agent_conv = make_conv_full(
+            "dialogue about tmux panes",
+            Some("tools/agent-runner"),
+            None,
+            None,
+            now - Duration::hours(3),
+        );
+        agent_conv.agent_search_text = "Subagent progress: cache warmup".to_string();
+        let convs = vec![
+            make_conv_full(
+                "error handling in the cache layer, error handling everywhere",
+                Some("workmux/cache-fix"),
+                Some("Error handling cleanup"),
+                Some("Refactor error paths"),
+                now - Duration::hours(2),
+            ),
+            make_conv_full(
+                "tmux session handling and window errors",
+                Some("dotfiles"),
+                None,
+                None,
+                now - Duration::days(3),
+            ),
+            make_conv_full(
+                "unrelated chat that mentions nothing",
+                Some("claude-history"),
+                None,
+                Some("Search ranking notes"),
+                now - Duration::days(10),
+            ),
+            make_conv_full(
+                "body ends with handling",
+                Some("error-reporter"),
+                None,
+                None,
+                now - Duration::days(1),
+            ),
+            make_conv_full(
+                "",
+                Some("tmux-config"),
+                None,
+                None,
+                now - Duration::days(40),
+            ),
+            make_conv_full(
+                "precache and subcache only as substrings",
+                Some("rust/cache"),
+                None,
+                None,
+                now - Duration::hours(30),
+            ),
+            make_conv_full(
+                "\u{6D4B}\u{8BD5} cache \u{4F1A}\u{8BDD}",
+                Some("\u{9879}\u{76EE}"),
+                None,
+                None,
+                now - Duration::days(5),
+            ),
+            make_conv_full("no project here cache cache", None, None, None, now),
+            agent_conv,
+        ];
+        let searchable = precompute_search_text(&convs);
+        let agent_searchable = precompute_agent_search_text(&convs);
+
+        let render = |debug: LexicalDebugSearch| {
+            debug
+                .results
+                .iter()
+                .map(|(index, score)| {
+                    let fields = score
+                        .fields
+                        .iter()
+                        .map(|field| {
+                            format!(
+                                "{}={:.4}+{:.4}",
+                                field.name, field.tf_score, field.adjacency_score
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("{index}:{:.4}[{fields}]", score.total)
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let queries = [
+            "error handling",
+            "tmux",
+            "cache",
+            "cache-fix",
+            "workmux cache",
+            "error reporter",
+            "handling error",
+            "dotfiles window",
+            "\u{6D4B}\u{8BD5} \u{9879}\u{76EE}",
+            "\u{9879}\u{76EE}",
+            "rust",
+            "\"error handling\"",
+            "error \"cache layer\"",
+            "warmup",
+        ];
+        let actual = queries
+            .iter()
+            .map(|query| {
+                format!(
+                    "{query} => {} | agent => {}",
+                    render(debug_search(&convs, &searchable, query, now, |_| true)),
+                    render(debug_agent_search(
+                        &convs,
+                        &agent_searchable,
+                        query,
+                        now,
+                        |_| true
+                    )),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let expected = [
+            "error handling => 0:29.9902[title=6.9315+10.0000,summary=2.0794+0.0000,project=0.0000+0.0000,body=2.9957+6.0000] 3:5.2772[project=2.7726+0.0000,body=0.6931+0.0000] 1:2.8723[project=0.0000+0.0000,body=1.3863+0.0000] | agent => 0:29.9902[title=6.9315+10.0000,summary=2.0794+0.0000,project=0.0000+0.0000,body=2.9957+6.0000] 3:5.2772[project=2.7726+0.0000,body=0.6931+0.0000] 1:2.8723[project=0.0000+0.0000,body=1.3863+0.0000]",
+            "tmux => 4:2.8107[project=2.7726+0.0000] 8:2.6685[project=0.0000+0.0000,body=0.6931+0.0000] 1:2.1791[project=0.0000+0.0000,body=0.6931+0.0000] | agent => 4:2.8107[project=2.7726+0.0000] 8:2.6685[project=0.0000+0.0000,body=0.6931+0.0000] 1:2.1791[project=0.0000+0.0000,body=0.6931+0.0000]",
+            "cache => 0:5.4493[title=0.0000+0.0000,summary=0.0000+0.0000,project=2.7726+0.0000,body=0.6931+0.0000] 5:4.5397[project=2.7726+0.0000,body=0.0000+0.0000] 7:3.0986[body=1.0986+0.0000] 6:1.9122[project=0.0000+0.0000,body=0.6931+0.0000] | agent => 0:5.4493[title=0.0000+0.0000,summary=0.0000+0.0000,project=2.7726+0.0000,body=0.6931+0.0000] 5:4.5397[project=2.7726+0.0000,body=0.0000+0.0000] 7:3.0986[body=1.0986+0.0000] 8:2.6685[project=0.0000+0.0000,body=0.6931+0.0000] 6:1.9122[project=0.0000+0.0000,body=0.6931+0.0000]",
+            "cache-fix => 0:16.2219[title=0.0000+0.0000,summary=0.0000+0.0000,project=5.5452+8.0000,body=0.6931+0.0000] | agent => 0:16.2219[title=0.0000+0.0000,summary=0.0000+0.0000,project=5.5452+8.0000,body=0.6931+0.0000]",
+            "workmux cache => 0:16.2219[title=0.0000+0.0000,summary=0.0000+0.0000,project=5.5452+8.0000,body=0.6931+0.0000] | agent => 0:16.2219[title=0.0000+0.0000,summary=0.0000+0.0000,project=5.5452+8.0000,body=0.6931+0.0000]",
+            "error reporter => 3:15.3566[project=5.5452+8.0000,body=0.0000+0.0000] | agent => 3:15.3566[project=5.5452+8.0000,body=0.0000+0.0000]",
+            "handling error => 0:13.9902[title=6.9315+0.0000,summary=2.0794+0.0000,project=0.0000+0.0000,body=2.9957+0.0000] 3:5.2772[project=2.7726+0.0000,body=0.6931+0.0000] 1:2.8723[project=0.0000+0.0000,body=1.3863+0.0000] | agent => 0:13.9902[title=6.9315+0.0000,summary=2.0794+0.0000,project=0.0000+0.0000,body=2.9957+0.0000] 3:5.2772[project=2.7726+0.0000,body=0.6931+0.0000] 1:2.8723[project=0.0000+0.0000,body=1.3863+0.0000]",
+            "dotfiles window => 1:4.9517[project=2.7726+0.0000,body=0.6931+0.0000] | agent => 1:4.9517[project=2.7726+0.0000,body=0.6931+0.0000]",
+            "测试 项目 => 6:4.6847[project=2.7726+0.0000,body=0.6931+0.0000] | agent => 6:4.6847[project=2.7726+0.0000,body=0.6931+0.0000]",
+            "项目 => 6:3.9916[project=2.7726+0.0000,body=0.0000+0.0000] | agent => 6:3.9916[project=2.7726+0.0000,body=0.0000+0.0000]",
+            "rust => 5:4.5397[project=2.7726+0.0000,body=0.0000+0.0000] | agent => 5:4.5397[project=2.7726+0.0000,body=0.0000+0.0000]",
+            "\"error handling\" => 0:1.9836[] | agent => 0:1.9836[]",
+            "error \"cache layer\" => 0:9.1382[title=3.4657+0.0000,summary=2.0794+0.0000,project=0.0000+0.0000,body=1.6094+0.0000] | agent => 0:9.1382[title=3.4657+0.0000,summary=2.0794+0.0000,project=0.0000+0.0000,body=1.6094+0.0000]",
+            "warmup =>  | agent => 8:2.6685[project=0.0000+0.0000,body=0.6931+0.0000]",
+        ];
+        assert_eq!(actual, expected);
     }
 
     #[test]
