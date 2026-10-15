@@ -457,6 +457,14 @@ impl App {
         self.semantic_search.error.as_deref()
     }
 
+    /// Replaces the whole query and dispatches a single search for it.
+    pub(crate) fn replace_query(&mut self, query: &str) {
+        self.query = query.to_string();
+        self.cursor_pos = self.query.chars().count();
+        self.clear_selection_anchor();
+        self.dispatch_search();
+    }
+
     #[cfg(test)]
     pub fn set_query_for_test(&mut self, query: &str) {
         self.query = query.to_string();

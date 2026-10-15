@@ -437,6 +437,16 @@ pub struct Args {
     )]
     pub debug_search: Option<String>,
 
+    /// Run the TUI startup path headlessly and print timing marks to stderr
+    #[arg(
+        long = "bench-startup",
+        value_name = "QUERY",
+        num_args = 0..=1,
+        default_missing_value = "error handling",
+        hide = true
+    )]
+    pub bench_startup: Option<String>,
+
     /// Debug semantic search matching for a query
     #[arg(
         long = "debug-semantic-search",

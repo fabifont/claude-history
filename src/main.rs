@@ -1,4 +1,5 @@
 mod agent;
+mod bench;
 mod claude;
 mod cli;
 mod config;
@@ -139,6 +140,7 @@ fn truncate_delete_empty_preview(preview: &str) -> String {
 
 fn run() -> Result<()> {
     let args = Args::parse();
+    bench::start(args.bench_startup.is_some());
 
     // Handle subcommands
     if let Some(command) = args.command {
@@ -156,6 +158,7 @@ fn run() -> Result<()> {
     // Detect terminal theme before entering raw mode / alternate screen,
     // as terminal_light queries the terminal for background color
     tui::theme::detect_theme();
+    bench::mark("theme");
 
     let config = config::load_config()?;
 
@@ -429,6 +432,19 @@ fn run() -> Result<()> {
         }
         other => other,
     };
+
+    if let Some(query) = args.bench_startup {
+        return tui::bench_startup(
+            show_last,
+            args.debug,
+            time_filter,
+            keys,
+            workspace_filter,
+            current_project_dir_name,
+            exclude_projects,
+            &query,
+        );
+    }
 
     let (conversations, selected_path) = match tui::run_with_loader(
         show_last,

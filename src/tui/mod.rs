@@ -10,5 +10,5 @@ pub mod viewer;
 
 pub use app::{Action, ListSearchMode, TuiSearchOptions};
 pub(crate) use command_tags::{parse_command_name, parse_command_name_and_args};
-pub use runtime::{run_single_file, run_with_loader};
+pub use runtime::{bench_startup, run_single_file, run_with_loader};
 pub use viewer::{RenderOptions, ToolDisplayMode, render_conversation};

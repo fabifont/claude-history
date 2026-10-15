@@ -211,6 +211,9 @@ pub fn run_with_loader(
         search_options,
     );
 
+    let mut reported_first_rows = false;
+    let mut report_load_done = false;
+
     loop {
         if let Some(rx) = loader_rx.take() {
             let mut keep_receiver = true;
@@ -260,6 +263,7 @@ pub fn run_with_loader(
                                 drop(guard);
                                 return Err(AppError::NoHistoryFound("selected scope".to_string()));
                             }
+                            report_load_done = true;
                         }
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -291,6 +295,14 @@ pub fn run_with_loader(
 
         let frame_state = prepare_frame(&mut app, &mut guard.terminal);
         draw_frame(&app, &mut guard.terminal)?;
+        if !reported_first_rows && app.filtered().len() >= BENCH_FIRST_ROWS {
+            crate::bench::mark("first_rows");
+            reported_first_rows = true;
+        }
+        if std::mem::take(&mut report_load_done) {
+            crate::bench::mark("load_done");
+            crate::bench::mark_peak_rss();
+        }
         if app.receive_search_results() {
             draw_frame(&app, &mut guard.terminal)?;
         }
@@ -400,6 +412,92 @@ pub fn run_single_file(
             EventLoopResult::Return(Some(_)) => {}
         }
     }
+}
+
+/// Rows that must be available before the list counts as populated.
+const BENCH_FIRST_ROWS: usize = 50;
+
+/// Runs the list startup path against an offscreen terminal and prints timing
+/// marks: first populated frame, loading finished, and results for `query`.
+#[allow(clippy::too_many_arguments)]
+pub fn bench_startup(
+    show_last: bool,
+    debug_level: Option<DebugLevel>,
+    time_filter: TimeFilter,
+    keys: KeyBindings,
+    workspace_filter: bool,
+    current_project_dir_name: Option<String>,
+    exclude_projects: Vec<String>,
+    query: &str,
+) -> Result<()> {
+    use crate::bench;
+    use ratatui::backend::TestBackend;
+
+    const WIDTH: u16 = 120;
+    const HEIGHT: u16 = 40;
+
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT))
+        .map_err(|e| AppError::Io(io::Error::other(e)))?;
+    let mut draw = |app: &App| {
+        terminal
+            .draw(|frame| ui::render(frame, app))
+            .map(|_| ())
+            .map_err(|e| AppError::Io(io::Error::other(e)))
+    };
+
+    let rx = crate::history::load_all_conversations_streaming(show_last, debug_level, time_filter);
+    let mut app = App::new_loading_with_options(
+        ToolDisplayMode::Hidden,
+        false,
+        keys,
+        workspace_filter,
+        current_project_dir_name,
+        exclude_projects,
+        TuiSearchOptions::default(),
+    );
+    draw(&app)?;
+    bench::mark("first_frame");
+
+    let mut first_rows = false;
+    for message in rx {
+        match message {
+            LoaderMessage::Fatal(err) => return Err(err),
+            LoaderMessage::ProjectError => {}
+            LoaderMessage::Batch(convs) => {
+                app.append_conversations(convs);
+                if !first_rows && app.filtered().len() >= BENCH_FIRST_ROWS {
+                    draw(&app)?;
+                    bench::mark("first_rows");
+                    first_rows = true;
+                }
+            }
+            LoaderMessage::Done => break,
+        }
+    }
+    bench::mark("load_received");
+
+    app.finish_loading();
+    draw(&app)?;
+    if !first_rows {
+        bench::mark("first_rows");
+    }
+    bench::mark("load_done");
+
+    app.replace_query(query);
+    while app.has_search_work_in_flight() {
+        if !app.receive_search_results() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    draw(&app)?;
+    bench::mark("search_ready");
+    eprintln!(
+        "bench conversations {} results {}",
+        app.conversations().len(),
+        app.filtered().len()
+    );
+    bench::mark_peak_rss();
+    Ok(())
 }
 
 #[cfg(test)]
