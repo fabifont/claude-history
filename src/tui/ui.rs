@@ -4,8 +4,8 @@ use crate::search::literal::{Literal, match_literal_ranges};
 use crate::search::normalize_for_search;
 use crate::search::query::ParsedQuery;
 use crate::tui::app::{
-    App, AppMode, DialogMode, ListSearchMode, LoadingState, SemanticResultMetadata, ViewSearchMode,
-    ViewState, list_lines_per_item,
+    App, AppMode, DialogMode, ListSearchMode, ReconcileState, SemanticResultMetadata,
+    ViewSearchMode, ViewState, list_lines_per_item,
 };
 use crate::tui::theme::{self, Theme};
 use crate::tui::viewer::{LineStyle, RenderedLine};
@@ -205,7 +205,13 @@ fn render_list_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let (action_key, action_label) = if is_loading {
+    // Rows can be opened before loading finishes, edited only after.
+    let (open_key, open_label) = if app.readiness().list {
+        (key_style, label_style)
+    } else {
+        (dim_key_style, dim_label_style)
+    };
+    let (edit_key, edit_label) = if is_loading {
         (dim_key_style, dim_label_style)
     } else {
         (key_style, label_style)
@@ -214,16 +220,16 @@ fn render_list_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let keys = app.keys();
     let mut spans = vec![
         Span::raw("  "),
-        Span::styled("Enter", action_key),
-        Span::styled(" open  ", action_label),
-        Span::styled(keys.resume.short_label(), action_key),
-        Span::styled(" resume  ", action_label),
-        Span::styled(keys.fork.short_label(), action_key),
-        Span::styled(" fork  ", action_label),
-        Span::styled(keys.rename.short_label(), action_key),
-        Span::styled(" rename  ", action_label),
-        Span::styled(keys.delete.short_label(), action_key),
-        Span::styled(" delete  ", action_label),
+        Span::styled("Enter", open_key),
+        Span::styled(" open  ", open_label),
+        Span::styled(keys.resume.short_label(), open_key),
+        Span::styled(" resume  ", open_label),
+        Span::styled(keys.fork.short_label(), open_key),
+        Span::styled(" fork  ", open_label),
+        Span::styled(keys.rename.short_label(), edit_key),
+        Span::styled(" rename  ", edit_label),
+        Span::styled(keys.delete.short_label(), edit_key),
+        Span::styled(" delete  ", edit_label),
     ];
 
     // Scope toggle (only when project context exists)
@@ -1056,9 +1062,9 @@ fn styled_span(text: &str, style: &LineStyle) -> Span<'static> {
 }
 
 fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let count_text = match app.loading_state() {
-        LoadingState::Loading { loaded } => format!("Loading... {}", loaded),
-        LoadingState::Ready => match app.selected() {
+    let count_text = match &app.readiness().reconcile {
+        ReconcileState::Running { loaded } => format!("Loading... {}", loaded),
+        ReconcileState::Done => match app.selected() {
             Some(selected) => format!("{}/{}", selected + 1, app.filtered().len()),
             None => format!("0/{}", app.filtered().len()),
         },

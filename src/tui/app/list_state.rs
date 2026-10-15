@@ -216,6 +216,49 @@ where
         .collect()
 }
 
+/// The workspace a card must belong to, resolved once per card walk.
+pub(super) struct WorkspaceScope<'a> {
+    project_dir_name: Option<&'a str>,
+    current_dir: Option<String>,
+}
+
+impl<'a> WorkspaceScope<'a> {
+    /// `project_dir_name` is `None` when the workspace filter is off.
+    pub(super) fn new(project_dir_name: Option<&'a str>) -> Self {
+        let current_dir = project_dir_name.and_then(|_| {
+            let current = std::env::current_dir().ok()?;
+            let current = current.canonicalize().unwrap_or(current);
+            Some(current.to_string_lossy().into_owned())
+        });
+        Self {
+            project_dir_name,
+            current_dir,
+        }
+    }
+}
+
+/// Card counterpart of `filter_conversation_indices`, decided per project.
+pub(super) fn card_project_visible(
+    project: &crate::store::ProjectView,
+    excluded_projects: &HashSet<String>,
+    workspace: &WorkspaceScope,
+) -> bool {
+    if project
+        .name
+        .is_some_and(|name| project_is_excluded(name, excluded_projects))
+    {
+        return false;
+    }
+    let Some(project_dir_name) = workspace.project_dir_name else {
+        return true;
+    };
+    if project.key_is_path {
+        workspace.current_dir.as_deref() == Some(project.workspace_key)
+    } else {
+        crate::history::path::is_same_project(project.workspace_key, project_dir_name)
+    }
+}
+
 fn project_is_excluded(project_name: &str, excluded_projects: &HashSet<String>) -> bool {
     excluded_projects.contains(project_name)
         || project_name

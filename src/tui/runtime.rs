@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stderr>>,
@@ -235,7 +235,7 @@ where
         && matches!(app.app_mode(), AppMode::List)
         && *app.dialog_mode() == DialogMode::None
         && key.code == KeyCode::Enter
-        && !app.is_loading()
+        && app.readiness().list
         && app.selected().is_some()
     {
         app.enter_view_mode(frame_state.content_width);
@@ -254,6 +254,8 @@ struct LoadState {
     active: bool,
     refresh_buffer: Option<Vec<Conversation>>,
     refresh_failed: bool,
+    /// Some project of the initial load failed, so it is not the full corpus.
+    initial_incomplete: bool,
 }
 
 impl LoadState {
@@ -276,6 +278,8 @@ impl LoadState {
             RuntimeEvent::Loader(LoaderMessage::ProjectError) => {
                 if self.refresh_buffer.is_some() {
                     self.refresh_failed = true;
+                } else {
+                    self.initial_incomplete = true;
                 }
             }
             RuntimeEvent::Loader(LoaderMessage::Batch(convs)) => {
@@ -315,6 +319,7 @@ impl LoadState {
                     app.set_status_message("Refresh failed; keeping existing sessions".to_string());
                     self.refresh_failed = false;
                 } else if app.is_loading() {
+                    self.initial_incomplete = true;
                     app.finish_loading();
                     if app.conversations().is_empty() {
                         return Err(AppError::NoHistoryFound("selected scope".to_string()));
@@ -324,6 +329,71 @@ impl LoadState {
             RuntimeEvent::Input(_) | RuntimeEvent::InputError(_) => {}
         }
         Ok(false)
+    }
+}
+
+/// Snapshot of the list on disk: read for the first frame, rewritten from
+/// the loaded corpus.
+struct SnapshotStore {
+    root: Option<PathBuf>,
+    writer: Option<JoinHandle<io::Result<crate::store::Publish>>>,
+}
+
+impl SnapshotStore {
+    fn new() -> Self {
+        Self {
+            root: crate::store::default_root(),
+            writer: None,
+        }
+    }
+
+    fn open(&self, show_last: bool, time_filter: TimeFilter) -> Option<crate::store::Snapshot> {
+        crate::store::Snapshot::open(self.root.as_deref()?, show_last, time_filter)
+    }
+
+    /// Writes the loaded corpus in the background. Only a complete load
+    /// outside any time window is the whole corpus, so nothing else is
+    /// written.
+    fn write(
+        &mut self,
+        app: &App,
+        load: &LoadState,
+        time_filter: TimeFilter,
+        loaded_since: SystemTime,
+    ) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        if load.initial_incomplete || time_filter.is_active() || self.writer.is_some() {
+            return;
+        }
+        let conversations = app.shared_conversations();
+        self.writer = std::thread::Builder::new()
+            .name("snapshot-writer".into())
+            .spawn(move || {
+                let result = crate::store::write_snapshot(&root, &conversations, loaded_since);
+                crate::bench::mark("snapshot_write");
+                result
+            })
+            .ok();
+    }
+
+    /// Waits for a pending write so it is not cut short by exiting.
+    fn finish(&mut self) -> Option<crate::store::Publish> {
+        self.writer
+            .take()?
+            .join()
+            .ok()?
+            .map_err(|err| {
+                let _ = debug_log::log_debug(&format!("Failed to write list snapshot: {err}"));
+            })
+            .ok()
+    }
+}
+
+impl Drop for SnapshotStore {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 
@@ -340,14 +410,12 @@ pub fn run_with_loader(
     exclude_projects: Vec<String>,
     search_options: TuiSearchOptions,
 ) -> Result<(Action, Arc<Vec<Conversation>>)> {
+    // Declared before the terminal so that exiting restores the terminal
+    // before waiting for a snapshot write.
+    let mut snapshot = SnapshotStore::new();
     let mut guard = TerminalGuard::new()?;
     let (events_tx, events_rx) = mpsc::channel();
     let _input = InputReader::spawn(events_tx.clone());
-    let mut load = LoadState::default();
-    load.start(
-        crate::history::load_all_conversations_streaming(show_last, debug_level, time_filter),
-        &events_tx,
-    );
     let mut app = App::new_loading_with_options(
         tool_display,
         show_thinking,
@@ -357,20 +425,32 @@ pub fn run_with_loader(
         exclude_projects,
         search_options,
     );
+    if let Some(cards) = snapshot.open(show_last, time_filter) {
+        app.show_snapshot(cards);
+    }
+    prepare_frame(&mut app, &mut guard.terminal);
+    draw_frame(&app, &mut guard.terminal)?;
+    let mut reported_first_rows = report_first_rows(&app);
 
-    let mut reported_first_rows = false;
+    let loaded_since = SystemTime::now();
+    let mut load = LoadState::default();
+    load.start(
+        crate::history::load_all_conversations_streaming(show_last, debug_level, time_filter),
+        &events_tx,
+    );
+
     let mut report_load_done = false;
 
     loop {
         let frame_state = prepare_frame(&mut app, &mut guard.terminal);
         draw_frame(&app, &mut guard.terminal)?;
-        if !reported_first_rows && app.filtered().len() >= BENCH_FIRST_ROWS {
-            crate::bench::mark("first_rows");
-            reported_first_rows = true;
+        if !reported_first_rows {
+            reported_first_rows = report_first_rows(&app);
         }
         if std::mem::take(&mut report_load_done) {
             crate::bench::mark("load_done");
             crate::bench::mark_peak_rss();
+            snapshot.write(&app, &load, time_filter, loaded_since);
         }
         if app.receive_search_results() {
             draw_frame(&app, &mut guard.terminal)?;
@@ -519,6 +599,16 @@ pub fn run_single_file(
 
 /// Rows that must be available before the list counts as populated.
 const BENCH_FIRST_ROWS: usize = 50;
+
+/// Marks `first_rows` once the drawn list shows the newest conversations:
+/// snapshot cards, or the sorted corpus after loading. Returns whether it did.
+fn report_first_rows(app: &App) -> bool {
+    let ready = app.readiness().list;
+    if ready {
+        crate::bench::mark("first_rows");
+    }
+    ready
+}
 
 /// Runs the list startup path against an offscreen terminal and prints timing
 /// marks: first populated frame, loading finished, and results for `query`.

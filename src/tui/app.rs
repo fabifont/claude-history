@@ -30,10 +30,14 @@ mod view_state;
 use search_state::{SearchCommand, SearchResponse, SemanticSearchState, spawn_search_worker};
 #[allow(unused_imports)]
 pub use types::{
-    Action, AppMode, DialogMode, LIST_LINES_PER_ITEM, ListSearchMode, LoadingState,
+    Action, AppMode, DialogMode, LIST_LINES_PER_ITEM, ListSearchMode, Readiness, ReconcileState,
     SemanticProgress, SemanticResultMetadata, TuiSearchOptions, ViewSearchMode, ViewState,
     list_lines_per_item,
 };
+
+/// Snapshot cards materialized for the list while loading. Bounded so the
+/// first frame costs the same whatever the corpus size.
+const SNAPSHOT_ROWS: usize = 500;
 
 /// App state
 pub struct App {
@@ -61,8 +65,12 @@ pub struct App {
     query: String,
     /// Cursor position in query (character index, not byte)
     cursor_pos: usize,
-    /// Loading state
-    loading_state: LoadingState,
+    /// Which parts of the list are usable
+    readiness: Readiness,
+    /// Snapshot whose cards are shown while loading
+    snapshot: Option<crate::store::Snapshot>,
+    /// Loaded conversations held back while snapshot cards are shown
+    pending: Option<Vec<Conversation>>,
     /// Current dialog overlay (confirm, menu)
     dialog_mode: DialogMode,
     /// Main app mode (list or view)
@@ -107,7 +115,7 @@ struct AppParts {
     searchable: Arc<Vec<SearchableConversation>>,
     filtered: Vec<usize>,
     selected: Option<usize>,
-    loading_state: LoadingState,
+    readiness: Readiness,
     app_mode: AppMode,
     tool_display: ToolDisplayMode,
     show_thinking: bool,
@@ -137,7 +145,9 @@ impl App {
             selection_anchor: None,
             query: String::new(),
             cursor_pos: 0,
-            loading_state: parts.loading_state,
+            readiness: parts.readiness,
+            snapshot: None,
+            pending: None,
             dialog_mode: DialogMode::None,
             app_mode: parts.app_mode,
             status_message: None,
@@ -226,7 +236,7 @@ impl App {
             searchable,
             filtered,
             selected,
-            loading_state: LoadingState::Ready,
+            readiness: Readiness::ready(),
             app_mode: AppMode::List,
             tool_display,
             show_thinking,
@@ -260,7 +270,7 @@ impl App {
             searchable: Arc::default(),
             filtered: Vec::new(),
             selected: None,
-            loading_state: LoadingState::Loading { loaded: 0 },
+            readiness: Readiness::default(),
             app_mode: AppMode::List,
             tool_display,
             show_thinking,
@@ -308,7 +318,7 @@ impl App {
             searchable: Arc::default(),
             filtered,
             selected,
-            loading_state: LoadingState::Ready,
+            readiness: Readiness::ready(),
             app_mode: AppMode::View(ViewState::initial(
                 path,
                 tool_display,
@@ -334,9 +344,43 @@ impl App {
         &self.keys
     }
 
+    /// Shows the newest cards of `snapshot` until loading finishes. Loaded
+    /// batches are held back meanwhile and swapped in by `finish_loading`.
+    pub fn show_snapshot(&mut self, snapshot: crate::store::Snapshot) {
+        self.snapshot = Some(snapshot);
+        self.pending = Some(Vec::new());
+        self.show_snapshot_cards();
+    }
+
+    /// Re-reads the snapshot cards for the current scope.
+    fn show_snapshot_cards(&mut self) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let workspace = list_state::WorkspaceScope::new(
+            self.current_project_dir_name
+                .as_deref()
+                .filter(|_| self.workspace_filter),
+        );
+        let cards = snapshot.conversations(SNAPSHOT_ROWS, |project| {
+            list_state::card_project_visible(project, &self.excluded_projects, &workspace)
+        });
+        let filtered = (0..cards.len()).collect();
+        self.conversations = Arc::new(cards);
+        self.apply_filtered(filtered);
+        self.readiness.list = true;
+    }
+
     /// Append a batch of conversations during loading
     /// Note: Does NOT precompute search text - that's deferred to finish_loading
     pub fn append_conversations(&mut self, new_convs: Vec<Conversation>) {
+        if let Some(pending) = &mut self.pending {
+            pending.extend(new_convs);
+            self.readiness.reconcile = ReconcileState::Running {
+                loaded: pending.len(),
+            };
+            return;
+        }
         let start_idx = self.conversations.len();
         Arc::make_mut(&mut self.conversations).extend(new_convs);
         let end_idx = self.conversations.len();
@@ -349,14 +393,23 @@ impl App {
             self.selected = Some(0);
         }
 
-        // Update loading count
-        self.loading_state = LoadingState::Loading {
+        self.readiness.reconcile = ReconcileState::Running {
             loaded: self.conversations.len(),
         };
     }
 
-    /// Mark loading as complete: sort, precompute search, and transition to Ready
+    /// Mark loading as complete: sort, precompute search, and transition to
+    /// ready. Replaces any snapshot cards, keeping the selected session.
     pub fn finish_loading(&mut self) {
+        if let Some(loaded) = self.pending.take() {
+            self.snapshot = None;
+            if self.selection_anchor.is_none() {
+                self.selection_anchor = self.get_selected_path();
+            }
+            self.conversations = Arc::new(loaded);
+            self.filtered.clear();
+            self.selected = None;
+        }
         let conversations = Arc::make_mut(&mut self.conversations);
 
         // Sort all conversations by timestamp (newest first)
@@ -370,14 +423,18 @@ impl App {
         // Precompute search text and share it with the background workers
         self.refresh_search_data();
 
-        self.loading_state = LoadingState::Ready;
+        self.readiness = Readiness::ready();
 
-        // Apply filter (handles query, exclusions, and workspace filter)
-        self.update_filter();
-        if self.list_search_mode == ListSearchMode::Semantic && !self.query.trim().is_empty() {
-            self.dispatch_search();
-        } else {
+        if self.query.trim().is_empty() {
+            // Apply filter (handles exclusions and workspace filter)
+            self.update_filter();
             self.prewarm_semantic_cache();
+        } else {
+            // Keep the list populated until the worker answers the query.
+            let anchor = self.selection_anchor.clone();
+            self.apply_filtered(self.filter_indices(0..self.conversations.len()));
+            self.selection_anchor = anchor;
+            self.dispatch_search();
         }
     }
 
@@ -419,12 +476,17 @@ impl App {
         self.conversations
     }
 
-    pub fn loading_state(&self) -> &LoadingState {
-        &self.loading_state
+    pub fn readiness(&self) -> &Readiness {
+        &self.readiness
     }
 
+    /// Whether the full corpus is still loading, so queries and edits wait.
     pub fn is_loading(&self) -> bool {
-        matches!(self.loading_state, LoadingState::Loading { .. })
+        !self.readiness.lexical
+    }
+
+    pub(crate) fn shared_conversations(&self) -> Arc<Vec<Conversation>> {
+        self.conversations.clone()
     }
 
     // Getters for UI access
@@ -528,7 +590,7 @@ impl App {
     pub fn handle_list_click(&mut self, row: u16, frame_area: Rect) -> bool {
         if !matches!(self.app_mode, AppMode::List)
             || self.dialog_mode != DialogMode::None
-            || self.is_loading()
+            || !self.readiness.list
         {
             return false;
         }
@@ -579,3 +641,6 @@ mod tests;
 
 #[cfg(test)]
 mod interaction_tests;
+
+#[cfg(test)]
+mod snapshot_tests;

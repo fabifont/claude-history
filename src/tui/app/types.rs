@@ -191,11 +191,42 @@ pub struct SemanticResultMetadata {
     pub explanation: SemanticExplanation,
 }
 
-/// Loading state for the TUI
-#[derive(Clone, Debug)]
-pub enum LoadingState {
-    /// Still loading conversations
-    Loading { loaded: usize },
-    /// All conversations loaded and ready
-    Ready,
+/// Which parts of the list are usable. Each part becomes ready on its own.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Readiness {
+    /// Rows are shown newest first and can be opened, resumed and forked.
+    /// They are snapshot cards until loading finishes.
+    pub list: bool,
+    /// Lexical queries run against the loaded corpus.
+    pub lexical: bool,
+    /// Progress of loading conversations from native history.
+    pub reconcile: ReconcileState,
+    /// The semantic worker can rank the loaded corpus.
+    pub semantic: bool,
+}
+
+impl Readiness {
+    pub fn ready() -> Self {
+        Self {
+            list: true,
+            lexical: true,
+            reconcile: ReconcileState::Done,
+            semantic: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReconcileState {
+    /// Loading; `loaded` conversations have arrived so far.
+    Running {
+        loaded: usize,
+    },
+    Done,
+}
+
+impl Default for ReconcileState {
+    fn default() -> Self {
+        Self::Running { loaded: 0 }
+    }
 }

@@ -349,7 +349,7 @@ impl App {
     pub(super) fn prewarm_semantic_cache(&mut self) {
         if self.list_search_mode == ListSearchMode::Semantic
             && self.query.trim().is_empty()
-            && !self.is_loading()
+            && self.readiness.semantic
         {
             self.dispatch_semantic_search(String::new(), true);
         }
@@ -569,7 +569,11 @@ impl App {
             self.workspace_filter = !self.workspace_filter;
             self.semantic_sent_scope_signature = None;
             self.invalidate_search_generation();
-            if self.list_search_mode == ListSearchMode::Semantic && !self.query.trim().is_empty() {
+            if self.snapshot.is_some() {
+                self.show_snapshot_cards();
+            } else if self.list_search_mode == ListSearchMode::Semantic
+                && !self.query.trim().is_empty()
+            {
                 self.dispatch_search();
             } else {
                 self.update_filter();

@@ -163,7 +163,7 @@ impl App {
         }
 
         if self.keys.delete.matches(code, modifiers) {
-            if !self.single_file_mode {
+            if !self.single_file_mode && !self.is_loading() {
                 self.dialog_mode = DialogMode::ConfirmDelete;
             }
             return None;
@@ -438,6 +438,19 @@ impl App {
         viewport_height: usize,
     ) -> Option<Action> {
         if self.is_loading() {
+            // Snapshot rows can be opened, resumed and forked; deleting and
+            // renaming wait for the loaded corpus.
+            if self.readiness.list {
+                if self.keys.resume.matches(code, modifiers) {
+                    return self.get_selected_path().map(Action::Resume);
+                }
+                if self.keys.fork.matches(code, modifiers) {
+                    return self.get_selected_path().map(Action::ForkResume);
+                }
+                if code == KeyCode::Char('o') && modifiers.contains(KeyModifiers::CONTROL) {
+                    return self.get_selected_path().map(Action::Select);
+                }
+            }
             return self.handle_common_list_key(code, modifiers, false);
         }
 
