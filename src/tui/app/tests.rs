@@ -771,8 +771,8 @@ fn semantic_search_worker_returns_lexical_fallback() {
     );
     let (tx, rx) = spawn_search_worker();
     tx.send(SearchCommand::UpdateData {
-        conversations: app.conversations_snapshot.clone(),
-        searchable: Arc::new(app.searchable.clone()),
+        conversations: app.conversations.clone(),
+        searchable: app.searchable.clone(),
     })
     .unwrap();
     tx.send(SearchCommand::Search {
@@ -959,7 +959,7 @@ fn semantic_mode_prewarms_cache_without_query() {
 }
 
 #[test]
-fn semantic_request_uses_live_conversations_not_stale_snapshot() {
+fn semantic_request_sends_live_conversations() {
     let mut app = app_with_options(
         vec![conversation(
             Some("Visible"),
@@ -972,7 +972,6 @@ fn semantic_request_uses_live_conversations_not_stale_snapshot() {
             default_mode: ListSearchMode::Semantic,
         },
     );
-    app.conversations_snapshot = Arc::new(Vec::new());
     let (request_tx, request_rx) = mpsc::channel();
     let (_response_tx, response_rx) = mpsc::channel();
     app.semantic_search.worker_tx = Some(request_tx);

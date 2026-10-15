@@ -1,5 +1,6 @@
 use super::{Action, App, AppMode, DialogMode};
 use crossterm::event::{KeyCode, KeyModifiers};
+use std::sync::Arc;
 
 const EXPORT_OPTIONS: [&str; 4] = [
     "Ledger (formatted)",
@@ -221,7 +222,7 @@ impl App {
                 conv.index = idx;
                 conv.project_name = self.conversations[idx].project_name.clone();
                 conv.project_path = self.conversations[idx].project_path.clone();
-                self.conversations[idx] = conv;
+                Arc::make_mut(&mut self.conversations)[idx] = conv;
                 self.dialog_mode = DialogMode::None;
                 self.status_message =
                     Some(("Session renamed".to_string(), std::time::Instant::now()));

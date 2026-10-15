@@ -656,28 +656,25 @@ impl App {
         conv.project_path = Some(project_path);
 
         let idx = self.conversations.len();
-        self.conversations.push(conv);
-
-        self.searchable = search::precompute_search_text(&self.conversations);
-        self.conversations_snapshot = Arc::new(self.conversations.clone());
-        self.rebuild_semantic_conversations_snapshot();
-
-        let _ = self.search_tx.send(SearchCommand::UpdateData {
-            conversations: self.conversations_snapshot.clone(),
-            searchable: Arc::new(self.searchable.clone()),
-        });
+        Arc::make_mut(&mut self.conversations).push(conv);
+        self.send_search_data();
 
         Some(idx)
     }
 
     pub(super) fn refresh_search_data(&mut self) {
-        self.conversations_snapshot = Arc::new(self.conversations.clone());
-        self.rebuild_semantic_conversations_snapshot();
-        self.searchable = search::precompute_search_text(&self.conversations);
-        let _ = self.search_tx.send(SearchCommand::UpdateData {
-            conversations: self.conversations_snapshot.clone(),
-            searchable: Arc::new(self.searchable.clone()),
-        });
+        self.send_search_data();
         self.invalidate_search_generation();
+    }
+
+    /// Rebuilds search data for the current corpus and shares it with the
+    /// background workers.
+    fn send_search_data(&mut self) {
+        self.rebuild_semantic_conversations_snapshot();
+        self.searchable = Arc::new(search::precompute_search_text(&self.conversations));
+        let _ = self.search_tx.send(SearchCommand::UpdateData {
+            conversations: self.conversations.clone(),
+            searchable: self.searchable.clone(),
+        });
     }
 }

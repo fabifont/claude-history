@@ -15,6 +15,7 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
 use std::io::{self, Stderr};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 struct TerminalGuard {
@@ -192,7 +193,7 @@ pub fn run_with_loader(
     current_project_dir_name: Option<String>,
     exclude_projects: Vec<String>,
     search_options: TuiSearchOptions,
-) -> Result<(Action, Vec<Conversation>)> {
+) -> Result<(Action, Arc<Vec<Conversation>>)> {
     let mut guard = TerminalGuard::new()?;
     let mut loader_rx = Some(crate::history::load_all_conversations_streaming(
         show_last,

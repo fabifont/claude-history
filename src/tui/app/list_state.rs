@@ -2,6 +2,7 @@ use super::App;
 use crate::history::Conversation;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 impl App {
     pub(super) fn filter_indices<I>(&self, indices: I) -> Vec<usize>
@@ -138,9 +139,9 @@ impl App {
             return;
         };
 
-        self.conversations.remove(conv_idx);
+        Arc::make_mut(&mut self.conversations).remove(conv_idx);
 
-        self.searchable.retain_mut(|s| {
+        Arc::make_mut(&mut self.searchable).retain_mut(|s| {
             if s.index == conv_idx {
                 false
             } else {

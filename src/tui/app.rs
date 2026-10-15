@@ -37,10 +37,8 @@ pub use types::{
 
 /// App state
 pub struct App {
-    /// All loaded conversations
-    conversations: Vec<Conversation>,
-    /// Shared search data snapshot for background workers
-    conversations_snapshot: Arc<Vec<Conversation>>,
+    /// All loaded conversations, shared with the search worker
+    conversations: Arc<Vec<Conversation>>,
     /// Shared semantic conversation snapshot for background workers
     semantic_conversations_snapshot: Arc<Vec<Arc<Conversation>>>,
     /// Version of the semantic corpus snapshot
@@ -51,8 +49,8 @@ pub struct App {
     semantic_sent_corpus_version: u64,
     /// Last scope signature sent to the semantic worker
     semantic_sent_scope_signature: Option<(u64, Arc<Vec<usize>>)>,
-    /// Precomputed search data
-    searchable: Vec<SearchableConversation>,
+    /// Precomputed search data, shared with the search worker
+    searchable: Arc<Vec<SearchableConversation>>,
     /// Indices into conversations, sorted by current score
     filtered: Vec<usize>,
     /// Currently selected index into filtered (None if no results)
@@ -104,10 +102,9 @@ pub struct App {
 }
 
 struct AppParts {
-    conversations: Vec<Conversation>,
-    conversations_snapshot: Arc<Vec<Conversation>>,
+    conversations: Arc<Vec<Conversation>>,
     semantic_conversations_snapshot: Arc<Vec<Arc<Conversation>>>,
-    searchable: Vec<SearchableConversation>,
+    searchable: Arc<Vec<SearchableConversation>>,
     filtered: Vec<usize>,
     selected: Option<usize>,
     loading_state: LoadingState,
@@ -128,7 +125,6 @@ struct AppParts {
 impl App {
     fn from_parts(parts: AppParts) -> Self {
         Self {
-            conversations_snapshot: parts.conversations_snapshot,
             semantic_conversations_snapshot: parts.semantic_conversations_snapshot,
             semantic_corpus_version: 1,
             semantic_scope_version: 0,
@@ -163,23 +159,8 @@ impl App {
         }
     }
 
-    fn conversation_snapshot(conversations: &[Conversation]) -> Arc<Vec<Conversation>> {
-        Arc::new(conversations.to_vec())
-    }
-
     fn semantic_snapshot(conversations: &[Conversation]) -> Arc<Vec<Arc<Conversation>>> {
         Arc::new(conversations.iter().cloned().map(Arc::new).collect())
-    }
-
-    fn send_initial_search_data(
-        search_tx: &mpsc::Sender<SearchCommand>,
-        conversations: Arc<Vec<Conversation>>,
-        searchable: &[SearchableConversation],
-    ) {
-        let _ = search_tx.send(SearchCommand::UpdateData {
-            conversations,
-            searchable: Arc::new(searchable.to_vec()),
-        });
     }
 
     fn list_search_mode_from_options(search_options: TuiSearchOptions) -> ListSearchMode {
@@ -221,7 +202,7 @@ impl App {
         exclude_projects: Vec<String>,
         search_options: TuiSearchOptions,
     ) -> Self {
-        let searchable = search::precompute_search_text(&conversations);
+        let searchable = Arc::new(search::precompute_search_text(&conversations));
         let excluded_projects = exclude_projects.into_iter().collect();
         let filtered = list_state::filter_conversation_indices(
             0..conversations.len(),
@@ -232,13 +213,15 @@ impl App {
         );
         let selected = if filtered.is_empty() { None } else { Some(0) };
         let (search_tx, search_rx) = spawn_search_worker();
-        let conversations_snapshot = Self::conversation_snapshot(&conversations);
-
-        Self::send_initial_search_data(&search_tx, conversations_snapshot.clone(), &searchable);
+        let semantic_conversations_snapshot = Self::semantic_snapshot(&conversations);
+        let conversations = Arc::new(conversations);
+        let _ = search_tx.send(SearchCommand::UpdateData {
+            conversations: conversations.clone(),
+            searchable: searchable.clone(),
+        });
 
         Self::from_parts(AppParts {
-            conversations_snapshot,
-            semantic_conversations_snapshot: Self::semantic_snapshot(&conversations),
+            semantic_conversations_snapshot,
             conversations,
             searchable,
             filtered,
@@ -269,14 +252,12 @@ impl App {
         exclude_projects: Vec<String>,
         search_options: TuiSearchOptions,
     ) -> Self {
-        let conversations = Vec::new();
         let (search_tx, search_rx) = spawn_search_worker();
 
         Self::from_parts(AppParts {
-            conversations_snapshot: Self::conversation_snapshot(&conversations),
-            semantic_conversations_snapshot: Self::semantic_snapshot(&conversations),
-            conversations,
-            searchable: Vec::new(),
+            semantic_conversations_snapshot: Arc::default(),
+            conversations: Arc::default(),
+            searchable: Arc::default(),
             filtered: Vec::new(),
             selected: None,
             loading_state: LoadingState::Loading { loaded: 0 },
@@ -322,10 +303,9 @@ impl App {
         }
 
         Self::from_parts(AppParts {
-            conversations_snapshot: Self::conversation_snapshot(&conversations),
             semantic_conversations_snapshot: Self::semantic_snapshot(&conversations),
-            conversations,
-            searchable: Vec::new(),
+            conversations: Arc::new(conversations),
+            searchable: Arc::default(),
             filtered,
             selected,
             loading_state: LoadingState::Ready,
@@ -358,7 +338,7 @@ impl App {
     /// Note: Does NOT precompute search text - that's deferred to finish_loading
     pub fn append_conversations(&mut self, new_convs: Vec<Conversation>) {
         let start_idx = self.conversations.len();
-        self.conversations.extend(new_convs);
+        Arc::make_mut(&mut self.conversations).extend(new_convs);
         let end_idx = self.conversations.len();
 
         let new_filtered = self.filter_indices(start_idx..end_idx);
@@ -377,30 +357,20 @@ impl App {
 
     /// Mark loading as complete: sort, precompute search, and transition to Ready
     pub fn finish_loading(&mut self) {
+        let conversations = Arc::make_mut(&mut self.conversations);
+
         // Sort all conversations by timestamp (newest first)
-        self.conversations
-            .sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
         // Reindex after sorting
-        for (idx, conv) in self.conversations.iter_mut().enumerate() {
+        for (idx, conv) in conversations.iter_mut().enumerate() {
             conv.index = idx;
         }
 
-        self.conversations_snapshot = Arc::new(self.conversations.clone());
-        self.rebuild_semantic_conversations_snapshot();
-
-        // Now precompute search text (only once, at the end)
-        self.searchable = search::precompute_search_text(&self.conversations);
-
-        // Send data snapshot to the background search worker
-        let _ = self.search_tx.send(SearchCommand::UpdateData {
-            conversations: self.conversations_snapshot.clone(),
-            searchable: Arc::new(self.searchable.clone()),
-        });
+        // Precompute search text and share it with the background workers
+        self.refresh_search_data();
 
         self.loading_state = LoadingState::Ready;
-
-        self.invalidate_search_generation();
 
         // Apply filter (handles query, exclusions, and workspace filter)
         self.update_filter();
@@ -427,7 +397,7 @@ impl App {
         }
 
         self.selection_anchor = self.get_selected_path();
-        self.conversations = conversations;
+        self.conversations = Arc::new(conversations);
         self.filtered.clear();
         self.selected = None;
         self.refresh_search_data();
@@ -445,7 +415,7 @@ impl App {
     }
 
     /// Consume the app and return its conversations
-    pub fn into_conversations(self) -> Vec<Conversation> {
+    pub fn into_conversations(self) -> Arc<Vec<Conversation>> {
         self.conversations
     }
 
