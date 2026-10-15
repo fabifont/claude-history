@@ -597,9 +597,6 @@ pub fn run_single_file(
     }
 }
 
-/// Rows that must be available before the list counts as populated.
-const BENCH_FIRST_ROWS: usize = 50;
-
 /// Marks `first_rows` once the drawn list shows the newest conversations:
 /// snapshot cards, or the sorted corpus after loading. Returns whether it did.
 fn report_first_rows(app: &App) -> bool {
@@ -638,7 +635,7 @@ pub fn bench_startup(
             .map_err(|e| AppError::Io(io::Error::other(e)))
     };
 
-    let rx = crate::history::load_all_conversations_streaming(show_last, debug_level, time_filter);
+    let mut snapshot = SnapshotStore::new();
     let mut app = App::new_loading_with_options(
         ToolDisplayMode::Hidden,
         false,
@@ -648,22 +645,22 @@ pub fn bench_startup(
         exclude_projects,
         TuiSearchOptions::default(),
     );
+    if let Some(cards) = snapshot.open(show_last, time_filter) {
+        eprintln!("bench generation {}", cards.generation_name());
+        app.show_snapshot(cards);
+    }
     draw(&app)?;
     bench::mark("first_frame");
+    let first_rows = report_first_rows(&app);
 
-    let mut first_rows = false;
+    let loaded_since = SystemTime::now();
+    let rx = crate::history::load_all_conversations_streaming(show_last, debug_level, time_filter);
+    let mut load = LoadState::default();
     for message in rx {
         match message {
             LoaderMessage::Fatal(err) => return Err(err),
-            LoaderMessage::ProjectError => {}
-            LoaderMessage::Batch(convs) => {
-                app.append_conversations(convs);
-                if !first_rows && app.filtered().len() >= BENCH_FIRST_ROWS {
-                    draw(&app)?;
-                    bench::mark("first_rows");
-                    first_rows = true;
-                }
-            }
+            LoaderMessage::ProjectError => load.initial_incomplete = true,
+            LoaderMessage::Batch(convs) => app.append_conversations(convs),
             LoaderMessage::Done => break,
         }
     }
@@ -672,9 +669,10 @@ pub fn bench_startup(
     app.finish_loading();
     draw(&app)?;
     if !first_rows {
-        bench::mark("first_rows");
+        report_first_rows(&app);
     }
     bench::mark("load_done");
+    snapshot.write(&app, &load, time_filter, loaded_since);
 
     app.replace_query(query);
     while app.has_search_work_in_flight() {
@@ -689,6 +687,9 @@ pub fn bench_startup(
         app.conversations().len(),
         app.filtered().len()
     );
+    if let Some(outcome) = snapshot.finish() {
+        eprintln!("bench snapshot {outcome:?}");
+    }
     bench::mark_peak_rss();
     Ok(())
 }
