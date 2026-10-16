@@ -586,6 +586,52 @@ For regular resumes, use `claude-history --resume` or press `Ctrl+R` in the TUI.
 Configure `[resume].default_args` for arguments that should apply every time
 `claude-history` resumes a session.
 
+#### Starting agents through a wrapper
+
+Resume and fork run `claude`, `pi`, `omp`, or `codex` from your `PATH`, and
+Codex deletes run `codex`. If you start an agent another way, such as a mise or
+nix wrapper, a script that sets environment variables first, or a binary with a
+different name, set `command` for that agent:
+
+```toml
+# ~/.config/claude-history/config.toml
+[resume]
+command = "my-claude"                     # Claude Code
+
+[resume.pi]
+command = "~/bin/pi-wrapper"
+
+[resume.omp]
+command = ["mise", "exec", "--", "omp"]
+
+[resume.codex]
+command = ["nix", "run", "nixpkgs#codex", "--"]
+```
+
+A string is a single program and is never split on spaces. An array is a
+program followed by the arguments that always come first. The program is a name
+looked up on `PATH` or a path to an executable. `~/` is expanded, and a relative
+path is relative to the directory `claude-history` was started in. The agent's
+own arguments follow, so the Claude example runs
+`my-claude --resume <conversation-id>`, and the OMP example runs
+`mise exec -- omp --resume <path>`. Codex's `default_args` come after the
+command and before `resume` or `fork`.
+
+If the program cannot be found, `claude-history` reports which program is
+missing and where it was configured instead of starting the agent.
+
+`command` must name an executable, not a shell alias or function, because
+`claude-history` starts the agent directly, without a shell. If you use an
+alias or function, put its contents in a script on your `PATH` and set `command`
+to that script:
+
+```sh
+#!/bin/sh
+# ~/bin/my-claude
+export CLAUDE_CONFIG_DIR="$HOME/.claude-work"
+exec claude "$@"
+```
+
 If another tool needs the selected session ID, use `--show-id` and press
 `Ctrl+O` to select the highlighted conversation. The TUI renders on stderr, and
 only the selected session ID is written to stdout, so command substitution is
@@ -721,10 +767,22 @@ plain = false
 pager = true
 
 [resume]
+# Command that starts Claude Code (default: "claude")
+# Example: command = ["mise", "exec", "--", "claude"]
 # Default arguments to pass to claude command when resuming
 # Example: default_args = ["--dangerously-skip-permissions"]
 
+[resume.pi]
+# Command that starts Pi (default: "pi")
+# Example: command = "~/bin/pi-wrapper"
+
+[resume.omp]
+# Command that starts OMP (default: "omp")
+# Example: command = "/opt/omp/bin/omp"
+
 [resume.codex]
+# Command that starts Codex (default: "codex")
+# Example: command = "codex-work"
 # Default arguments to pass to codex when resuming or forking a Codex thread
 # Example: default_args = ["--yolo"]
 
@@ -770,6 +828,11 @@ EOF
 
 #### Resume options
 
+- `command` (string or array of strings): The program that starts Claude Code,
+  or an array of the program and the arguments placed before Claude's own
+  (default: `"claude"`). Set it under `[resume.pi]`, `[resume.omp]`, or
+  `[resume.codex]` for those agents (defaults: `"pi"`, `"omp"`, `"codex"`). See
+  [Starting agents through a wrapper](#starting-agents-through-a-wrapper).
 - `default_args` (array of strings): Arguments to pass to the `claude` command
   when resuming conversations. Useful for flags like
   `--dangerously-skip-permissions` that you want applied every time you resume.

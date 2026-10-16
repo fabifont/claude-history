@@ -7,7 +7,7 @@
 use crate::claude::{AgentContent, ContentBlock, LogEntry, TokenUsage, UserContent};
 use crate::error::{AppError, Result};
 use crate::history::ParseError;
-use crate::history::actions::{Capabilities, Resume, SessionCopy, Target};
+use crate::history::actions::{Capabilities, Launch, Launcher, Resume, SessionCopy, Target};
 use crate::history::adapter::{Adapter, Completeness, Discovery, Located};
 use crate::history::model::{
     ConversationKey, Event, EventKind, ExecutionMode, HeadStatus, Message, Origin, Part,
@@ -67,19 +67,19 @@ impl Adapter for ClaudeAdapter {
         Capabilities::ALL
     }
 
-    fn resume(&self, target: Target<'_>, fork: bool, default_args: &[String]) -> Result<Resume> {
+    fn resume(&self, target: Target<'_>, fork: bool, launch: &Launch) -> Result<Resume> {
         let cwd = std::env::current_dir().map_err(|e| {
             AppError::Io(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("Failed to get current directory: {}", e),
             ))
         })?;
-        resume_plan(target, &cwd, fork, default_args)
+        resume_plan(target, &cwd, fork, launch)
     }
 
     /// Deletes every transcript of the session, in any project, with its
     /// session directory.
-    fn delete(&self, path: &Path) -> Result<()> {
+    fn delete(&self, path: &Path, _launcher: &Launcher) -> Result<()> {
         let uuid = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         crate::history::delete_session_by_uuid(uuid).map(|_| ())
     }
@@ -139,8 +139,9 @@ fn resume_plan(
     target: Target<'_>,
     cwd: &Path,
     fork_session: bool,
-    default_args: &[String],
+    launch: &Launch,
 ) -> Result<Resume> {
+    let default_args = &launch.default_args;
     let selected_path = target.path;
     let conversation_id = selected_path
         .file_stem()
@@ -156,7 +157,7 @@ fn resume_plan(
         )
     })?;
 
-    let mut command = std::process::Command::new("claude");
+    let mut command = launch.launcher.command();
     command.args(["--resume", &conversation_id]);
     match resolve_resume_action(selected_path, target.project, cwd, fork_session)? {
         ResumeAction::CopyToCurrent { cwd_projects_dir } => {
@@ -606,6 +607,47 @@ mod tests {
         assert_eq!(
             transcript.meta.updated_at,
             Some(DateTime::<Utc>::from(modified))
+        );
+    }
+
+    #[test]
+    fn resume_runs_the_configured_command() {
+        let cwd = tempfile::tempdir().unwrap();
+        let selected_path = crate::history::get_claude_projects_dir(cwd.path())
+            .unwrap()
+            .join("12345678-1234-4234-9234-123456789abc.jsonl");
+        let target = Target {
+            path: &selected_path,
+            project: Some(cwd.path()),
+        };
+        let launch = Launch {
+            launcher: Launcher::configured(
+                &[
+                    "nix".to_owned(),
+                    "run".to_owned(),
+                    ".#claude".to_owned(),
+                    "--".to_owned(),
+                ],
+                "[resume]",
+            ),
+            default_args: vec!["--verbose".to_owned()],
+        };
+
+        let resume = resume_plan(target, cwd.path(), true, &launch).unwrap();
+
+        assert!(resume.copy.is_none());
+        assert_eq!(resume.command.get_program(), "nix");
+        assert_eq!(
+            resume.command.get_args().collect::<Vec<_>>(),
+            [
+                "run",
+                ".#claude",
+                "--",
+                "--resume",
+                "12345678-1234-4234-9234-123456789abc",
+                "--fork-session",
+                "--verbose"
+            ]
         );
     }
 

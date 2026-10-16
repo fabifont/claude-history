@@ -3,7 +3,7 @@
 
 use crate::error::Result;
 use crate::history::ParseError;
-use crate::history::actions::{Capabilities, Resume, Target};
+use crate::history::actions::{Capabilities, Launch, Launcher, Resume, Target};
 use crate::history::adapter::{Adapter, Completeness, Discovery, Located};
 use crate::history::model::{
     ConversationKey, Event, EventKind, ExecutionMode, HeadStatus, Relationship, Revision, Role,
@@ -86,10 +86,13 @@ impl Adapter for PiAdapter {
         Capabilities::ALL
     }
 
-    fn resume(&self, target: Target<'_>, fork: bool, _default_args: &[String]) -> Result<Resume> {
+    fn resume(&self, target: Target<'_>, fork: bool, launch: &Launch) -> Result<Resume> {
+        let launcher = &launch.launcher;
         let command = match self.instance.kind {
-            SourceKind::Omp => build_omp_resume_command(target.path, target.project, fork),
-            _ => build_pi_resume_command(target.path, target.project, fork),
+            SourceKind::Omp => {
+                build_omp_resume_command(launcher, target.path, target.project, fork)
+            }
+            _ => build_pi_resume_command(launcher, target.path, target.project, fork),
         };
         Ok(Resume {
             copy: None,
@@ -97,7 +100,7 @@ impl Adapter for PiAdapter {
         })
     }
 
-    fn delete(&self, path: &Path) -> Result<()> {
+    fn delete(&self, path: &Path, _launcher: &Launcher) -> Result<()> {
         match self.instance.kind {
             SourceKind::Omp => omp_loader::delete_session(path),
             _ => pi_loader::delete_session(path),
@@ -114,11 +117,12 @@ impl Adapter for PiAdapter {
 
 /// Pi resumes a session file in place, or forks it into a new one.
 fn build_pi_resume_command(
+    launcher: &Launcher,
     selected_path: &Path,
     project_path: Option<&Path>,
     fork_session: bool,
 ) -> Command {
-    let mut command = Command::new("pi");
+    let mut command = launcher.command();
     command.arg(if fork_session { "--fork" } else { "--session" });
     command.arg(selected_path);
     if !fork_session && let Some(project_path) = project_path {
@@ -128,11 +132,12 @@ fn build_pi_resume_command(
 }
 
 fn build_omp_resume_command(
+    launcher: &Launcher,
     selected_path: &Path,
     project_path: Option<&Path>,
     fork_session: bool,
 ) -> Command {
-    let mut command = Command::new("omp");
+    let mut command = launcher.command();
     command.arg(if fork_session { "--fork" } else { "--resume" });
     command.arg(selected_path);
     if !fork_session && let Some(project_path) = project_path {
@@ -289,14 +294,16 @@ mod tests {
     fn pi_resume_and_fork_commands_use_native_paths_without_claude_defaults() {
         let path = PathBuf::from("/tmp/pi sessions/session.jsonl");
         let cwd = PathBuf::from("/tmp/project");
-        let resume = build_pi_resume_command(&path, Some(cwd.as_path()), false);
+        let pi = Launcher::default_for(SourceKind::Pi);
+        let resume = build_pi_resume_command(&pi, &path, Some(cwd.as_path()), false);
+        assert_eq!(resume.get_program(), std::ffi::OsStr::new("pi"));
         assert_eq!(
             resume.get_args().collect::<Vec<_>>(),
             vec![std::ffi::OsStr::new("--session"), path.as_os_str()]
         );
         assert_eq!(resume.get_current_dir(), Some(cwd.as_path()));
 
-        let fork = build_pi_resume_command(&path, Some(cwd.as_path()), true);
+        let fork = build_pi_resume_command(&pi, &path, Some(cwd.as_path()), true);
         assert_eq!(
             fork.get_args().collect::<Vec<_>>(),
             vec![std::ffi::OsStr::new("--fork"), path.as_os_str()]
@@ -308,7 +315,8 @@ mod tests {
     fn omp_resume_and_fork_commands_use_native_paths() {
         let path = PathBuf::from("/tmp/omp sessions/session.jsonl");
         let cwd = PathBuf::from("/tmp/project");
-        let resume = build_omp_resume_command(&path, Some(cwd.as_path()), false);
+        let omp = Launcher::default_for(SourceKind::Omp);
+        let resume = build_omp_resume_command(&omp, &path, Some(cwd.as_path()), false);
         assert_eq!(resume.get_program(), std::ffi::OsStr::new("omp"));
         assert_eq!(
             resume.get_args().collect::<Vec<_>>(),
@@ -316,7 +324,7 @@ mod tests {
         );
         assert_eq!(resume.get_current_dir(), Some(cwd.as_path()));
 
-        let fork = build_omp_resume_command(&path, Some(cwd.as_path()), true);
+        let fork = build_omp_resume_command(&omp, &path, Some(cwd.as_path()), true);
         assert_eq!(
             fork.get_args().collect::<Vec<_>>(),
             vec![std::ffi::OsStr::new("--fork"), path.as_os_str()]

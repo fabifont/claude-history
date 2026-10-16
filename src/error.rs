@@ -23,6 +23,9 @@ pub enum AppError {
     #[error("Failed to run Claude CLI: {0}")]
     ClaudeExecutionError(String),
 
+    #[error("Cannot start agent: {0}")]
+    AgentLaunch(String),
+
     #[error("Configuration error: {0}")]
     ConfigError(String),
 

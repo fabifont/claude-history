@@ -12,7 +12,7 @@ mod state_db;
 pub mod view;
 
 use crate::error::{AppError, Result};
-use crate::history::actions::{Capabilities, Resume, Target};
+use crate::history::actions::{Capabilities, Launch, Launcher, Resume, Target};
 use crate::history::adapter::{Adapter, Completeness, Discovery, Located, Native};
 use crate::history::model::{Event, SourceInstance, SourceKind, Transcript};
 use head::{Scan, Thread};
@@ -165,8 +165,8 @@ fn thread_id_of(path: &Path) -> Result<String> {
 
 /// The Codex CLI acting on the home of the rollout at `path`, else on
 /// `home`.
-fn codex_command(path: &Path, home: &Path) -> Command {
-    let mut command = Command::new("codex");
+fn codex_command(launcher: &Launcher, path: &Path, home: &Path) -> Command {
+    let mut command = launcher.command();
     let home = discover::home_of(path).unwrap_or(home);
     if !home.as_os_str().is_empty() {
         command.env("CODEX_HOME", home);
@@ -236,10 +236,10 @@ impl Adapter for CodexAdapter {
 
     /// `codex [default_args] resume|fork <thread id>` in the conversation's
     /// project.
-    fn resume(&self, target: Target<'_>, fork: bool, default_args: &[String]) -> Result<Resume> {
+    fn resume(&self, target: Target<'_>, fork: bool, launch: &Launch) -> Result<Resume> {
         let id = thread_id_of(target.path)?;
-        let mut command = codex_command(target.path, &self.instance.root);
-        command.args(default_args);
+        let mut command = codex_command(&launch.launcher, target.path, &self.instance.root);
+        command.args(&launch.default_args);
         command.arg(if fork { "fork" } else { "resume" });
         command.arg(id);
         if let Some(project) = target.project.filter(|project| project.is_dir()) {
@@ -253,9 +253,10 @@ impl Adapter for CodexAdapter {
 
     /// `codex delete --force <thread id>`, which removes every rollout of
     /// the thread and its state.
-    fn delete(&self, path: &Path) -> Result<()> {
+    fn delete(&self, path: &Path, launcher: &Launcher) -> Result<()> {
         let id = thread_id_of(path)?;
-        let output = codex_command(path, &self.instance.root)
+        launcher.check(SourceKind::Codex)?;
+        let output = codex_command(launcher, path, &self.instance.root)
             .args([OsString::from("delete"), "--force".into(), id.into()])
             .stdin(std::process::Stdio::null())
             .output()

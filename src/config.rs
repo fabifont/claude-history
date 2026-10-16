@@ -1,4 +1,5 @@
 use crate::error::{AppError, Result};
+use crate::history::actions::{Launch, Launcher};
 use crate::search::mode::SearchMode;
 use crossterm::event::{KeyCode, KeyModifiers};
 use serde::Deserialize;
@@ -198,6 +199,76 @@ default_args = ["--yolo"]
     }
 
     #[test]
+    fn agent_commands_default_to_the_agent_binaries() {
+        use crate::history::model::SourceKind;
+        let resume = ResumeConfig::default();
+        for source in [
+            SourceKind::Claude,
+            SourceKind::Pi,
+            SourceKind::Omp,
+            SourceKind::Codex,
+        ] {
+            assert_eq!(resume.launcher(source), Launcher::default_for(source));
+        }
+    }
+
+    #[test]
+    fn agent_commands_are_configured_per_agent() {
+        use crate::history::model::SourceKind;
+        let config: ConfigFile = toml::from_str(
+            r#"
+[resume]
+command = "my claude"
+default_args = ["--verbose"]
+
+[resume.pi]
+command = ["mise", "exec", "--", "pi"]
+
+[resume.omp]
+command = "/opt/omp/bin/omp"
+
+[resume.codex]
+command = ["codex-wrapper", "--profile", "work"]
+default_args = ["--yolo"]
+"#,
+        )
+        .unwrap();
+        let resume = config.resume.unwrap();
+
+        let claude = resume.launch(SourceKind::Claude);
+        assert_eq!(claude.launcher.program, PathBuf::from("my claude"));
+        assert!(claude.launcher.args.is_empty());
+        assert_eq!(claude.launcher.configured_at, Some("[resume]"));
+        assert_eq!(claude.default_args, ["--verbose"]);
+
+        let pi = resume.launch(SourceKind::Pi);
+        assert_eq!(pi.launcher.program, PathBuf::from("mise"));
+        assert_eq!(pi.launcher.args, ["exec", "--", "pi"]);
+        assert_eq!(pi.launcher.configured_at, Some("[resume.pi]"));
+        assert!(pi.default_args.is_empty());
+
+        let omp = resume.launcher(SourceKind::Omp);
+        assert_eq!(omp.program, PathBuf::from("/opt/omp/bin/omp"));
+        assert_eq!(omp.configured_at, Some("[resume.omp]"));
+
+        let codex = resume.launch(SourceKind::Codex);
+        assert_eq!(codex.launcher.program, PathBuf::from("codex-wrapper"));
+        assert_eq!(codex.launcher.args, ["--profile", "work"]);
+        assert_eq!(codex.default_args, ["--yolo"]);
+    }
+
+    #[test]
+    fn agent_commands_must_name_a_program() {
+        for command in [r#""""#, "[]", r#"[" "]"#, "1"] {
+            let error =
+                toml::from_str::<ConfigFile>(&format!("[resume.pi]\ncommand = {command}\n"))
+                    .expect_err(command);
+            assert!(error.to_string().contains("command must"), "{error}");
+        }
+        assert!(toml::from_str::<ConfigFile>("[resume.pi]\ndefault_args = []\n").is_err());
+    }
+
+    #[test]
     fn agent_settings_parse_independently_from_tui() {
         let config: ConfigFile = toml::from_str(
             r#"
@@ -293,8 +364,12 @@ pub struct DisplayConfig {
 #[derive(Deserialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeConfig {
+    /// The command Claude Code is started with.
+    pub command: Option<AgentCommand>,
     /// Arguments Claude Code is resumed with.
     pub default_args: Option<Vec<String>>,
+    pub pi: Option<LauncherConfig>,
+    pub omp: Option<LauncherConfig>,
     pub codex: Option<AgentResumeConfig>,
 }
 
@@ -302,8 +377,52 @@ pub struct ResumeConfig {
 #[derive(Deserialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AgentResumeConfig {
+    /// The command the agent is started with.
+    pub command: Option<AgentCommand>,
     /// Arguments the agent is resumed with, before its own subcommand.
     pub default_args: Option<Vec<String>>,
+}
+
+/// The command an agent is started with.
+#[derive(Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LauncherConfig {
+    pub command: Option<AgentCommand>,
+}
+
+/// A program and the arguments that precede the agent's own: a string
+/// names the program alone (never split on whitespace), an array the
+/// program and its arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCommand(Vec<String>);
+
+impl<'de> Deserialize<'de> for AgentCommand {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Program(String),
+            Command(Vec<String>),
+        }
+        let command = match Raw::deserialize(deserializer).map_err(|_| {
+            serde::de::Error::custom(
+                "command must be a program (\"my-claude\") or an array of a program and its arguments ([\"mise\", \"exec\", \"--\", \"claude\"])",
+            )
+        })? {
+            Raw::Program(program) => vec![program],
+            Raw::Command(command) => command,
+        };
+        if command
+            .first()
+            .is_none_or(|program| program.trim().is_empty())
+        {
+            return Err(serde::de::Error::custom("command must name a program"));
+        }
+        Ok(Self(command))
+    }
 }
 
 impl ResumeConfig {
@@ -319,6 +438,33 @@ impl ResumeConfig {
             SourceKind::Pi | SourceKind::Omp => None,
         };
         args.map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The program that starts the agent of `source`: the configured
+    /// command, else the agent's own binary.
+    pub fn launcher(&self, source: crate::history::model::SourceKind) -> Launcher {
+        use crate::history::model::SourceKind;
+        let command = match source {
+            SourceKind::Claude => self.command.as_ref(),
+            SourceKind::Pi => self.pi.as_ref().and_then(|pi| pi.command.as_ref()),
+            SourceKind::Omp => self.omp.as_ref().and_then(|omp| omp.command.as_ref()),
+            SourceKind::Codex => self.codex.as_ref().and_then(|codex| codex.command.as_ref()),
+        };
+        match command {
+            Some(AgentCommand(command)) => {
+                Launcher::configured(command, crate::history::actions::config_table(source))
+            }
+            None => Launcher::default_for(source),
+        }
+    }
+
+    /// How to start the agent of `source` to resume or fork one of its
+    /// conversations.
+    pub fn launch(&self, source: crate::history::model::SourceKind) -> Launch {
+        Launch {
+            launcher: self.launcher(source),
+            default_args: self.default_args(source).to_vec(),
+        }
     }
 }
 

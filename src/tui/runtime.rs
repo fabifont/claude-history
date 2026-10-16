@@ -1,7 +1,7 @@
 use super::app::{Action, App, AppMode, DialogMode, ListSearchMode, TuiSearchOptions};
 use super::terminal_out::{StderrRedirect, TerminalOut};
 use super::ui;
-use crate::config::KeyBindings;
+use crate::config::{KeyBindings, ResumeConfig};
 use crate::debug_log;
 use crate::error::{AppError, Result};
 use crate::history::Conversation;
@@ -483,6 +483,7 @@ pub fn run_with_loader(
     exclude_projects: Vec<String>,
     exclude_paths: Vec<String>,
     search_options: TuiSearchOptions,
+    resume_config: &ResumeConfig,
 ) -> Result<(Action, Option<Conversation>)> {
     let mut store = Store::new(show_last, time_filter);
     let mut guard = TerminalGuard::new()?;
@@ -629,7 +630,7 @@ pub fn run_with_loader(
                         ));
                         return EventLoopResult::Continue;
                     }
-                    let result = adapter.delete(path);
+                    let result = adapter.delete(path, &resume_config.launcher(source));
                     match result {
                         Ok(()) => {
                             app.remove_selected_from_list();
@@ -643,6 +644,19 @@ pub fn run_with_loader(
                                 e
                             ));
                             app.set_status_message(format!("Failed to delete: {e}"));
+                            EventLoopResult::Continue
+                        }
+                    }
+                }
+                Action::Resume(_) | Action::ForkResume(_) => {
+                    // Stays in the list when the agent cannot start.
+                    let source = app
+                        .get_selected_source()
+                        .unwrap_or(crate::history::model::SourceKind::Claude);
+                    match resume_config.launcher(source).check(source) {
+                        Ok(()) => EventLoopResult::Return(Some(action)),
+                        Err(e) => {
+                            app.set_status_message(e.to_string());
                             EventLoopResult::Continue
                         }
                     }

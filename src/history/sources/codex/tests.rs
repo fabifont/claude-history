@@ -442,9 +442,11 @@ fn actions_run_the_codex_cli_on_the_rollouts_home() {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
     };
-    let resume = adapter
-        .resume(target, false, &["--yolo".to_owned()])
-        .unwrap();
+    let launch = Launch {
+        launcher: Launcher::default_for(SourceKind::Codex),
+        default_args: vec!["--yolo".to_owned()],
+    };
+    let resume = adapter.resume(target, false, &launch).unwrap();
     assert!(resume.copy.is_none());
     assert_eq!(resume.command.get_program(), "codex");
     assert_eq!(args(&resume.command), ["--yolo", "resume", PAGED]);
@@ -453,8 +455,26 @@ fn actions_run_the_codex_cli_on_the_rollouts_home() {
         resume.command.get_envs().collect::<Vec<_>>(),
         [(std::ffi::OsStr::new("CODEX_HOME"), Some(home.as_os_str()))]
     );
-    let fork = adapter.resume(target, true, &[]).unwrap();
-    assert_eq!(args(&fork.command), ["fork", PAGED]);
+    let wrapped = Launch {
+        launcher: Launcher::configured(
+            &[
+                "codex-wrapper".to_owned(),
+                "--profile".to_owned(),
+                "work".to_owned(),
+            ],
+            "[resume.codex]",
+        ),
+        default_args: Vec::new(),
+    };
+    let fork = adapter.resume(target, true, &wrapped).unwrap();
+    assert_eq!(fork.command.get_program(), "codex-wrapper");
+    assert_eq!(args(&fork.command), ["--profile", "work", "fork", PAGED]);
+    let missing = Launcher::configured(
+        &["/nonexistent/claude-history-test/codex".to_owned()],
+        "[resume.codex]",
+    );
+    let error = adapter.delete(&path, &missing).unwrap_err().to_string();
+    assert!(error.contains("[resume.codex]"), "{error}");
     assert!(!adapter.capabilities().rename);
     assert!(adapter.rename(&path, "x").is_err());
 }

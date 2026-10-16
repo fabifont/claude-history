@@ -468,6 +468,7 @@ fn run() -> Result<()> {
             default_mode: tui_search_mode(search_mode),
             all_kinds: args.all_kinds,
         },
+        &resume_config,
     )
     .map_err(describe_empty)?
     {
@@ -597,7 +598,9 @@ fn resume_with_agent(
         path: selected_path,
         project: conversation.and_then(|c| c.project_path.as_deref()),
     };
-    let resume = adapter.resume(target, fork_session, resume_config.default_args(source))?;
+    let launch = resume_config.launch(source);
+    launch.launcher.check(source)?;
+    let resume = adapter.resume(target, fork_session, &launch)?;
     if let Some(copy) = &resume.copy {
         copy.apply()?;
     }

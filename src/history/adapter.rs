@@ -10,7 +10,7 @@
 //! say when it is incomplete: a conversation that a partial or degraded
 //! listing did not report may still exist, and its stored state is kept.
 
-use super::actions::{Capabilities, Resume, Target};
+use super::actions::{Capabilities, Launch, Launcher, Resume, Target};
 use super::model::{ConversationKey, Event, SourceInstance, Transcript};
 use std::any::Any;
 use std::collections::HashSet;
@@ -171,18 +171,18 @@ pub trait Adapter: Send + Sync {
 
     fn capabilities(&self) -> Capabilities;
 
-    /// Plans resuming `target` in the tool that wrote it, or forking it
-    /// into a new conversation. `default_args` are the user's extra
-    /// arguments for tools that take them.
+    /// Plans resuming `target` in the tool that wrote it, started as
+    /// `launch` says, or forking it into a new conversation.
     fn resume(
         &self,
         target: Target<'_>,
         fork: bool,
-        default_args: &[String],
+        launch: &Launch,
     ) -> crate::error::Result<Resume>;
 
-    /// Deletes the conversation whose own artifact is `path`.
-    fn delete(&self, path: &Path) -> crate::error::Result<()>;
+    /// Deletes the conversation whose own artifact is `path`, with the tool
+    /// `launcher` starts when the tool does the deleting.
+    fn delete(&self, path: &Path, launcher: &Launcher) -> crate::error::Result<()>;
 
     /// Sets the title of the conversation whose own artifact is `path`.
     fn rename(&self, path: &Path, title: &str) -> crate::error::Result<()>;
