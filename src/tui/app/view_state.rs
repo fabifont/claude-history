@@ -120,19 +120,26 @@ impl App {
     }
 
     pub(super) fn commit_view_search(&mut self) {
+        let mut no_matches = None;
         if let AppMode::View(ref mut state) = self.app_mode {
             if !state.search_matches.is_empty() {
                 state.search_mode = ViewSearchMode::Active;
             } else {
                 state.search_mode = ViewSearchMode::Off;
+                if !state.search_query.trim().is_empty() {
+                    no_matches = Some(format!("No matches for /{}", state.search_query));
+                }
             }
+        }
+        if let Some(message) = no_matches {
+            self.set_status_message(message);
         }
     }
 
     pub(super) fn update_search_results(&mut self) {
         if let AppMode::View(ref mut state) = self.app_mode {
-            let query_lower = state.search_query.to_lowercase();
-            if query_lower.is_empty() {
+            let query = ui::ViewSearchQuery::parse(&state.search_query);
+            if query.is_empty() {
                 state.search_matches.clear();
                 return;
             }
@@ -141,7 +148,7 @@ impl App {
                 .rendered_lines
                 .iter()
                 .enumerate()
-                .filter(|(_, line)| line_matches_query(line, &query_lower))
+                .filter(|(_, line)| line_matches_query(line, &query))
                 .map(|(i, _)| i)
                 .collect();
 
@@ -271,12 +278,12 @@ impl App {
             };
 
             if state.search_mode == ViewSearchMode::Active && !state.search_query.is_empty() {
-                let query_lower = state.search_query.to_lowercase();
+                let query = ui::ViewSearchQuery::parse(&state.search_query);
                 state.search_matches = state
                     .rendered_lines
                     .iter()
                     .enumerate()
-                    .filter(|(_, line)| line_matches_query(line, &query_lower))
+                    .filter(|(_, line)| line_matches_query(line, &query))
                     .map(|(i, _)| i)
                     .collect();
 
@@ -614,7 +621,28 @@ fn find_message_idx_or_prev(ranges: &[MessageRange], entry_index: usize) -> Opti
     }
 }
 
-pub fn line_matches_query(line: &RenderedLine, query_lower: &str) -> bool {
+/// Whether `line` has a match for `query`, by the list's matching rules.
+pub fn line_matches_query(line: &RenderedLine, query: &ui::ViewSearchQuery) -> bool {
     let full_text: String = line.spans.iter().map(|(text, _)| text.as_str()).collect();
-    full_text.to_lowercase().contains(query_lower)
+    query.has_match(&full_text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_search_matches_lines_like_the_list() {
+        let matches = |line: &str, query: &str| {
+            let line = RenderedLine::new(vec![(line.to_string(), Default::default())]);
+            line_matches_query(&line, &ui::ViewSearchQuery::parse(query))
+        };
+        assert!(matches("the hidden needle_token appears", "needle token"));
+        assert!(matches("late mention of İstanbul", "istanbul"));
+        assert!(matches("tag v1.1.1", "1.1"));
+        assert!(matches("needle only", "needle token"));
+        assert!(!matches("the fired plan", "ired"));
+        assert!(matches("exact audio_generation", "\"audio_generation\""));
+        assert!(!matches("audio generation", "\"audio_generation\""));
+    }
 }

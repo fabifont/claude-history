@@ -741,7 +741,7 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
 
 fn render_view_content(frame: &mut Frame, state: &ViewState, area: Rect) {
     let visible_height = area.height as usize;
-    let query_lower = state.search_query.to_lowercase();
+    let query = ViewSearchQuery::parse(&state.search_query);
 
     // Determine focused message line range (only when nav mode active)
     let focused_range = if state.message_nav_active {
@@ -761,7 +761,7 @@ fn render_view_content(frame: &mut Frame, state: &ViewState, area: Rect) {
         .take(visible_height)
         .map(|(line_idx, rendered)| {
             let is_current_match = state.search_matches.get(state.current_match) == Some(&line_idx);
-            let has_match = !query_lower.is_empty() && state.search_matches.contains(&line_idx);
+            let has_match = !query.is_empty() && state.search_matches.contains(&line_idx);
 
             let is_focused = focused_range
                 .as_ref()
@@ -780,12 +780,8 @@ fn render_view_content(frame: &mut Frame, state: &ViewState, area: Rect) {
 
             let mut spans: Vec<Span> = vec![gutter];
 
-            if has_match && !query_lower.is_empty() {
-                spans.extend(highlight_line_matches(
-                    rendered,
-                    &query_lower,
-                    is_current_match,
-                ));
+            if has_match {
+                spans.extend(highlight_line_matches(rendered, &query, is_current_match));
             } else {
                 spans.extend(
                     rendered
@@ -956,7 +952,7 @@ fn render_search_input(frame: &mut Frame, state: &ViewState, area: Rect) {
 /// line text, then rebuilding spans with highlights applied at the correct positions.
 fn highlight_line_matches(
     rendered: &RenderedLine,
-    query: &str,
+    query: &ViewSearchQuery,
     is_current_match: bool,
 ) -> Vec<Span<'static>> {
     // Concatenate all span texts to get the full line
@@ -965,37 +961,7 @@ fn highlight_line_matches(
         .iter()
         .map(|(text, _)| text.as_str())
         .collect();
-    let full_lower = full_text.to_lowercase();
-
-    // Find match positions using char indices to safely handle Unicode
-    // (lowercasing can change byte lengths for some characters)
-    let orig_chars: Vec<(usize, char)> = full_text.char_indices().collect();
-    let lower_chars: Vec<char> = full_lower.chars().collect();
-    let query_chars: Vec<char> = query.chars().collect();
-
-    let mut match_byte_ranges: Vec<(usize, usize)> = Vec::new();
-    if !query_chars.is_empty() {
-        let mut i = 0;
-        while i + query_chars.len() <= lower_chars.len() {
-            if lower_chars[i..i + query_chars.len()] == query_chars[..] {
-                // Guard against Unicode casing expansion (e.g. ß → ss) where
-                // lower_chars may be longer than orig_chars
-                if i >= orig_chars.len() {
-                    break;
-                }
-                let start_byte = orig_chars[i].0;
-                let end_byte = if i + query_chars.len() < orig_chars.len() {
-                    orig_chars[i + query_chars.len()].0
-                } else {
-                    full_text.len()
-                };
-                match_byte_ranges.push((start_byte, end_byte));
-                i += query_chars.len();
-            } else {
-                i += 1;
-            }
-        }
-    }
+    let match_byte_ranges = query.0.match_ranges(&full_text);
 
     if match_byte_ranges.is_empty() {
         return rendered
@@ -2396,6 +2362,24 @@ fn merge_separated_ranges(text: &str, ranges: Vec<(usize, usize)>) -> Vec<(usize
         merged.push((start, end));
     }
     merged
+}
+
+/// A viewer `/` search: query words match lines as they match conversations
+/// in the list, and quoted literals match exactly.
+pub(crate) struct ViewSearchQuery(HighlightQuery);
+
+impl ViewSearchQuery {
+    pub(crate) fn parse(query: &str) -> Self {
+        Self(HighlightQuery::parse(query))
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.unquoted.is_empty() && self.0.literals.is_empty()
+    }
+
+    pub(crate) fn has_match(&self, text: &str) -> bool {
+        self.0.has_match(text)
+    }
 }
 
 #[derive(Debug, Default)]
