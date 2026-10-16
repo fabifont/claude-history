@@ -242,7 +242,8 @@ fn is_session_file(path: &Path) -> bool {
 }
 
 /// Decodes a Claude session from `reader`, the contents of `path`, passing
-/// its events to `events`.
+/// its events to `events`. The session was last active at its latest
+/// message, else when it was `modified`.
 pub(crate) fn decode_reader(
     key: ConversationKey,
     path: &Path,
@@ -261,6 +262,7 @@ pub(crate) fn decode_reader(
         }
     }
     let mut records = Records::default();
+    let mut activity = super::LastActivity::default();
     let mut diagnostics = Vec::new();
     let mut line_index: usize = 0;
     while let Some(line) = window.pop_front() {
@@ -271,6 +273,7 @@ pub(crate) fn decode_reader(
             match serde_json::from_str::<LogEntry>(&line) {
                 Ok(entry) => {
                     if let Some(event) = records.push(entry, line_number(line_index)) {
+                        activity.observe(&event);
                         events(event);
                     }
                 }
@@ -313,7 +316,9 @@ pub(crate) fn decode_reader(
         model: records.model.take(),
         summary: records.summary.take(),
         custom_title: records.custom_title.take(),
-        updated_at: modified.map(DateTime::<Utc>::from),
+        updated_at: activity
+            .at()
+            .or_else(|| modified.map(DateTime::<Utc>::from)),
     };
     Ok(Transcript {
         revision: Revision::of(SourceKind::Claude, &segments, &[mtime_ns(modified)]),
@@ -557,6 +562,51 @@ pub(super) fn parse_timestamp(text: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode_with_mtime(lines: &[&str], modified: SystemTime) -> Transcript {
+        let path = Path::new("/projects/-work/session.jsonl");
+        let key = ConversationKey {
+            instance: SourceInstance {
+                kind: SourceKind::Claude,
+                root: PathBuf::new(),
+            },
+            native_id: path.to_string_lossy().into_owned(),
+        };
+        let contents = lines.join("\n");
+        decode_reader(key, path, contents.as_bytes(), Some(modified), &mut |_| {}).unwrap()
+    }
+
+    #[test]
+    fn last_activity_is_the_newest_message_not_the_file_mtime() {
+        let modified = SystemTime::now();
+        let transcript = decode_with_mtime(
+            &[
+                r#"{"type":"user","timestamp":"2026-10-15T14:50:00Z","message":{"role":"user","content":"hi"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-10-15T14:51:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"Bash","input":{}}]}}"#,
+                r#"{"type":"user","timestamp":"2026-10-15T14:51:56Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}]}}"#,
+                r#"{"type":"system","subtype":"turn_duration","timestamp":"2026-10-15T14:52:30Z"}"#,
+                r#"{"type":"system","subtype":"away_summary","timestamp":"2026-10-16T14:44:00Z"}"#,
+            ],
+            modified,
+        );
+        assert_eq!(
+            transcript.meta.updated_at.unwrap().to_rfc3339(),
+            "2026-10-15T14:51:56+00:00"
+        );
+    }
+
+    #[test]
+    fn a_session_without_message_times_was_last_active_at_its_mtime() {
+        let modified = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let transcript = decode_with_mtime(
+            &[r#"{"type":"user","message":{"role":"user","content":"hi"}}"#],
+            modified,
+        );
+        assert_eq!(
+            transcript.meta.updated_at,
+            Some(DateTime::<Utc>::from(modified))
+        );
+    }
 
     #[test]
     fn resume_action_uses_cwd_when_it_maps_to_selected_project_dir() {

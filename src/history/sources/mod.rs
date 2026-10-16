@@ -6,10 +6,13 @@ pub mod codex;
 pub mod pi;
 
 use super::adapter::{Adapter, FileId, Located, Stamp};
-use super::model::{ConversationKey, Event, SourceInstance, SourceKind, Transcript};
+use super::model::{
+    ConversationKey, Event, EventKind, SourceInstance, SourceKind, Transcript, Visibility,
+};
 use super::omp_loader::{self, OmpSessionRoot};
 use super::pi_loader::{self, PiSessionRoot};
 use crate::error::Result;
+use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
@@ -255,6 +258,33 @@ fn decode_file(
     claude::decode_reader(located.key.clone(), path, reader, located.modified, events).map(Some)
 }
 
+/// When a conversation was last active: the newest timestamp of its own
+/// user and assistant messages, tool results included, else of the
+/// messages it inherited from the conversation it was forked from.
+#[derive(Default)]
+pub(crate) struct LastActivity {
+    own: Option<DateTime<Utc>>,
+    inherited: Option<DateTime<Utc>>,
+}
+
+impl LastActivity {
+    pub(crate) fn observe(&mut self, event: &Event) {
+        if !matches!(event.kind, EventKind::Message(_)) {
+            return;
+        }
+        let latest = match event.visibility {
+            Visibility::Dialogue => &mut self.own,
+            Visibility::Inherited => &mut self.inherited,
+            Visibility::Injected => return,
+        };
+        *latest = (*latest).max(event.timestamp);
+    }
+
+    pub(crate) fn at(&self) -> Option<DateTime<Utc>> {
+        self.own.or(self.inherited)
+    }
+}
+
 /// A reader that counts the bytes consumed through it.
 struct Counted<R> {
     inner: R,
@@ -295,4 +325,43 @@ fn file_id(metadata: &fs::Metadata) -> Option<FileId> {
 #[cfg(not(unix))]
 fn file_id(_metadata: &fs::Metadata) -> Option<FileId> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history::model::{Message, Origin, Role};
+
+    fn event(minute: u32, visibility: Visibility, message: bool) -> Event {
+        let kind = if message {
+            EventKind::Message(Message {
+                role: Role::User,
+                id: None,
+                parts: Vec::new(),
+                model: None,
+                usage: None,
+                parent_tool_use_id: None,
+            })
+        } else {
+            EventKind::Other
+        };
+        Event {
+            origin: Origin::default(),
+            timestamp: DateTime::from_timestamp(i64::from(minute) * 60, 0),
+            visibility,
+            kind,
+        }
+    }
+
+    #[test]
+    fn last_activity_prefers_own_messages_over_inherited_ones() {
+        let mut activity = LastActivity::default();
+        activity.observe(&event(30, Visibility::Inherited, true));
+        assert_eq!(activity.at(), DateTime::from_timestamp(30 * 60, 0));
+        activity.observe(&event(10, Visibility::Dialogue, true));
+        activity.observe(&event(5, Visibility::Dialogue, true));
+        activity.observe(&event(40, Visibility::Injected, true));
+        activity.observe(&event(50, Visibility::Dialogue, false));
+        assert_eq!(activity.at(), DateTime::from_timestamp(10 * 60, 0));
+    }
 }

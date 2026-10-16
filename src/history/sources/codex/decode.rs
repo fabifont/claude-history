@@ -16,6 +16,7 @@ use crate::history::model::{
     ConversationKey, Event, EventKind, ExecutionMode, Message, Origin, Part, Relationship,
     Revision, Role, Segment, SessionMeta, SourceKind, Transcript, Usage, Visibility,
 };
+use crate::history::sources::LastActivity;
 use crate::history::sources::claude::{mtime_ns, parse_timestamp};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -303,7 +304,9 @@ struct Compacted {
 }
 
 /// Decodes the history of `thread`, passing its events to `events`.
-/// `None` when the head rollout does not start with a `session_meta`.
+/// `None` when the head rollout does not start with a `session_meta`. The
+/// thread was last active at its latest message, else at the head
+/// rollout's last record of its own, its start, or its mtime.
 pub fn decode(
     key: ConversationKey,
     thread: &Thread,
@@ -318,6 +321,7 @@ pub fn decode(
         model: None,
         head_meta: None,
         last_timestamp: None,
+        activity: LastActivity::default(),
     };
     if let Some(missing) = &thread.missing_base {
         decoder.diagnostics.push(diagnostic(
@@ -335,10 +339,15 @@ pub fn decode(
     };
     let head_link = thread.head_link();
     let updated_at = decoder
-        .last_timestamp
-        .as_deref()
-        .or(meta.timestamp.as_deref())
-        .and_then(parse_timestamp)
+        .activity
+        .at()
+        .or_else(|| {
+            decoder
+                .last_timestamp
+                .as_deref()
+                .or(meta.timestamp.as_deref())
+                .and_then(parse_timestamp)
+        })
         .or_else(|| head_link.modified.map(DateTime::<Utc>::from));
     let mtimes: Vec<i64> = thread
         .chain
@@ -410,6 +419,7 @@ struct Decoder<'a> {
     head_meta: Option<Meta>,
     /// Timestamp of the head rollout's last record.
     last_timestamp: Option<String>,
+    activity: LastActivity,
 }
 
 impl Decoder<'_> {
@@ -482,12 +492,14 @@ impl Decoder<'_> {
             let timestamp = record.timestamp.as_deref().and_then(parse_timestamp);
             let (paginated, subagent) = (file_meta.paginated(), file_meta.subagent());
             for (visibility, kind) in self.kinds(&record, paginated, subagent, visibility) {
-                (self.events)(Event {
+                let event = Event {
                     origin,
                     timestamp,
                     visibility,
                     kind,
-                });
+                };
+                self.activity.observe(&event);
+                (self.events)(event);
             }
         }
         self.segments.push(Segment {

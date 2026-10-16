@@ -164,14 +164,14 @@ pub(super) fn transcript_of(
     let records = session.events.len();
     let mut model = None;
     let mut custom_title = None;
-    let mut latest_activity: Option<DateTime<Utc>> = None;
+    let mut activity = super::LastActivity::default();
     for event in session.events {
+        activity.observe(&event);
         match &event.kind {
             EventKind::Message(message) => {
                 if model.is_none() && message.role == Role::Assistant {
                     model.clone_from(&message.model);
                 }
-                latest_activity = latest_activity.max(event.timestamp);
             }
             EventKind::Note { label, text, .. } if label == "Model" && !text.is_empty() => {
                 model = Some(text.clone());
@@ -184,7 +184,8 @@ pub(super) fn transcript_of(
         }
         events(event);
     }
-    let updated_at = latest_activity
+    let updated_at = activity
+        .at()
         .or_else(|| super::claude::parse_timestamp(&session.header.timestamp))
         .or_else(|| modified.map(DateTime::<Utc>::from));
     let diagnostics = session
@@ -233,6 +234,56 @@ pub(super) fn transcript_of(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn transcript_with_mtime(lines: &[&str], modified: SystemTime) -> Transcript {
+        let contents = lines.join("\n");
+        let session = crate::history::pi::parse_reader(contents.as_bytes(), None)
+            .unwrap()
+            .unwrap();
+        let path = Path::new("/sessions/session.jsonl");
+        let key = ConversationKey {
+            instance: SourceInstance {
+                kind: SourceKind::Pi,
+                root: PathBuf::new(),
+            },
+            native_id: path.to_string_lossy().into_owned(),
+        };
+        transcript_of(key, path, session, 0, Some(modified), &mut |_| {})
+    }
+
+    const HEADER: &str = r#"{"type":"session","version":3,"id":"s","timestamp":"2026-10-15T14:00:00Z","cwd":"/tmp"}"#;
+
+    #[test]
+    fn last_activity_is_the_newest_message_not_the_file_mtime() {
+        let transcript = transcript_with_mtime(
+            &[
+                HEADER,
+                r#"{"type":"message","id":"u","parentId":null,"timestamp":"2026-10-15T14:50:00Z","message":{"role":"user","content":"hi"}}"#,
+                r#"{"type":"message","id":"a","parentId":"u","timestamp":"2026-10-15T14:51:56Z","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#,
+                r#"{"type":"session_info","id":"n","parentId":"a","timestamp":"2026-10-16T14:44:00Z","name":"title"}"#,
+            ],
+            SystemTime::now(),
+        );
+        assert_eq!(
+            transcript.meta.updated_at.unwrap().to_rfc3339(),
+            "2026-10-15T14:51:56+00:00"
+        );
+    }
+
+    #[test]
+    fn a_session_without_message_times_was_last_active_at_its_header() {
+        let transcript = transcript_with_mtime(
+            &[
+                HEADER,
+                r#"{"type":"message","id":"u","parentId":null,"message":{"role":"user","content":"hi"}}"#,
+            ],
+            SystemTime::now(),
+        );
+        assert_eq!(
+            transcript.meta.updated_at.unwrap().to_rfc3339(),
+            "2026-10-15T14:00:00+00:00"
+        );
+    }
 
     #[test]
     fn pi_resume_and_fork_commands_use_native_paths_without_claude_defaults() {

@@ -186,7 +186,7 @@ fn legacy_rollouts_decode_event_messages_and_function_calls() {
     );
     assert_eq!(
         transcript.meta.updated_at.unwrap().to_rfc3339(),
-        "2026-09-01T06:00:21+00:00"
+        "2026-09-01T06:00:20+00:00"
     );
     assert!(transcript.diagnostics.is_empty());
     assert_eq!(
@@ -510,4 +510,71 @@ fn viewed_threads_show_the_dialogue_and_where_a_fork_begins() {
     let claude = dir.path().join("session.jsonl");
     std::fs::write(&claude, "{}\n").unwrap();
     assert!(super::view::decode_path(&claude).is_none());
+}
+
+/// The thread of a rollout holding `records` after its `session_meta`, in
+/// a Codex home under `dir`.
+fn rollout_thread(dir: &Path, meta: &str, records: &[&str]) -> Transcript {
+    let id = "01a00000-0000-7000-8000-0000000000aa";
+    let day = dir.join("sessions/2026/09/03");
+    std::fs::create_dir_all(&day).unwrap();
+    let path = day.join(format!("rollout-2026-09-03T10-00-00-{id}.jsonl"));
+    let meta = format!(
+        r#"{{"timestamp":"2026-09-03T10:00:00.000Z","type":"session_meta","payload":{{"id":"{id}","timestamp":"2026-09-03T10:00:00.000Z","cwd":"/work/demo","source":"cli"{meta}}}}}"#
+    );
+    let mut contents = std::iter::once(meta.as_str())
+        .chain(records.iter().copied())
+        .collect::<Vec<_>>()
+        .join("\n");
+    contents.push('\n');
+    std::fs::write(&path, contents).unwrap();
+    view::decode_path(&path).unwrap().unwrap()
+}
+
+fn record(time: &str, payload: &str) -> String {
+    format!(r#"{{"timestamp":"2026-09-03T{time}.000Z","type":"event_msg","payload":{payload}}}"#)
+}
+
+#[test]
+fn threads_were_last_active_at_their_own_newest_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let records = [
+        record("10:30:00", r#"{"type":"user_message","message":"copied"}"#),
+        record("10:30:00", r#"{"type":"agent_message","message":"copied"}"#),
+        record("10:00:05", r#"{"type":"user_message","message":"own"}"#),
+        record("10:00:10", r#"{"type":"agent_message","message":"own"}"#),
+        record("10:05:00", r#"{"type":"token_count","info":null}"#),
+    ];
+    let records: Vec<&str> = records.iter().map(String::as_str).collect();
+    let transcript = rollout_thread(
+        dir.path(),
+        r#","subagent_history_start_ordinal":3"#,
+        &records,
+    );
+    assert!(mentions(&transcript, Visibility::Inherited, "copied"));
+    assert_eq!(
+        transcript.meta.updated_at.unwrap().to_rfc3339(),
+        "2026-09-03T10:00:10+00:00"
+    );
+
+    let inherited_only = rollout_thread(
+        dir.path(),
+        r#","subagent_history_start_ordinal":3"#,
+        &records[..2],
+    );
+    assert_eq!(
+        inherited_only.meta.updated_at.unwrap().to_rfc3339(),
+        "2026-09-03T10:30:00+00:00"
+    );
+}
+
+#[test]
+fn threads_without_messages_were_last_active_at_their_last_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let context = r#"{"timestamp":"2026-09-03T10:01:00.000Z","type":"turn_context","payload":{"cwd":"/work/demo","model":"gpt-5-codex"}}"#;
+    let transcript = rollout_thread(dir.path(), "", &[context]);
+    assert_eq!(
+        transcript.meta.updated_at.unwrap().to_rfc3339(),
+        "2026-09-03T10:01:00+00:00"
+    );
 }
