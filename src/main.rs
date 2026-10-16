@@ -1,5 +1,6 @@
 mod agent;
 mod bench;
+mod case_fold;
 mod claude;
 mod cli;
 mod config;

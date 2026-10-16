@@ -977,6 +977,7 @@ mod tests {
     use super::*;
     use crate::history::Conversation;
     use crate::search::test_fixtures::one_message_conversation;
+    use crate::text_match::nfc;
     use chrono::{Duration, TimeZone};
 
     fn conv(
@@ -1531,6 +1532,16 @@ mod tests {
         "λογος",
         "straße",
         "STRASSE",
+        "STRAẞE",
+        "strasse",
+        "i\u{307}stanbul",
+        "λογοσ",
+        "Ꮳherokee",
+        "ꮳherokee",
+        "\u{FB01}le",
+        "file",
+        "ǰ\u{301}",
+        "\u{307}x",
         "ǅemal",
         "v1.1.1",
         "1.1",
@@ -1596,9 +1607,13 @@ mod tests {
                     )
                 });
                 let age = Duration::hours(rng.below(24 * 30) as i64 / 6 * 6);
+                // Loading keeps conversation texts in NFC.
+                let (text, own) = (nfc(&text).into_owned(), nfc(&own).into_owned());
+                let project = project.map(|project| nfc(project).into_owned());
+                let title = title.map(|title| nfc(&title).into_owned());
                 let mut conversation = conv(
                     &text,
-                    project,
+                    project.as_deref(),
                     title.as_deref(),
                     None,
                     now - age,

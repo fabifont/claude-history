@@ -1,3 +1,7 @@
+use crate::case_fold::{drops_following_dot_above, push_folded};
+use icu_normalizer::ComposingNormalizerBorrowed;
+use std::borrow::Cow;
+
 fn is_cjk_punctuation(c: char) -> bool {
     matches!(
         c,
@@ -35,13 +39,22 @@ fn is_cjk_punctuation(c: char) -> bool {
     )
 }
 
+/// `text` in Unicode Normalization Form C, so composed and decomposed
+/// accents compare equal.
+pub fn nfc(text: &str) -> Cow<'_, str> {
+    ComposingNormalizerBorrowed::new_nfc().normalize(text)
+}
+
+/// The form search terms and texts compare in: NFC, separators as spaces,
+/// and full case folding (see `case_fold`).
 pub fn normalize_for_search(text: &str) -> String {
+    let text = nfc(text);
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         if is_word_separator(ch) {
             out.push(' ');
         } else {
-            out.extend(ch.to_lowercase());
+            push_folded(&mut out, ch);
         }
     }
     out
@@ -51,12 +64,16 @@ pub fn is_word_separator(c: char) -> bool {
     c.is_whitespace() || c == '_' || c == '-' || c == '/' || is_cjk_punctuation(c)
 }
 
+/// Whether `pos` starts a word: it follows nothing or a non-alphanumeric
+/// char. A combining dot above that folding drops (see `case_fold`) belongs
+/// to the word before it, so raw and normalized text agree on word starts.
 pub fn is_word_start(text: &str, pos: usize) -> bool {
-    pos == 0
-        || text[..pos]
-            .chars()
-            .next_back()
-            .is_some_and(|c| !c.is_alphanumeric())
+    let mut before = text[..pos].chars().rev();
+    match before.next() {
+        None => true,
+        Some('\u{307}') => !before.next().is_some_and(drops_following_dot_above),
+        Some(c) => !c.is_alphanumeric(),
+    }
 }
 
 /// ASCII chars that a non-ASCII char lowercases to, with that char's first
@@ -160,6 +177,14 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_composition_and_case_folding() {
+        assert_eq!(
+            normalize_for_search("Cafe\u{301} İstanbul STRAẞE ΛΟΓΟΣ"),
+            normalize_for_search("café istanbul strasse λογος")
+        );
+    }
+
+    #[test]
     fn normalizes_cjk_punctuation() {
         assert_eq!(
             normalize_for_search("SIGTERM\u{FF0C}\u{5C5E}\u{4E8E}"),
@@ -172,5 +197,8 @@ mod tests {
         assert!(contains_prefix_match("redaction plan", "red"));
         assert!(!contains_prefix_match("fired plan", "red"));
         assert!(contains_prefix_match("bump to v1.1.1", "1.1"));
+        assert!(!is_word_start("i\u{307}stanbul", 3));
+        assert!(!is_word_start("\u{FB01}\u{307}x", 5));
+        assert!(is_word_start("x\u{307}stanbul", 3));
     }
 }

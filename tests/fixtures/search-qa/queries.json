@@ -628,25 +628,25 @@
 "group": "unicode",
 "q": "café",
 "expect": [
-"U1"
+"U1",
+"U2"
 ],
 "user": [
 "U1",
 "U2"
 ],
-"note": "U2 is decomposed e + U+0301"
+"note": "U2 is decomposed e + U+0301; texts and queries are NFC"
 },
 {
 "id": 81,
 "group": "unicode",
 "q": "cafe",
-"expect": [
-"U2"
-],
+"expect": [],
 "user": [
 "U1",
 "U2"
-]
+],
+"note": "accents are not folded away"
 },
 {
 "id": 82,
@@ -676,35 +676,44 @@
 "q": "straße",
 "expect": [
 "U3",
+"U4",
 "H2",
 "H3"
-]
+],
+"note": "full case folding: ß folds to ss"
 },
 {
 "id": 85,
 "group": "unicode",
 "q": "strasse",
 "expect": [
-"U4"
+"U3",
+"U4",
+"H2",
+"H3"
 ],
 "user": [
 "U3",
 "U4",
 "H2"
 ],
-"note": "no full case folding"
+"note": "full case folding: ß folds to ss"
 },
 {
 "id": 86,
 "group": "unicode",
 "q": "istanbul",
-"expect": [],
+"expect": [
+"U5",
+"H2",
+"H3"
+],
 "user": [
 "U5",
 "H2",
 "H3"
 ],
-"note": "İ lowercases to i + U+0307"
+"note": "İ folds to i"
 },
 {
 "id": 87,
@@ -720,23 +729,23 @@
 "id": 88,
 "group": "unicode",
 "q": "stanbul",
-"expect": [
-"U5",
-"H2",
-"H3"
-],
+"expect": [],
 "user": [],
-"note": "U+0307 is not alphanumeric, so stanbul starts a word"
+"note": "İstanbul folds to istanbul, so stanbul is mid-word"
 },
 {
 "id": 89,
 "group": "unicode",
 "q": "diyarbakir",
-"expect": [],
+"expect": [
+"U5",
+"H3"
+],
 "user": [
 "U5",
 "H3"
-]
+],
+"note": "İ folds to i"
 },
 {
 "id": 90,
@@ -1208,25 +1217,28 @@
 "group": "unicode",
 "q": "λογος",
 "expect": [
+"G1",
 "G2"
 ],
 "user": [
 "G1",
 "G2"
 ],
-"note": "final sigma: ΛΟΓΟΣ lowercases per char to λογοσ"
+"note": "final sigma folds to σ"
 },
 {
 "id": 151,
 "group": "unicode",
 "q": "ΛΟΓΟΣ",
 "expect": [
-"G1"
+"G1",
+"G2"
 ],
 "user": [
 "G1",
 "G2"
-]
+],
+"note": "final sigma folds to σ"
 },
 {
 "id": 160,

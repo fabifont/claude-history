@@ -386,6 +386,7 @@ dependencies = [
  "fastembed",
  "fst",
  "home",
+ "icu_normalizer",
  "indicatif 0.17.11",
  "libc",
  "memchr",

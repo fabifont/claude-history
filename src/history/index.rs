@@ -14,6 +14,7 @@ use crate::agent::transcript::{
     AgentMessageRole, agent_search_text_from_parts, bounded_tool_result_text,
 };
 use crate::semantic::filter::{SemanticTurnRole, filter_turn};
+use crate::text_match::nfc;
 use chrono::{DateTime, Local, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -243,10 +244,13 @@ impl Indexer {
             full_text = format!("{custom_title} {full_text}");
         }
 
-        let preview_first: std::sync::Arc<str> = normalize_whitespace(&preview_first).into();
-        let preview_last = normalize_whitespace(&preview_last);
-        let full_text = normalize_whitespace(&full_text);
-        let agent_search_text = normalize_whitespace(&agent_search_parts.join(" "));
+        // Texts are kept in NFC so search, literal matches and highlights see
+        // composed and decomposed accents alike.
+        let text = |s: &str| nfc(&normalize_whitespace(s)).into_owned();
+        let preview_first: std::sync::Arc<str> = text(&preview_first).into();
+        let preview_last = text(&preview_last);
+        let full_text = text(&full_text);
+        let agent_search_text = text(&agent_search_parts.join(" "));
         let semantic_route_text = super::semantic_route_text(&full_text, &agent_search_text);
 
         let provenance = Provenance {
@@ -259,13 +263,14 @@ impl Indexer {
         let own_text = if provenance.child {
             String::new()
         } else {
-            normalize_whitespace(&own_parts.join(" "))
+            text(&own_parts.join(" "))
         };
         // Conversations hidden by default are not embedded.
         let (semantic_turns, semantic_turn_ranges): (Vec<_>, Vec<_>) = semantic_turns
             .into_iter()
             .zip(semantic_turn_ranges)
             .filter(|(turn, _)| !turn.is_empty() && !provenance.hidden_by_default())
+            .map(|(turn, range)| (nfc(&turn).into_owned(), range))
             .unzip();
 
         let total_tokens =
@@ -298,13 +303,15 @@ impl Indexer {
             semantic_route_text: semantic_route_text.into(),
             semantic_turns: semantic_turns.into(),
             semantic_turn_ranges,
-            project_name: Some(super::format_short_name_from_path(&project_path)),
+            project_name: Some(
+                nfc(&super::format_short_name_from_path(&project_path)).into_owned(),
+            ),
             project_path: Some(project_path),
             cwd: meta.cwd.clone(),
             message_count: ordinals.count(),
             parse_errors: transcript.diagnostics.clone(),
-            summary: meta.summary.clone(),
-            custom_title: meta.custom_title.clone(),
+            summary: meta.summary.as_deref().map(|s| nfc(s).into_owned()),
+            custom_title: meta.custom_title.as_deref().map(|s| nfc(s).into_owned()),
             model: meta.model.clone(),
             total_tokens,
             duration_minutes,

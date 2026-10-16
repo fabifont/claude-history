@@ -41,6 +41,7 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 memmap2 = "0.9"
 fst = "0.4"
 memchr = "2"
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
 zstd = "0.13"
 rusqlite = { version = "0.40", features = ["bundled"] }
 
