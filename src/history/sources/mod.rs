@@ -70,6 +70,29 @@ impl Registry {
         })
     }
 
+    /// The adapter that acts on conversations `source` wrote: its first
+    /// configured instance, else one without a root.
+    pub fn for_source(&self, source: SourceKind) -> Arc<dyn Adapter> {
+        if let Some(adapter) = self
+            .adapters
+            .iter()
+            .find(|adapter| adapter.instance().kind == source)
+        {
+            return adapter.clone();
+        }
+        match source {
+            SourceKind::Claude => Arc::new(claude::ClaudeAdapter::new(PathBuf::new())),
+            SourceKind::Pi => Arc::new(pi::PiAdapter::pi(PiSessionRoot {
+                path: PathBuf::new(),
+                flat: false,
+            })),
+            SourceKind::Omp => Arc::new(pi::PiAdapter::omp(OmpSessionRoot {
+                path: PathBuf::new(),
+                flat: false,
+            })),
+        }
+    }
+
     /// The adapter of `instance`.
     pub fn get(&self, instance: &SourceInstance) -> Option<&Arc<dyn Adapter>> {
         self.adapters

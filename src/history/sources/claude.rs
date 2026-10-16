@@ -6,8 +6,9 @@
 //! records, so their adapters share the conversion (`Records`).
 
 use crate::claude::{AgentContent, ContentBlock, LogEntry, TokenUsage, UserContent};
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::history::ParseError;
+use crate::history::actions::{Capabilities, Resume, SessionCopy, Target};
 use crate::history::adapter::{Adapter, Completeness, Discovery, Located};
 use crate::history::model::{
     ConversationKey, Event, EventKind, ExecutionMode, HeadStatus, Message, Origin, Part,
@@ -57,6 +58,127 @@ impl Adapter for ClaudeAdapter {
 
     fn decode(&self, located: &Located) -> Result<Option<Transcript>> {
         super::decode_file(located, false)
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::ALL
+    }
+
+    fn resume(&self, target: Target<'_>, fork: bool, default_args: &[String]) -> Result<Resume> {
+        let cwd = std::env::current_dir().map_err(|e| {
+            AppError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Failed to get current directory: {}", e),
+            ))
+        })?;
+        resume_plan(target, &cwd, fork, default_args)
+    }
+
+    /// Deletes every transcript of the session, in any project, with its
+    /// session directory.
+    fn delete(&self, path: &Path) -> Result<()> {
+        let uuid = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        crate::history::delete_session_by_uuid(uuid).map(|_| ())
+    }
+
+    fn rename(&self, path: &Path, title: &str) -> Result<()> {
+        crate::history::append_session_rename(path, title)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ResumeAction {
+    Run { current_dir: PathBuf },
+    CopyToCurrent { cwd_projects_dir: PathBuf },
+}
+
+/// Claude resumes a session only from the project directory that holds it.
+/// Run there when `cwd` or the conversation's project maps to that
+/// directory; otherwise (and to fork into another project) copy the session
+/// into `cwd`'s project directory first.
+fn resolve_resume_action(
+    selected_path: &Path,
+    project_path: Option<&Path>,
+    cwd: &Path,
+    fork_session: bool,
+) -> Result<ResumeAction> {
+    let conv_projects_dir = selected_path.parent().ok_or_else(|| {
+        AppError::ClaudeExecutionError(
+            "Cannot determine conversation's project directory".to_string(),
+        )
+    })?;
+    let cwd_projects_dir = crate::history::get_claude_projects_dir(cwd)?;
+    let project_dir = project_path.filter(|p| p.exists() && p.is_dir());
+
+    if project_dir.is_none() || (fork_session && cwd_projects_dir != conv_projects_dir) {
+        return Ok(ResumeAction::CopyToCurrent { cwd_projects_dir });
+    }
+
+    if cwd_projects_dir == conv_projects_dir {
+        return Ok(ResumeAction::Run {
+            current_dir: cwd.to_path_buf(),
+        });
+    }
+
+    let project_dir = project_dir.unwrap();
+    let project_projects_dir = crate::history::get_claude_projects_dir(project_dir)?;
+    if project_projects_dir == conv_projects_dir {
+        Ok(ResumeAction::Run {
+            current_dir: project_dir.to_path_buf(),
+        })
+    } else {
+        Ok(ResumeAction::CopyToCurrent { cwd_projects_dir })
+    }
+}
+
+fn resume_plan(
+    target: Target<'_>,
+    cwd: &Path,
+    fork_session: bool,
+    default_args: &[String],
+) -> Result<Resume> {
+    let selected_path = target.path;
+    let conversation_id = selected_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| {
+            AppError::ClaudeExecutionError("Conversation filename is not valid Unicode".to_string())
+        })?
+        .to_owned();
+
+    let conv_projects_dir = selected_path.parent().ok_or_else(|| {
+        AppError::ClaudeExecutionError(
+            "Cannot determine conversation's project directory".to_string(),
+        )
+    })?;
+
+    let mut command = std::process::Command::new("claude");
+    command.args(["--resume", &conversation_id]);
+    match resolve_resume_action(selected_path, target.project, cwd, fork_session)? {
+        ResumeAction::CopyToCurrent { cwd_projects_dir } => {
+            command.args(default_args);
+            command.current_dir(cwd);
+            Ok(Resume {
+                copy: Some(SessionCopy {
+                    transcript: selected_path.to_path_buf(),
+                    session_id: conversation_id,
+                    from_dir: conv_projects_dir.to_path_buf(),
+                    to_dir: cwd_projects_dir,
+                }),
+                command,
+            })
+        }
+        ResumeAction::Run { current_dir } => {
+            if fork_session {
+                command.arg("--fork-session");
+            }
+            command.args(default_args);
+            command.current_dir(current_dir);
+            Ok(Resume {
+                copy: None,
+                command,
+            })
+        }
     }
 }
 
@@ -438,4 +560,81 @@ pub(super) fn parse_timestamp(text: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(text)
         .ok()
         .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_action_uses_cwd_when_it_maps_to_selected_project_dir() {
+        let cwd = tempfile::tempdir().unwrap();
+        let stale_project = tempfile::tempdir().unwrap();
+        let stale_project_path = stale_project.path().to_path_buf();
+        let selected_path = crate::history::get_claude_projects_dir(cwd.path())
+            .unwrap()
+            .join("12345678-1234-4234-9234-123456789abc.jsonl");
+
+        let action = resolve_resume_action(
+            &selected_path,
+            Some(stale_project_path.as_path()),
+            cwd.path(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            action,
+            ResumeAction::Run {
+                current_dir: cwd.path().to_path_buf()
+            }
+        );
+    }
+
+    #[test]
+    fn resume_action_uses_project_path_when_it_maps_to_selected_project_dir() {
+        let cwd = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_path_buf();
+        let selected_path = crate::history::get_claude_projects_dir(project.path())
+            .unwrap()
+            .join("12345678-1234-4234-9234-123456789abc.jsonl");
+
+        let action = resolve_resume_action(
+            &selected_path,
+            Some(project_path.as_path()),
+            cwd.path(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            action,
+            ResumeAction::Run {
+                current_dir: project.path().to_path_buf()
+            }
+        );
+    }
+
+    #[test]
+    fn resume_action_copies_selected_transcript_when_project_path_maps_elsewhere() {
+        let cwd = tempfile::tempdir().unwrap();
+        let selected_project = tempfile::tempdir().unwrap();
+        let stale_project = tempfile::tempdir().unwrap();
+        let stale_project_path = stale_project.path().to_path_buf();
+        let selected_path = crate::history::get_claude_projects_dir(selected_project.path())
+            .unwrap()
+            .join("12345678-1234-4234-9234-123456789abc.jsonl");
+        let cwd_projects_dir = crate::history::get_claude_projects_dir(cwd.path()).unwrap();
+
+        let action = resolve_resume_action(
+            &selected_path,
+            Some(stale_project_path.as_path()),
+            cwd.path(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(action, ResumeAction::CopyToCurrent { cwd_projects_dir });
+    }
 }

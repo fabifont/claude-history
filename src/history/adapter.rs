@@ -4,11 +4,13 @@
 //! its conversations with one `stat` per artifact (`discover`), picking the
 //! history a conversation's key selects (`resolve`), and decoding that
 //! history into a `Transcript`. Everything downstream works on transcripts.
+//! It also plans the actions the source's own tool offers (`actions`).
 //!
 //! Discovery feeds reconcile's fingerprint diff, so it must be cheap and must
 //! say when it is incomplete: a conversation that a partial or degraded
 //! listing did not report may still exist, and its stored state is kept.
 
+use super::actions::{Capabilities, Resume, Target};
 use super::model::{ConversationKey, SourceInstance, Transcript};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -124,6 +126,24 @@ pub trait Adapter: Send + Sync {
     /// Decodes the history `located` selects; `None` when its artifacts
     /// hold no conversation.
     fn decode(&self, located: &Located) -> crate::error::Result<Option<Transcript>>;
+
+    fn capabilities(&self) -> Capabilities;
+
+    /// Plans resuming `target` in the tool that wrote it, or forking it
+    /// into a new conversation. `default_args` are the user's extra
+    /// arguments for tools that take them.
+    fn resume(
+        &self,
+        target: Target<'_>,
+        fork: bool,
+        default_args: &[String],
+    ) -> crate::error::Result<Resume>;
+
+    /// Deletes the conversation whose own artifact is `path`.
+    fn delete(&self, path: &Path) -> crate::error::Result<()>;
+
+    /// Sets the title of the conversation whose own artifact is `path`.
+    fn rename(&self, path: &Path, title: &str) -> crate::error::Result<()>;
 }
 
 #[cfg(test)]

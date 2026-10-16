@@ -208,14 +208,17 @@ impl App {
         let path = self.conversations[idx].path.clone();
 
         let source = self.conversations[idx].source;
-        let rename = match source {
-            crate::history::Source::Claude => crate::history::append_session_rename(&path, &title),
-            crate::history::Source::Pi => crate::history::pi::append_session_rename(&path, &title),
-            crate::history::Source::Omp => {
-                crate::history::pi::append_omp_session_rename(&path, &title)
-            }
-        };
-        match rename
+        let adapter = crate::history::sources::Registry::from_env().for_source(source);
+        if !adapter.capabilities().rename {
+            self.dialog_mode = DialogMode::None;
+            self.status_message = Some((
+                format!("Renaming {} sessions is not supported", source.list_label()),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
+        match adapter
+            .rename(&path, &title)
             .and_then(|_| crate::history::process_conversation_file(path.clone(), None, None))
         {
             Ok(Some(mut conv)) if self.snapshot.is_some() => {
