@@ -154,7 +154,7 @@ fn copy_via_terminal(mut writer: impl Write, text: &str) -> Result<(), String> {
 /// overrides selection with `auto`, `system`, or `osc52`.
 pub fn copy_to_system_clipboard(text: &str) -> Result<ClipboardDestination, String> {
     if clipboard_transport()? == ClipboardTransport::Osc52 {
-        copy_via_terminal(std::io::stderr(), text)?;
+        copy_via_terminal(super::terminal_out::TerminalOut, text)?;
         return Ok(ClipboardDestination::Terminal);
     }
 

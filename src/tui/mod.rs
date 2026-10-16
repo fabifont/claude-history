@@ -4,6 +4,7 @@ mod export;
 mod runtime;
 pub mod search;
 mod semantic_worker;
+mod terminal_out;
 pub mod theme;
 mod ui;
 pub mod viewer;

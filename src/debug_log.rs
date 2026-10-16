@@ -15,6 +15,13 @@ fn get_debug_log_path() -> Option<PathBuf> {
     )
 }
 
+/// Creates or truncates `name` beside the debug log.
+pub fn create_state_file(name: &str) -> Option<fs::File> {
+    let path = get_debug_log_path()?.with_file_name(name);
+    fs::create_dir_all(path.parent()?).ok()?;
+    fs::File::create(path).ok()
+}
+
 fn open_debug_log_file() -> std::io::Result<Option<fs::File>> {
     let log_path = match get_debug_log_path() {
         Some(p) => p,

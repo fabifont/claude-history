@@ -1,4 +1,5 @@
 use super::app::{Action, App, AppMode, DialogMode, ListSearchMode, TuiSearchOptions};
+use super::terminal_out::{StderrRedirect, TerminalOut};
 use super::ui;
 use crate::config::KeyBindings;
 use crate::debug_log;
@@ -12,7 +13,7 @@ use crossterm::event::{
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
-use std::io::{self, Stderr};
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,31 +22,35 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 struct TerminalGuard {
-    terminal: Terminal<CrosstermBackend<Stderr>>,
+    terminal: Terminal<CrosstermBackend<TerminalOut>>,
+    /// Dropped after the terminal is restored.
+    _stderr: StderrRedirect,
 }
 
 impl TerminalGuard {
     fn new() -> Result<Self> {
         terminal::enable_raw_mode().map_err(|e| AppError::Io(io::Error::other(e)))?;
+        let stderr = StderrRedirect::new();
 
-        let mut stderr = io::stderr();
-        if let Err(e) = crossterm::execute!(stderr, EnterAlternateScreen, EnableMouseCapture) {
+        if let Err(e) = crossterm::execute!(TerminalOut, EnterAlternateScreen, EnableMouseCapture) {
             let _ = terminal::disable_raw_mode();
             return Err(AppError::Io(io::Error::other(e)));
         }
 
-        let backend = CrosstermBackend::new(stderr);
+        let backend = CrosstermBackend::new(TerminalOut);
         let terminal = match Terminal::new(backend) {
             Ok(t) => t,
             Err(e) => {
                 let _ = terminal::disable_raw_mode();
-                let _ =
-                    crossterm::execute!(io::stderr(), DisableMouseCapture, LeaveAlternateScreen);
+                let _ = crossterm::execute!(TerminalOut, DisableMouseCapture, LeaveAlternateScreen);
                 return Err(AppError::Io(io::Error::other(e)));
             }
         };
 
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            _stderr: stderr,
+        })
     }
 }
 
@@ -148,7 +153,10 @@ fn read_event(wait: Duration) -> Result<Option<Event>> {
         .map_err(|e| AppError::Io(io::Error::other(e)))
 }
 
-fn prepare_frame(app: &mut App, terminal: &mut Terminal<CrosstermBackend<Stderr>>) -> FrameState {
+fn prepare_frame(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<TerminalOut>>,
+) -> FrameState {
     let frame_area = terminal.get_frame().area();
     let viewport_height = frame_area.height.saturating_sub(3) as usize;
     let content_width = calculate_content_width(frame_area.width as usize, app.show_timing());
@@ -172,7 +180,7 @@ fn prepare_frame(app: &mut App, terminal: &mut Terminal<CrosstermBackend<Stderr>
     }
 }
 
-fn draw_frame(app: &App, terminal: &mut Terminal<CrosstermBackend<Stderr>>) -> Result<()> {
+fn draw_frame(app: &App, terminal: &mut Terminal<CrosstermBackend<TerminalOut>>) -> Result<()> {
     terminal.draw(|frame| ui::render(frame, app))?;
     Ok(())
 }
