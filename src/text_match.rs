@@ -54,8 +54,20 @@ pub fn normalize_for_search(text: &str) -> String {
     out
 }
 
+#[inline]
+fn normalize_ascii(byte: u8) -> char {
+    if is_word_separator(byte.into()) {
+        ' '
+    } else {
+        char::from(byte.to_ascii_lowercase())
+    }
+}
+
+#[inline]
 fn push_normalized(out: &mut String, ch: char) {
-    if is_word_separator(ch) {
+    if ch.is_ascii() {
+        out.push(normalize_ascii(ch as u8));
+    } else if is_word_separator(ch) {
         out.push(' ');
     } else {
         push_folded(out, ch);
@@ -89,6 +101,18 @@ pub fn word_match_ranges(text: &str, word: &str, anywhere: bool) -> Vec<(usize, 
 pub struct NormalizedText<'a> {
     raw: &'a str,
     normalized: String,
+    /// The chars whose normalized form is not one char of the same length,
+    /// in order. Between them, raw and normalized chars correspond one to
+    /// one with equal lengths.
+    shifts: Vec<Shift>,
+}
+
+/// A raw char and the bytes it normalized to.
+struct Shift {
+    normalized: usize,
+    normalized_len: usize,
+    raw: usize,
+    raw_len: usize,
 }
 
 impl<'a> NormalizedText<'a> {
@@ -96,9 +120,40 @@ impl<'a> NormalizedText<'a> {
     /// normalized form is then `normalize_for_search(raw)`.
     pub fn new(raw: &'a str) -> Self {
         let mut normalized = String::with_capacity(raw.len());
-        raw.chars()
-            .for_each(|ch| push_normalized(&mut normalized, ch));
-        Self { raw, normalized }
+        let mut shifts = Vec::new();
+        let mut rest = raw;
+        while !rest.is_empty() {
+            // ASCII runs normalize byte for byte.
+            let ascii = rest
+                .bytes()
+                .position(|byte| !byte.is_ascii())
+                .unwrap_or(rest.len());
+            normalized.extend(rest[..ascii].bytes().map(normalize_ascii));
+            rest = &rest[ascii..];
+            let Some(ch) = rest.chars().next() else {
+                break;
+            };
+            let raw_at = raw.len() - rest.len();
+            let at = normalized.len();
+            push_normalized(&mut normalized, ch);
+            let added = &normalized[at..];
+            let same_shape = added.len() == ch.len_utf8()
+                && added.chars().next().map(char::len_utf8) == Some(added.len());
+            if !same_shape {
+                shifts.push(Shift {
+                    normalized: at,
+                    normalized_len: added.len(),
+                    raw: raw_at,
+                    raw_len: ch.len_utf8(),
+                });
+            }
+            rest = &rest[ch.len_utf8()..];
+        }
+        Self {
+            raw,
+            normalized,
+            shifts,
+        }
     }
 
     pub fn raw(&self) -> &'a str {
@@ -126,42 +181,45 @@ impl<'a> NormalizedText<'a> {
     /// Byte ranges in the raw text of the chars that `ranges`, byte ranges in
     /// the normalized form, came from.
     pub fn raw_ranges(&self, ranges: &[(usize, usize)]) -> Vec<(usize, usize)> {
-        // Each range's start and last byte, in normalized order; even
-        // entries are starts and odd ones ends.
-        let mut points: Vec<(usize, usize)> = ranges
+        ranges
             .iter()
-            .enumerate()
-            .flat_map(|(i, &(start, end))| [(start, 2 * i), (end.max(start + 1) - 1, 2 * i + 1)])
-            .collect();
-        points.sort_unstable();
-        let mut mapped = vec![self.raw.len(); points.len()];
-        let mut points = points.into_iter().peekable();
-        let mut folded = String::new();
-        let mut at = 0;
-        for (raw_at, ch) in self.raw.char_indices() {
-            // Folding a char depends on the char folded before it.
-            let previous = folded.chars().next_back();
-            folded.clear();
-            folded.extend(previous);
-            let carried = folded.len();
-            push_normalized(&mut folded, ch);
-            let next = at + folded.len() - carried;
-            while let Some(&(point, index)) = points.peek()
-                && point < next
-            {
-                mapped[index] = if index % 2 == 0 {
-                    raw_at
-                } else {
-                    raw_at + ch.len_utf8()
-                };
-                points.next();
+            .map(|&(start, end)| {
+                (
+                    self.raw_char_at(start).0,
+                    self.raw_char_at(end.max(start + 1) - 1).1,
+                )
+            })
+            .collect()
+    }
+
+    /// The byte range of the raw char that normalized byte `at` came from,
+    /// or an empty range at the end past the normalized text.
+    fn raw_char_at(&self, at: usize) -> (usize, usize) {
+        let len = self.raw.len();
+        let shift = self.shifts.partition_point(|shift| shift.normalized <= at);
+        let (normalized_end, raw_end) = match shift.checked_sub(1).map(|i| &self.shifts[i]) {
+            Some(shift) if at < shift.normalized + shift.normalized_len => {
+                return (shift.raw, shift.raw + shift.raw_len);
             }
-            at = next;
+            Some(shift) => (
+                shift.normalized + shift.normalized_len,
+                shift.raw + shift.raw_len,
+            ),
+            None => (0, 0),
+        };
+        let mut raw_at = raw_end + (at - normalized_end);
+        if raw_at >= len {
+            return (len, len);
         }
-        mapped.chunks(2).map(|pair| (pair[0], pair[1])).collect()
+        while !self.raw.is_char_boundary(raw_at) {
+            raw_at -= 1;
+        }
+        let char_len = self.raw[raw_at..].chars().next().map_or(0, char::len_utf8);
+        (raw_at, raw_at + char_len)
     }
 }
 
+#[inline]
 pub fn is_word_separator(c: char) -> bool {
     c.is_whitespace() || c == '_' || c == '-' || c == '/' || is_cjk_punctuation(c)
 }
@@ -302,6 +360,51 @@ mod tests {
         assert_eq!(found("fi"), ["ﬁ"]);
         assert_eq!(found("strasse ok"), ["STRAẞE", "ok"]);
         assert_eq!(found("ss"), Vec::<&str>::new());
+
+        let ascii = NormalizedText::new("Foo_bar-BAZ/qux");
+        assert_eq!(
+            ascii.query_ranges("bar baz qux"),
+            [(4, 7), (8, 11), (12, 15)]
+        );
+    }
+
+    #[test]
+    fn raw_ranges_map_every_normalized_range_to_its_raw_chars() {
+        let texts = [
+            "İstanbul ﬁle STRAẞE i\u{307}stanbul ok",
+            "Café_ΛΟΓΟΣ-测试会话/Москва ǰ\u{301} \u{307}x Ꮳherokee",
+            "emoji🚀rocket 한국어 naïve—dash “quotes” ǅemal \u{212A}elvin",
+        ];
+        for raw in texts {
+            let text = NormalizedText::new(raw);
+            // Each raw char's byte ranges in the normalized and raw text.
+            let mut spans = Vec::new();
+            let mut normalized = String::new();
+            for (raw_at, ch) in raw.char_indices() {
+                let at = normalized.len();
+                push_normalized(&mut normalized, ch);
+                spans.push((at, normalized.len(), raw_at, raw_at + ch.len_utf8()));
+            }
+            assert_eq!(text.normalized, normalized);
+            let containing = |at: usize| {
+                let &(_, _, start, end) = spans
+                    .iter()
+                    .find(|&&(from, to, _, _)| from <= at && at < to)
+                    .unwrap();
+                (start, end)
+            };
+            let boundaries: Vec<usize> = normalized.char_indices().map(|(at, _)| at).collect();
+            for (i, &start) in boundaries.iter().enumerate() {
+                for &end in boundaries[i + 1..].iter().chain([&normalized.len()]) {
+                    let expected = (containing(start).0, containing(end - 1).1);
+                    assert_eq!(
+                        text.raw_ranges(&[(start, end)]),
+                        [expected],
+                        "{raw:?} {start}..{end}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

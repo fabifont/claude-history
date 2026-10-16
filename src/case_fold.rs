@@ -13,7 +13,41 @@ pub fn push_folded(out: &mut String, ch: char) {
         out.push(ch.to_ascii_lowercase());
         return;
     }
+    if let Some(&folded) = two_byte_folds().get(ch as usize - 0x80)
+        && folded != '\0'
+    {
+        out.push(folded);
+        return;
+    }
+    push_folded_uncached(out, ch);
+}
+
+/// The folding of each two-byte UTF-8 char (U+0080 to U+07FF) that folds to
+/// one char regardless of the text before it, or `'\0'`.
+fn two_byte_folds() -> &'static [char] {
+    static FOLDED: std::sync::OnceLock<Vec<char>> = std::sync::OnceLock::new();
+    FOLDED.get_or_init(|| {
+        ('\u{80}'..='\u{7FF}')
+            .map(|ch| {
+                if ch == '\u{307}' {
+                    return '\0';
+                }
+                let mut folded = String::new();
+                push_folded_uncached(&mut folded, ch);
+                let mut chars = folded.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(folded), None) => folded,
+                    _ => '\0',
+                }
+            })
+            .collect()
+    })
+}
+
+fn push_folded_uncached(out: &mut String, ch: char) {
     match ch {
+        // Kana, CJK ideographs and Hangul syllables have no case.
+        '\u{3040}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7A3}' => out.push(ch),
         '\u{130}' => out.push('i'),
         '\u{307}' if out.ends_with(['i', 'j']) => {}
         '\u{13A0}'..='\u{13F5}' => out.push(ch),
@@ -176,6 +210,30 @@ mod tests {
         let mut out = String::new();
         text.chars().for_each(|ch| push_folded(&mut out, ch));
         out
+    }
+
+    #[test]
+    fn two_byte_table_folds_like_the_uncached_rules() {
+        for ch in '\u{80}'..='\u{7FF}' {
+            for before in ["", "i", "x"] {
+                let mut cached = before.to_string();
+                push_folded(&mut cached, ch);
+                let mut uncached = before.to_string();
+                push_folded_uncached(&mut uncached, ch);
+                assert_eq!(cached, uncached, "{before:?} {ch:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn caseless_ranges_have_no_folding() {
+        for ch in ('\u{3040}'..='\u{9FFF}').chain('\u{AC00}'..='\u{D7A3}') {
+            assert!(ch.to_lowercase().eq([ch]), "{ch:?}");
+            assert!(
+                FOLDS.binary_search_by_key(&ch, |&(from, _)| from).is_err(),
+                "{ch:?}"
+            );
+        }
     }
 
     #[test]

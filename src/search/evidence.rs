@@ -71,6 +71,15 @@ impl EvidenceSpec {
         }
     }
 
+    fn has_match(&self, text: &NormalizedText) -> bool {
+        match self {
+            Self::Normalized { term, anywhere } => {
+                !word_match_ranges(text.normalized(), term, *anywhere).is_empty()
+            }
+            Self::Literal(literal) => literal.matches(text.raw()),
+        }
+    }
+
     fn ranges(&self, text: &NormalizedText) -> Vec<(usize, usize)> {
         match self {
             Self::Normalized { term, anywhere } => {
@@ -220,7 +229,7 @@ fn select_context_ranges(
     let mut missing_mask: u64 = 0;
     let mut missing_count = 0u32;
     for (i, spec) in specs.iter().enumerate() {
-        if spec.ranges(&preview).is_empty() {
+        if !spec.has_match(&preview) {
             missing_mask |= 1 << i;
             missing_count += 1;
         }
@@ -354,14 +363,37 @@ pub(crate) fn select_hidden_context_ranges(
 
 fn find_all_spec_hits(text: &NormalizedText, specs: &[EvidenceSpec]) -> Vec<TermHit> {
     let mut all_hits = Vec::new();
+    // Normalized matches are mapped back to the raw text in one pass.
+    let mut normalized = Vec::new();
+    let mut normalized_terms = Vec::new();
     for (term_idx, spec) in specs.iter().enumerate() {
-        all_hits.extend(spec.ranges(text).into_iter().map(|(start, end)| TermHit {
-            start,
-            end,
-            term_idx,
-        }));
+        match spec {
+            EvidenceSpec::Normalized { term, anywhere } => {
+                for range in word_match_ranges(text.normalized(), term, *anywhere) {
+                    normalized.push(range);
+                    normalized_terms.push(term_idx);
+                }
+            }
+            EvidenceSpec::Literal(_) => {
+                all_hits.extend(spec.ranges(text).into_iter().map(|(start, end)| TermHit {
+                    start,
+                    end,
+                    term_idx,
+                }));
+            }
+        }
     }
-    all_hits.sort_unstable_by_key(|hit| hit.start);
+    all_hits.extend(
+        text.raw_ranges(&normalized)
+            .into_iter()
+            .zip(normalized_terms)
+            .map(|((start, end), term_idx)| TermHit {
+                start,
+                end,
+                term_idx,
+            }),
+    );
+    all_hits.sort_unstable_by_key(|hit| (hit.start, hit.term_idx));
     all_hits
 }
 
