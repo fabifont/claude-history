@@ -797,8 +797,9 @@ pub(crate) mod oracle {
         }
     }
 
-    /// `conversations` sorted into doc order, with timestamps cut to the
-    /// milliseconds cards store.
+    /// `conversations` sorted into the doc order of cards (newest first,
+    /// then by path bytes), with timestamps cut to the milliseconds cards
+    /// store.
     pub(crate) fn into_doc_order(mut conversations: Vec<Conversation>) -> Vec<Conversation> {
         for conversation in &mut conversations {
             let ms = conversation.timestamp.timestamp_millis();
@@ -807,7 +808,7 @@ pub(crate) mod oracle {
         conversations.sort_by(|a, b| {
             b.timestamp
                 .cmp(&a.timestamp)
-                .then_with(|| a.path.cmp(&b.path))
+                .then_with(|| a.path.as_os_str().cmp(b.path.as_os_str()))
         });
         for (index, conversation) in conversations.iter_mut().enumerate() {
             conversation.index = index;
@@ -891,27 +892,53 @@ pub(crate) mod oracle {
                 page.min(expected.len()),
                 "query {query:?}: page size"
             );
-            let render = |hits: &[Hit]| {
-                hits.iter()
+            assert_same_hits(query, &all, &expected);
+            ranking.stats()
+        }
+    }
+
+    /// Asserts that `actual` holds the `expected` docs in order with the
+    /// same scores.
+    pub(crate) fn assert_same_hits(query: &str, actual: &[Hit], expected: &[Hit]) {
+        if let Some(at) = actual
+            .iter()
+            .zip(expected)
+            .position(|(a, e)| a.doc != e.doc || (a.score - e.score).abs() > 1e-9)
+        {
+            let near = |hits: &[Hit]| {
+                hits[at.saturating_sub(2)..(at + 3).min(hits.len())]
+                    .iter()
                     .map(|hit| format!("{}:{:.6}", hit.doc, hit.score))
                     .collect::<Vec<_>>()
                     .join(" ")
             };
-            assert_eq!(
-                render(&all),
-                render(&expected),
-                "query {query:?}: results differ"
+            panic!(
+                "query {query:?}: results differ at {at} of {}/{}: {} != {}",
+                actual.len(),
+                expected.len(),
+                near(actual),
+                near(expected)
             );
-            for (actual, expected) in all.iter().zip(&expected) {
-                assert!(
-                    (actual.score - expected.score).abs() <= 1e-9,
-                    "query {query:?}: doc {} score {} != {}",
-                    actual.doc,
-                    actual.score,
-                    expected.score
-                );
-            }
-            ranking.stats()
+        }
+        let render = |hits: &[Hit]| {
+            hits.iter()
+                .map(|hit| format!("{}:{:.6}", hit.doc, hit.score))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(
+            render(actual),
+            render(expected),
+            "query {query:?}: results differ"
+        );
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!(
+                (actual.score - expected.score).abs() <= 1e-9,
+                "query {query:?}: doc {} score {} != {}",
+                actual.doc,
+                actual.score,
+                expected.score
+            );
         }
     }
 }
@@ -1446,6 +1473,68 @@ mod tests {
         }
     }
 
+    /// Asserts that searching the generation `CURRENT` names under `root`
+    /// returns the in-memory results over `conversations`.
+    fn check_generation(
+        root: &std::path::Path,
+        conversations: &[Conversation],
+        queries: &[&str],
+        now: DateTime<Local>,
+    ) {
+        let corpus = Corpus::new(conversations.to_vec());
+        let snapshot =
+            crate::store::Snapshot::open(root, false, crate::time_filter::TimeFilter::default())
+                .unwrap();
+        let index = crate::store::SearchIndex::open(snapshot).unwrap();
+        for query in queries {
+            let mut ranking = index.search(query, now, &|_| true);
+            let all = ranking.complete().to_vec();
+            super::oracle::assert_same_hits(query, &all, &corpus.expected(query, now));
+        }
+    }
+
+    /// Publishes `live` as the next generation under `lock`, adding a delta
+    /// for the changed conversations.
+    fn publish_live(lock: &crate::store::generation::PublishLock, live: &[Conversation]) {
+        crate::store::generation::publish_all(lock, live).unwrap();
+    }
+
+    #[test]
+    fn generations_with_deltas_and_merges_match_in_memory_search() {
+        use crate::store::generation::{Generation, MergePolicy, PublishLock, compact};
+        for seed in [1, 2] {
+            let (all, now) = generated_corpus(seed, 400);
+            let queries = generated_queries(seed);
+            let queries: Vec<&str> = queries.iter().map(String::as_str).collect();
+            let root = tempfile::tempdir().unwrap();
+            let lock = PublishLock::try_acquire(root.path()).unwrap().unwrap();
+            let mut live = all[..250].to_vec();
+            publish_live(&lock, &live);
+            for (round, added) in all[250..].chunks(25).take(5).enumerate() {
+                for conversation in live.iter_mut().skip(round).step_by(17) {
+                    conversation.full_text =
+                        format!("{} {}", conversation.full_text, VOCAB[round]).into();
+                }
+                let removed = (round * 37) % live.len();
+                live.remove(removed);
+                live.extend_from_slice(added);
+                publish_live(&lock, &live);
+                check_generation(root.path(), &live, &queries, now);
+            }
+            let generation = Generation::open(root.path()).unwrap();
+            assert_eq!(generation.segs().len(), 6, "seed {seed}");
+
+            compact(&lock, &generation, MergePolicy::DEFAULT).unwrap();
+            let merged = Generation::open(root.path()).unwrap();
+            assert!(merged.segs().len() < 6, "seed {seed}");
+            check_generation(root.path(), &live, &queries, now);
+
+            compact(&lock, &merged, MergePolicy::FULL).unwrap();
+            assert_eq!(Generation::open(root.path()).unwrap().segs().len(), 1);
+            check_generation(root.path(), &live, &queries, now);
+        }
+    }
+
     /// Sample queries for the real-corpus oracle and benchmark.
     const REAL_QUERIES: &[&str] = &[
         "error handling",
@@ -1585,6 +1674,33 @@ mod tests {
                 stats.candidates, stats.texts_read
             );
         }
+    }
+
+    /// The real corpus published as an older base plus a delta holding the
+    /// newest sessions and edits to older ones, searched against the
+    /// in-memory results.
+    #[test]
+    #[ignore = "reads the real history; run with --ignored"]
+    fn real_corpus_generation_oracle() {
+        let mut conversations = crate::history::load_all_conversations(false, None).unwrap();
+        conversations.sort_by_key(|conversation| std::cmp::Reverse(conversation.timestamp));
+        let now = Local::now();
+        let root = tempfile::tempdir().unwrap();
+        let lock = crate::store::generation::PublishLock::try_acquire(root.path())
+            .unwrap()
+            .unwrap();
+        publish_live(&lock, &conversations[300..]);
+        for conversation in conversations.iter_mut().skip(300).step_by(97) {
+            conversation.full_text =
+                format!("{} zstd generation snapshot", conversation.full_text).into();
+        }
+        let started = std::time::Instant::now();
+        publish_live(&lock, &conversations);
+        eprintln!("delta publish {:.2?}", started.elapsed());
+        let generation = crate::store::generation::Generation::open(root.path()).unwrap();
+        eprintln!("segments {:?}", generation.segs());
+        assert_eq!(generation.segs().len(), 2);
+        check_generation(root.path(), &conversations, REAL_QUERIES, now);
     }
 
     /// Counts the text bytes handed out.
