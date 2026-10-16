@@ -1,11 +1,13 @@
 ## Unreleased
 
+## v0.1.77 (2026-09-20)
+
 - Much faster startup and search: the list appears almost instantly, searches
   finish in tens of milliseconds instead of seconds, and memory use drops from
   gigabytes to around 100 MB. Session history is kept in an on-disk index that
   updates only what changed since the last launch. The first launch after
   upgrading rebuilds it once, with progress shown in the TUI
-- New: Browse, search, read, resume, fork, and delete Codex threads alongside
+- New: Browse, search, read, resume, fork, and delete **Codex** threads alongside
   Claude, Pi, and OMP sessions. Set Codex resume and fork arguments with
   `[resume.codex] default_args`
 - New: Press `Ctrl+V` to search only the messages you typed, leaving out
