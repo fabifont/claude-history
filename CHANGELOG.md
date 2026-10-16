@@ -1,3 +1,36 @@
+## Unreleased
+
+- Much faster startup and search: the list appears almost instantly, searches
+  finish in tens of milliseconds instead of seconds, and memory use drops from
+  gigabytes to around 100 MB. Session history is kept in an on-disk index that
+  updates only what changed since the last launch. The first launch after
+  upgrading rebuilds it once, with progress shown in the TUI
+- New: Browse, search, read, resume, fork, and delete Codex threads alongside
+  Claude, Pi, and OMP sessions. Set Codex resume and fork arguments with
+  `[resume.codex] default_args`
+- New: Press `Ctrl+V` to search only the messages you typed, leaving out
+  replies, tool output, and injected context. `agent search --user-only` does
+  the same for agents
+  ([#81](https://github.com/raine/claude-history/issues/81))
+- New: `exclude_paths` in `[tui]` hides sessions whose working directory starts
+  with a listed path, in the TUI and agent search
+  ([#91](https://github.com/raine/claude-history/issues/91))
+- New: Press `Ctrl+G`, or start with `--all-kinds`, to show automated (Codex
+  exec) and subagent conversations, which stay hidden by default
+- Keyword search matches words at their start, including after `_`, `.`, `/`,
+  `-`, and letter-digit switches, so `1.2.3` finds `v1.2.3` and quoted text no
+  longer matches in the middle of a word
+- Keyword search folds case across scripts and treats differently encoded
+  accented letters as equal, so `istanbul` finds `İstanbul` and `strasse` finds
+  `straße`
+- Viewer search (`/`) follows the same matching rules as the list and reports
+  when nothing matches, and every list match shows a highlighted snippet
+- Agent search finds and ranks the same conversations as the TUI, including
+  title, summary, and project matches
+- Fix: Sessions are dated by their last message, so a file touched without new
+  activity no longer jumps to the top as recently active
+- Fix: Native library warnings no longer draw over the TUI
+
 ## v0.1.76 (2026-09-20)
 
 - Press `Ctrl+L` in the session picker to refresh sessions created, renamed, or
