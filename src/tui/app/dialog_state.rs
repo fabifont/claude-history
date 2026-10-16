@@ -218,6 +218,18 @@ impl App {
         match rename
             .and_then(|_| crate::history::process_conversation_file(path.clone(), None, None))
         {
+            Ok(Some(mut conv)) if self.snapshot.is_some() => {
+                // The index keeps the old title until the reconciled
+                // generation is shown.
+                let conversation = &mut Arc::make_mut(&mut self.conversations)[idx];
+                conversation.custom_title = conv.custom_title.take();
+                self.renamed
+                    .insert(path.clone(), conversation.custom_title.clone());
+                self.dialog_mode = DialogMode::None;
+                self.status_message =
+                    Some(("Session renamed".to_string(), std::time::Instant::now()));
+                self.request_reconcile();
+            }
             Ok(Some(mut conv)) => {
                 conv.index = idx;
                 conv.project_name = self.conversations[idx].project_name.clone();
@@ -226,8 +238,6 @@ impl App {
                 self.dialog_mode = DialogMode::None;
                 self.status_message =
                     Some(("Session renamed".to_string(), std::time::Instant::now()));
-                // The index holds the old title.
-                self.drop_search_index();
                 self.refresh_search_data();
                 self.selection_anchor = Some(path);
                 self.update_filter();

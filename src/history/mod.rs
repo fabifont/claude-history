@@ -33,7 +33,7 @@ use std::time::SystemTime;
 // Re-export public API
 pub use loader::{
     DeleteEmptyScope, delete_empty_transcripts, delete_session_by_uuid, find_jsonl_by_uuid,
-    load_all_conversations, load_all_conversations_streaming,
+    load_all_conversations,
 };
 pub(crate) use messages::{extract_skill_preview, retained_user_text};
 pub(crate) use parser::process_conversation_file;
@@ -224,18 +224,6 @@ pub struct Project {
     pub name: String,         // directory name (encoded)
     pub display_name: String, // heuristic decoded path
     pub modified: SystemTime,
-}
-
-/// Message sent from background loader to TUI
-pub enum LoaderMessage {
-    /// A fatal error occurred (e.g., projects root doesn't exist)
-    Fatal(AppError),
-    /// A non-fatal error occurred (project-level, error already logged)
-    ProjectError,
-    /// A batch of loaded conversations from one project
-    Batch(Vec<Conversation>),
-    /// Loading completed
-    Done,
 }
 
 /// Get the root Claude projects directory (~/.claude/projects)

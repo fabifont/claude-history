@@ -663,7 +663,7 @@ fn semantic_keypress_dispatches_immediately() {
 }
 
 #[test]
-fn finish_loading_dispatches_buffered_semantic_query() {
+fn show_conversations_dispatches_buffered_semantic_query() {
     let mut app = App::new_loading_with_options(
         ToolDisplayMode::Truncated,
         false,
@@ -675,12 +675,12 @@ fn finish_loading_dispatches_buffered_semantic_query() {
             default_mode: ListSearchMode::Semantic,
         },
     );
-    app.append_conversations(vec![conversation(
+    let loaded = vec![conversation(
         Some("Visible"),
         "-tmp-visible",
         "22222222-2222-4222-8222-222222222222",
         "needle",
-    )]);
+    )];
     let (request_tx, request_rx) = mpsc::channel();
     let (_response_tx, response_rx) = mpsc::channel();
     app.semantic_search.worker_tx = Some(request_tx);
@@ -688,7 +688,7 @@ fn finish_loading_dispatches_buffered_semantic_query() {
     app.query = "needle".to_string();
     app.cursor_pos = app.query.chars().count();
 
-    app.finish_loading();
+    app.show_conversations(loaded);
 
     let commands = drain_semantic_commands(&request_rx);
     let request = last_semantic_search(&commands).expect("semantic search");
@@ -710,19 +710,18 @@ fn semantic_dispatch_after_loading_keeps_snapshot_aligned() {
             default_mode: ListSearchMode::Semantic,
         },
     );
-    app.append_conversations(vec![conversation(
+    let loaded = vec![conversation(
         Some("Visible"),
         "-tmp-visible",
         "22222222-2222-4222-8222-222222222222",
         "needle",
-    )]);
-    assert!(app.semantic_conversations_snapshot.is_empty());
+    )];
     let (request_tx, request_rx) = mpsc::channel();
     let (_response_tx, response_rx) = mpsc::channel();
     app.semantic_search.worker_tx = Some(request_tx);
     app.semantic_search.worker_rx = Some(response_rx);
 
-    app.finish_loading();
+    app.show_conversations(loaded);
 
     let commands = drain_semantic_commands(&request_rx);
     let corpus = commands
@@ -1575,7 +1574,7 @@ fn uuid_dispatch_invalidates_stale_search_response() {
 }
 
 #[test]
-fn finish_loading_invalidates_stale_loading_search_response() {
+fn show_conversations_invalidates_stale_loading_search_response() {
     let mut app = App::new_loading_with_options(
         ToolDisplayMode::Truncated,
         false,
@@ -1591,13 +1590,13 @@ fn finish_loading_invalidates_stale_loading_search_response() {
     app.search_generation = 1;
     app.search_in_flight = true;
 
-    app.append_conversations(vec![conversation(
+    let loaded = vec![conversation(
         Some("Visible"),
         "-tmp-visible",
         "22222222-2222-4222-8222-222222222222",
         "needle",
-    )]);
-    app.finish_loading();
+    )];
+    app.show_conversations(loaded);
     assert_eq!(filtered_projects(&app), vec![Some("Visible")]);
 
     tx.send(SearchResponse {
@@ -1626,7 +1625,7 @@ fn workspace_filter_without_project_context_keeps_rows() {
         TuiSearchOptions::default(),
     );
 
-    app.append_conversations(vec![conversation(
+    app.show_conversations(vec![conversation(
         Some("Visible"),
         "-tmp-visible",
         "22222222-2222-4222-8222-222222222222",
@@ -1637,7 +1636,7 @@ fn workspace_filter_without_project_context_keeps_rows() {
 }
 
 #[test]
-fn exclude_projects_filters_incremental_loading() {
+fn exclude_projects_filters_shown_conversations() {
     let mut app = App::new_loading_with_options(
         ToolDisplayMode::Truncated,
         false,
@@ -1648,7 +1647,7 @@ fn exclude_projects_filters_incremental_loading() {
         TuiSearchOptions::default(),
     );
 
-    app.append_conversations(vec![
+    app.show_conversations(vec![
         conversation(
             Some("Hidden"),
             "-tmp-hidden",

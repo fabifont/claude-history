@@ -9,19 +9,16 @@ use super::parser::process_conversation_file;
 use super::path::{
     decode_project_dir_name, decode_project_dir_name_to_path, format_short_name_from_path,
 };
-use super::{Conversation, LoaderMessage, Project};
+use super::{Conversation, Project};
 use crate::claude::{LogEntry, extract_search_text_from_user, parse_agent_progress};
 use crate::cli::DebugLevel;
 use crate::debug;
 use crate::error::{AppError, Result};
-use crate::time_filter::TimeFilter;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::{File, read_dir};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -165,138 +162,6 @@ fn deduplicate_conversations(conversations: &mut Vec<Conversation>) {
             .unwrap_or_else(|_| conversation.path.clone());
         paths.insert(path)
     });
-}
-
-/// Start loading all conversations in the background
-/// Returns a receiver that will receive LoaderMessage updates
-pub fn load_all_conversations_streaming(
-    show_last: bool,
-    debug_level: Option<DebugLevel>,
-    time: TimeFilter,
-) -> Receiver<LoaderMessage> {
-    let (tx, rx) = mpsc::channel();
-
-    thread::spawn(move || {
-        load_all_streaming_inner(tx, show_last, debug_level, time);
-    });
-
-    rx
-}
-
-fn load_all_streaming_inner(
-    tx: Sender<LoaderMessage>,
-    show_last: bool,
-    debug_level: Option<DebugLevel>,
-    time: TimeFilter,
-) {
-    thread::scope(|scope| {
-        let claude = scope.spawn(|| load_claude_streaming(&tx, show_last, debug_level, time));
-        let mut paths = std::collections::HashSet::new();
-        let mut emit = |mut conversations: Vec<Conversation>| {
-            conversations.retain(|conversation| {
-                let path = conversation
-                    .path
-                    .canonicalize()
-                    .unwrap_or_else(|_| conversation.path.clone());
-                paths.insert(path) && (!time.is_active() || time.matches(conversation.timestamp))
-            });
-            if !conversations.is_empty() {
-                let _ = tx.send(LoaderMessage::Batch(conversations));
-            }
-        };
-        let pi_root = super::pi_loader::session_root().ok();
-        let pi_available = pi_root.as_ref().is_some_and(|root| root.path.exists());
-        let pi_error =
-            super::pi_loader::stream_pi_conversations(show_last, debug_level, &mut emit).err();
-        let omp_root = super::omp_loader::session_root().ok();
-        let omp_available = omp_root.as_ref().is_some_and(|root| root.path.exists());
-        let omp_error =
-            super::omp_loader::stream_omp_conversations(show_last, debug_level, &mut emit).err();
-        let auxiliary_usable =
-            (pi_available && pi_error.is_none()) || (omp_available && omp_error.is_none());
-
-        let claude_result = claude.join().expect("Claude loader thread");
-        match claude_result {
-            Ok(()) => {
-                for error in [pi_error, omp_error].into_iter().flatten() {
-                    debug::warn(
-                        debug_level,
-                        &format!("Failed to load auxiliary history: {error}"),
-                    );
-                    let _ = tx.send(LoaderMessage::ProjectError);
-                }
-            }
-            Err(error) if !auxiliary_usable => {
-                let _ = tx.send(LoaderMessage::Fatal(
-                    pi_error.or(omp_error).unwrap_or(error),
-                ));
-                return;
-            }
-            Err(_) => {}
-        }
-        let _ = tx.send(LoaderMessage::Done);
-    });
-}
-
-fn load_claude_streaming(
-    tx: &Sender<LoaderMessage>,
-    show_last: bool,
-    debug_level: Option<DebugLevel>,
-    time: TimeFilter,
-) -> Result<()> {
-    let root = super::get_claude_projects_root()?;
-    if !root.exists() {
-        return Err(AppError::ProjectsDirNotFound(root.display().to_string()));
-    }
-    let projects = list_projects(&root)?;
-    debug::info(
-        debug_level,
-        &format!("Loading global history from {} projects", projects.len()),
-    );
-
-    // Process projects in parallel and send batches as they complete
-    projects.par_iter().for_each(|project| {
-        let project_dir = root.join(&project.name);
-
-        match load_conversations(&project_dir, show_last, &project.name, debug_level) {
-            Ok(mut convs) => {
-                if convs.is_empty() {
-                    return;
-                }
-
-                let fallback_path = decode_project_dir_name_to_path(&project.name);
-
-                for conv in &mut convs {
-                    let project_path = conv.cwd.clone().unwrap_or_else(|| fallback_path.clone());
-                    conv.project_name = Some(format_short_name_from_path(&project_path));
-                    conv.project_path = Some(project_path);
-                }
-
-                // Filtered here rather than inside load_conversations, whose
-                // per-project cache is rebuilt from the vec it returns —
-                // dropping conversations earlier would evict their cache
-                // entries and force a re-parse on every later run.
-                if time.is_active() {
-                    convs.retain(|conv| time.matches(conv.timestamp));
-                    if convs.is_empty() {
-                        return;
-                    }
-                }
-
-                // Send batch, ignore error if receiver dropped
-                let _ = tx.send(LoaderMessage::Batch(convs));
-            }
-            Err(e) => {
-                debug::warn(
-                    debug_level,
-                    &format!("Failed to load project {}: {}", project.display_name, e),
-                );
-                let _ = tx.send(LoaderMessage::ProjectError);
-            }
-        }
-    });
-
-    Ok(())
 }
 
 /// Find a session JSONL file by UUID across all projects.

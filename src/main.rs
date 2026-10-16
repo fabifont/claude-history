@@ -440,7 +440,6 @@ fn run() -> Result<()> {
     if let Some(query) = args.bench_startup {
         return tui::bench_startup(
             show_last,
-            args.debug,
             time_filter,
             keys,
             workspace_filter,
@@ -450,7 +449,7 @@ fn run() -> Result<()> {
         );
     }
 
-    let (conversations, selected_path) = match tui::run_with_loader(
+    let (conversation, selected_path) = match tui::run_with_loader(
         show_last,
         args.debug,
         time_filter,
@@ -466,16 +465,16 @@ fn run() -> Result<()> {
     )
     .map_err(describe_empty)?
     {
-        (tui::Action::Select(path), convs) => (convs, path),
-        (tui::Action::Resume(path), convs) => {
-            let conv = convs.iter().find(|c| c.path == path);
+        (tui::Action::Select(path), conv) => (conv, path),
+        (tui::Action::Resume(path), conv) => {
+            let conv = conv.as_ref();
             let project_path = conv.and_then(|c| c.project_path.as_ref());
             let source = conv.map(|c| c.source).unwrap_or(history::Source::Claude);
             resume_with_agent(source, &path, project_path, default_args, false)?;
             return Ok(());
         }
-        (tui::Action::ForkResume(path), convs) => {
-            let conv = convs.iter().find(|c| c.path == path);
+        (tui::Action::ForkResume(path), conv) => {
+            let conv = conv.as_ref();
             let project_path = conv.and_then(|c| c.project_path.as_ref());
             let source = conv.map(|c| c.source).unwrap_or(history::Source::Claude);
             resume_with_agent(source, &path, project_path, default_args, true)?;
@@ -492,9 +491,8 @@ fn run() -> Result<()> {
     }
 
     if args.show_id {
-        let conversation_id = conversations
-            .iter()
-            .find(|conversation| conversation.path == selected_path)
+        let conversation_id = conversation
+            .as_ref()
             .map(|conversation| conversation.session_id.as_str())
             .or_else(|| selected_path.file_stem().and_then(|stem| stem.to_str()))
             .ok_or_else(|| {
@@ -508,7 +506,7 @@ fn run() -> Result<()> {
 
     if args.resume {
         // Find the selected conversation to get its project_path
-        let conv = conversations.iter().find(|c| c.path == selected_path);
+        let conv = conversation.as_ref();
         debug::debug(
             args.debug,
             &format!("Selected path: {}", selected_path.display()),
@@ -535,10 +533,13 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    // Log parse errors to debug log if debug mode is enabled
+    // Log parse errors to debug log if debug mode is enabled. List rows
+    // carry no parse errors, so the file is parsed again.
     if args.debug.is_some()
-        && let Some(conv) = conversations.iter().find(|c| c.path == selected_path)
+        && let Ok(Some(conv)) =
+            history::process_conversation_file(selected_path.clone(), None, None)
     {
+        let conv = &conv;
         if let Err(e) = debug_log::log_parse_errors(conv) {
             debug::warn(
                 args.debug,

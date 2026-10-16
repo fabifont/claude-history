@@ -2,9 +2,9 @@
 //! before any history is loaded.
 //!
 //! The snapshot is a generation directory under `v3/roots-<hash>/` in the
-//! cache dir (see `default_root` and `generation`). The TUI renders its first
-//! frame from the newest cards, searches the generation's index, and replaces
-//! the cards with fully loaded conversations once loading finishes.
+//! cache dir (see `default_root` and `generation`). The TUI lists the
+//! generation's cards, searches its index, and swaps to each newer generation
+//! that `reconcile` publishes.
 
 pub mod card;
 pub mod generation;
@@ -22,7 +22,7 @@ use chrono::{DateTime, Local};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Store root: `v3/roots-<hash>/` beside the other caches. The cache dir is
 /// namespaced by `CLAUDE_CONFIG_DIR` like the other caches, and the hash
@@ -63,12 +63,14 @@ fn source_roots_namespace(pi: Option<&Path>, omp: Option<&Path>) -> String {
     format!("roots-{}", &hasher.finalize().to_hex()[..16])
 }
 
-/// Cards of the current generation, shown until the full corpus is loaded.
+/// Cards of one generation.
 #[derive(Clone)]
 pub struct Snapshot {
     generation: Arc<Generation>,
     show_last: bool,
     time: TimeFilter,
+    /// Doc of each `CardRow::key_hash`, built on first lookup.
+    by_key: Arc<OnceLock<HashMap<u64, u32>>>,
 }
 
 impl Snapshot {
@@ -79,7 +81,67 @@ impl Snapshot {
             generation: Arc::new(Generation::open(root)?),
             show_last,
             time,
+            by_key: Arc::default(),
         })
+    }
+
+    pub fn show_last(&self) -> bool {
+        self.show_last
+    }
+
+    /// Whether `timestamp` is inside the time filter.
+    pub fn in_time(&self, timestamp: DateTime<Local>) -> bool {
+        !self.time.is_active() || self.time.matches(timestamp)
+    }
+
+    /// `CardRow::key_hash` of card `doc`.
+    pub fn key_hash(&self, doc: u32) -> u64 {
+        self.generation.rows()[doc as usize].key_hash
+    }
+
+    /// Doc of every card by `CardRow::key_hash`.
+    pub fn docs_by_key(&self) -> &HashMap<u64, u32> {
+        self.by_key.get_or_init(|| {
+            self.generation
+                .rows()
+                .iter()
+                .enumerate()
+                .map(|(doc, row)| (row.key_hash, doc as u32))
+                .collect()
+        })
+    }
+
+    /// Whether a card has `CardRow::key_hash` `key`.
+    pub fn contains_key(&self, key: u64) -> bool {
+        self.docs_by_key().contains_key(&key)
+    }
+
+    /// Doc of the card stored at `path`.
+    pub fn find(&self, path: &Path) -> Option<u32> {
+        let path = path.to_str()?;
+        let doc = *self.docs_by_key().get(&generation::key_hash(path))?;
+        let row = &self.generation.rows()[doc as usize];
+        (self.generation.str(row.path) == path).then_some(doc)
+    }
+
+    /// Doc of the card whose session id is `session_id`, ignoring case.
+    pub fn find_session(&self, session_id: &str) -> Option<u32> {
+        self.generation
+            .rows()
+            .iter()
+            .position(|row| {
+                self.generation
+                    .str(row.session_id)
+                    .eq_ignore_ascii_case(session_id)
+            })
+            .map(|doc| doc as u32)
+    }
+
+    /// Whether the cards come from more than one source.
+    pub fn has_multiple_sources(&self) -> bool {
+        let mut rows = self.generation.rows().iter();
+        rows.next()
+            .is_some_and(|first| rows.any(|row| row.source != first.source))
     }
 
     pub fn generation_name(&self) -> &str {
@@ -133,25 +195,6 @@ impl Snapshot {
         } else {
             row.preview_first
         })
-    }
-
-    /// For every card, the index in `conversations` of the conversation
-    /// stored at the same path, if any.
-    pub fn locate(&self, conversations: &[Conversation]) -> Vec<Option<usize>> {
-        let by_path: HashMap<&Path, usize> = conversations
-            .iter()
-            .enumerate()
-            .map(|(index, conversation)| (conversation.path.as_path(), index))
-            .collect();
-        self.generation
-            .rows()
-            .iter()
-            .map(|row| {
-                by_path
-                    .get(Path::new(self.generation.str(row.path)))
-                    .copied()
-            })
-            .collect()
     }
 }
 

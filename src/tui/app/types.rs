@@ -173,6 +173,8 @@ pub fn list_lines_per_item(_mode: ListSearchMode, query: &str) -> usize {
 pub enum SemanticProgress {
     #[default]
     Idle,
+    /// Loading the full conversations semantic search ranks.
+    LoadingSessions,
     InitializingModel,
     CacheReady,
     Embedding {
@@ -194,14 +196,14 @@ pub struct SemanticResultMetadata {
 /// Which parts of the list are usable. Each part becomes ready on its own.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Readiness {
-    /// Rows are shown newest first and can be opened, resumed and forked.
-    /// They are snapshot cards until loading finishes.
+    /// Rows are shown newest first and can be acted on.
     pub list: bool,
-    /// Lexical queries run against the loaded corpus.
+    /// Lexical queries run, against the generation index or the loaded
+    /// conversations.
     pub lexical: bool,
-    /// Progress of loading conversations from native history.
+    /// Whether the store is being reconciled with the session files.
     pub reconcile: ReconcileState,
-    /// The semantic worker can rank the loaded corpus.
+    /// The semantic worker can rank its corpus.
     pub semantic: bool,
 }
 
@@ -216,17 +218,10 @@ impl Readiness {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum ReconcileState {
-    /// Loading; `loaded` conversations have arrived so far.
-    Running {
-        loaded: usize,
-    },
+    /// A reconcile pass may publish a newer generation.
+    #[default]
+    Running,
     Done,
-}
-
-impl Default for ReconcileState {
-    fn default() -> Self {
-        Self::Running { loaded: 0 }
-    }
 }

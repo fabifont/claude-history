@@ -28,7 +28,8 @@ mod types;
 mod view_state;
 #[allow(unused_imports)]
 use search_state::{
-    IndexScope, SearchCommand, SearchResponse, SemanticSearchState, spawn_search_worker,
+    IndexScope, SearchCommand, SearchResponse, SemanticCorpus, SemanticSearchState,
+    spawn_search_worker,
 };
 #[allow(unused_imports)]
 pub use types::{
@@ -37,14 +38,33 @@ pub use types::{
     list_lines_per_item,
 };
 
-/// Snapshot cards materialized for the list while loading. Bounded so the
-/// first frame costs the same whatever the corpus size.
+/// Cards materialized for the first frame. Bounded so the first frame costs
+/// the same whatever the corpus size; the full list follows once the index
+/// is open.
 const SNAPSHOT_ROWS: usize = 500;
+
+/// Card that is not a generation doc, e.g. a session found by UUID.
+const NO_DOC: u32 = u32::MAX;
 
 /// App state
 pub struct App {
-    /// All loaded conversations, shared with the search worker
+    /// Rows of the list. In generation mode (`snapshot` set) these are the
+    /// cards materialized so far, without text, in the order first needed;
+    /// otherwise every loaded conversation, shared with the search worker.
     conversations: Arc<Vec<Conversation>>,
+    /// Generation doc of each row in generation mode, or `NO_DOC`
+    row_docs: Vec<u32>,
+    /// Sessions deleted from this TUI, hidden until a generation without
+    /// them is shown, by `key_hash`
+    removed: HashSet<u64>,
+    /// Titles set from this TUI, applied to cards until a generation holds
+    /// them, by path
+    renamed: HashMap<PathBuf, Option<String>>,
+    /// Set when the session files changed and the store should reconcile
+    reconcile_requested: bool,
+    /// Full conversations for semantic search in generation mode, loaded
+    /// on first use
+    semantic_corpus: SemanticCorpus,
     /// Shared semantic conversation snapshot for background workers
     semantic_conversations_snapshot: Arc<Vec<Arc<Conversation>>>,
     /// Version of the semantic corpus snapshot
@@ -67,14 +87,14 @@ pub struct App {
     cursor_pos: usize,
     /// Which parts of the list are usable
     readiness: Readiness,
-    /// Snapshot whose cards are shown while loading
+    /// Generation whose cards are the rows, in generation mode
     snapshot: Option<crate::store::Snapshot>,
     /// Generation index lexical queries run against, when there is one
     search_index: Option<Arc<crate::store::SearchIndex>>,
-    /// For each card of the snapshot or index, its index in `conversations`
+    /// Row of each card of the snapshot, once materialized
     doc_rows: Vec<Option<usize>>,
-    /// Loaded conversations held back while snapshot cards are shown
-    pending: Option<Vec<Conversation>>,
+    /// Rows whose evidence was computed for display, found or not
+    evidence_checked: HashSet<usize>,
     /// Current dialog overlay (confirm, menu)
     dialog_mode: DialogMode,
     /// Main app mode (list or view)
@@ -145,6 +165,11 @@ impl App {
             semantic_sent_corpus_version: 0,
             semantic_sent_scope_signature: None,
             conversations: parts.conversations,
+            row_docs: Vec::new(),
+            removed: HashSet::new(),
+            renamed: HashMap::new(),
+            reconcile_requested: false,
+            semantic_corpus: SemanticCorpus::default(),
             filtered: parts.filtered,
             selected: parts.selected,
             selection_anchor: None,
@@ -154,7 +179,7 @@ impl App {
             snapshot: None,
             search_index: None,
             doc_rows: Vec::new(),
-            pending: None,
+            evidence_checked: HashSet::new(),
             dialog_mode: DialogMode::None,
             app_mode: parts.app_mode,
             status_message: None,
@@ -347,28 +372,101 @@ impl App {
         &self.keys
     }
 
-    /// Shows the newest cards of `snapshot` until loading finishes. Loaded
-    /// batches are held back meanwhile and swapped in by `finish_loading`.
+    /// Shows the cards of `snapshot`: rows come from its cards from now on
+    /// (generation mode). Only the newest cards are materialized for the
+    /// first frame; `open_search_index` lists the rest.
     pub fn show_snapshot(&mut self, snapshot: crate::store::Snapshot) {
-        self.doc_rows = vec![None; snapshot.len()];
-        self.conversations = Arc::default();
-        self.snapshot = Some(snapshot);
-        self.pending = Some(Vec::new());
-        self.show_snapshot_cards();
+        self.reset_rows(snapshot);
+        self.show_cards(SNAPSHOT_ROWS);
+        self.readiness.list = true;
+        if self.list_search_mode == ListSearchMode::Semantic {
+            self.ensure_semantic_corpus();
+        }
     }
 
-    /// Re-reads the snapshot cards for the current scope.
-    fn show_snapshot_cards(&mut self) {
+    /// Shows `conversations`, loaded in full, as the rows, keeping the
+    /// query and the selected session.
+    pub fn show_conversations(&mut self, mut conversations: Vec<Conversation>) {
+        let mut paths = HashSet::new();
+        conversations.retain(|conversation| {
+            let path = conversation
+                .path
+                .canonicalize()
+                .unwrap_or_else(|_| conversation.path.clone());
+            paths.insert(path)
+        });
+        conversations.sort_by_key(|conversation| std::cmp::Reverse(conversation.timestamp));
+        for (index, conversation) in conversations.iter_mut().enumerate() {
+            conversation.index = index;
+        }
+
+        if self.selection_anchor.is_none() {
+            self.selection_anchor = self.get_selected_path();
+        }
+        self.snapshot = None;
+        self.row_docs.clear();
+        self.lexical_evidence.clear();
+        self.conversations = Arc::new(conversations);
+        self.filtered.clear();
+        self.selected = None;
+        self.readiness = Readiness::ready();
+        // The index holds other conversations.
+        self.drop_search_index();
+        self.refresh_search_data();
+
+        if self.query.trim().is_empty() {
+            self.update_filter();
+            self.prewarm_semantic_cache();
+        } else {
+            // Keep the list populated until the worker answers the query.
+            let anchor = self.selection_anchor.clone();
+            self.apply_filtered(self.filter_indices(0..self.conversations.len()));
+            self.selection_anchor = anchor;
+            self.dispatch_search();
+        }
+    }
+
+    /// Whether no card of the generation shown is inside the time filter.
+    pub fn generation_is_empty(&self) -> bool {
+        self.snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.head(1, |_| true).is_empty())
+    }
+
+    /// Makes `snapshot` the source of rows, dropping rows of the previous
+    /// one.
+    fn reset_rows(&mut self, snapshot: crate::store::Snapshot) {
+        self.doc_rows = vec![None; snapshot.len()];
+        self.conversations = Arc::default();
+        self.row_docs.clear();
+        self.lexical_evidence.clear();
+        self.evidence_checked.clear();
+        self.snapshot = Some(snapshot);
+    }
+
+    /// Lists the newest `limit` cards in scope.
+    fn show_cards(&mut self, limit: usize) {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
         let workspace = self.workspace_scope();
-        let docs = snapshot.head(SNAPSHOT_ROWS, |project| {
+        let docs = snapshot.head(limit, |project| {
             list_state::card_project_visible(project, &self.excluded_projects, &workspace)
         });
+        let docs: Vec<u32> = docs
+            .into_iter()
+            .filter(|&doc| !self.is_removed(doc))
+            .collect();
         let filtered = docs.into_iter().map(|doc| self.card_row(doc)).collect();
         self.apply_filtered(filtered);
-        self.readiness.list = true;
+    }
+
+    fn is_removed(&self, doc: u32) -> bool {
+        !self.removed.is_empty()
+            && self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| self.removed.contains(&snapshot.key_hash(doc)))
     }
 
     fn workspace_scope(&self) -> list_state::WorkspaceScope<'_> {
@@ -387,64 +485,105 @@ impl App {
         }
         let snapshot = self.snapshot.as_ref().expect("cards come from a snapshot");
         let mut card = snapshot.card(doc);
+        if let Some(title) = self.renamed.get(&card.path) {
+            card.custom_title = title.clone();
+        }
         let row = self.conversations.len();
         card.index = row;
         Arc::make_mut(&mut self.conversations).push(card);
+        self.row_docs.push(doc);
         self.doc_rows[doc as usize] = Some(row);
         row
     }
 
-    /// Opens the index of the snapshot being shown, so lexical queries run
-    /// before loading finishes. Returns whether one was opened.
+    /// Row of the card stored at `path`, if the generation has one.
+    fn row_of_path(&mut self, path: &std::path::Path) -> Option<usize> {
+        if let Some(row) = self.conversations.iter().position(|c| c.path == path) {
+            return Some(row);
+        }
+        let doc = self.snapshot.as_ref()?.find(path)?;
+        Some(self.card_row(doc))
+    }
+
+    /// Opens the index of the snapshot being shown, so lexical queries run,
+    /// and lists every card in scope. Returns whether an index was opened.
     pub fn open_search_index(&mut self) -> bool {
         let Some(snapshot) = &self.snapshot else {
             return false;
         };
-        let Some(index) = crate::store::SearchIndex::open(snapshot.clone()) else {
-            return false;
+        let opened = match crate::store::SearchIndex::open(snapshot.clone()) {
+            Some(index) => {
+                self.search_index = Some(Arc::new(index));
+                self.send_index_scope();
+                self.readiness.lexical = true;
+                true
+            }
+            None => false,
         };
-        self.search_index = Some(Arc::new(index));
-        self.send_index_scope();
-        self.readiness.lexical = true;
-        if !self.query.trim().is_empty() {
+        if self.query.trim().is_empty() || !opened {
+            if self.selection_anchor.is_none() {
+                self.selection_anchor = self.get_selected_path();
+            }
+            self.apply_browse_filter();
+        } else {
             self.dispatch_search();
         }
-        true
+        opened
     }
 
-    /// Switches to the index of `snapshot` if it is a newer generation than
-    /// the one in use, and reruns the query on it keeping the selection.
-    /// Only applies once loading has finished; until then the snapshot shown
-    /// stays in use.
-    pub fn swap_search_index(&mut self, snapshot: crate::store::Snapshot) -> bool {
-        if self.pending.is_some()
-            || self
-                .search_index
-                .as_ref()
-                .is_some_and(|index| index.cards().generation_name() == snapshot.generation_name())
+    /// Shows `snapshot` if it is a newer generation than the one shown,
+    /// keeping the query, scope and selected session. Returns whether it
+    /// did.
+    pub fn swap_generation(&mut self, snapshot: crate::store::Snapshot) -> bool {
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|shown| shown.generation_name() == snapshot.generation_name())
         {
             return false;
         }
-        let Some(index) = crate::store::SearchIndex::open(snapshot) else {
-            return false;
-        };
-        self.search_index = Some(Arc::new(index));
-        self.locate_docs();
-        self.send_index_scope();
-        self.readiness.lexical = true;
-        if !self.query.trim().is_empty() {
+        if self.selection_anchor.is_none() {
             self.selection_anchor = self.get_selected_path();
-            self.dispatch_search();
         }
+        let viewed = match &self.app_mode {
+            AppMode::View(state) => Some(state.conversation_path.clone()),
+            AppMode::List => None,
+        };
+        // The new generation holds whatever this TUI changed, unless it was
+        // published before the change.
+        self.removed.retain(|key| snapshot.contains_key(*key));
+        self.renamed.retain(|path, title| {
+            snapshot
+                .find(path)
+                .is_none_or(|doc| snapshot.card(doc).custom_title != *title)
+        });
+        self.reset_rows(snapshot);
+        self.readiness.list = true;
+        self.search_index = None;
+        self.semantic_search.results.clear();
+        if let Some(path) = viewed {
+            self.row_of_path(&path);
+        }
+        self.invalidate_search_generation();
+        self.semantic_sent_scope_signature = None;
+        self.open_search_index();
         true
     }
 
-    /// Maps the index's cards to the loaded conversations.
-    fn locate_docs(&mut self) {
-        self.doc_rows = match &self.search_index {
-            Some(index) => index.cards().locate(&self.conversations),
-            None => Vec::new(),
-        };
+    /// Number of cards in the generation shown, in generation mode.
+    pub fn generation_len(&self) -> Option<usize> {
+        self.snapshot.as_ref().map(crate::store::Snapshot::len)
+    }
+
+    /// Asks for a reconcile pass; see `take_reconcile_request`.
+    pub(super) fn request_reconcile(&mut self) {
+        self.reconcile_requested = self.snapshot.is_some();
+    }
+
+    /// Whether the session files changed since the last call, so the store
+    /// should reconcile.
+    pub fn take_reconcile_request(&mut self) -> bool {
+        std::mem::take(&mut self.reconcile_requested)
     }
 
     /// Sends the index and the cards in scope to the search worker.
@@ -456,9 +595,9 @@ impl App {
         let mut docs = index.cards().scope(|project| {
             list_state::card_project_visible(project, &self.excluded_projects, &workspace)
         });
-        if self.pending.is_none() {
-            for (doc, row) in docs.iter_mut().zip(&self.doc_rows) {
-                *doc &= row.is_some();
+        if !self.removed.is_empty() {
+            for (doc, in_scope) in docs.iter_mut().enumerate() {
+                *in_scope &= !self.is_removed(doc as u32);
             }
         }
         let _ = self
@@ -469,141 +608,95 @@ impl App {
             })));
     }
 
-    /// Conversation rows of index cards `docs`, in order. Cards without a
-    /// loaded conversation are dropped.
+    /// Rows of index cards `docs`, in order, without removed cards.
     pub(super) fn rows_of_docs(&mut self, docs: &[usize]) -> Vec<usize> {
-        if self.pending.is_some() {
-            docs.iter().map(|&doc| self.card_row(doc as u32)).collect()
-        } else {
-            docs.iter()
-                .filter_map(|&doc| self.doc_rows.get(doc).copied().flatten())
-                .collect()
+        let docs: Vec<u32> = docs
+            .iter()
+            .map(|&doc| doc as u32)
+            .filter(|&doc| !self.is_removed(doc))
+            .collect();
+        docs.into_iter().map(|doc| self.card_row(doc)).collect()
+    }
+
+    /// Computes lexical evidence for the rows shown on the current page
+    /// that the search worker left without any, from their text frames.
+    pub fn fill_visible_evidence(&mut self, items_per_page: usize) {
+        let (Some(index), Some(_)) = (&self.search_index, &self.snapshot) else {
+            return;
+        };
+        if self.list_search_mode != ListSearchMode::Lexical
+            || self.search_in_flight
+            || items_per_page == 0
+        {
+            return;
+        }
+        let parsed = search::query::ParsedQuery::parse(self.query.trim());
+        if parsed.is_effectively_empty() {
+            return;
+        }
+        let offset = self
+            .selected
+            .map_or(0, |sel| sel / items_per_page * items_per_page);
+        let rows: Vec<usize> = self
+            .filtered
+            .iter()
+            .skip(offset)
+            .take(items_per_page)
+            .copied()
+            .filter(|row| {
+                !self.lexical_evidence.contains_key(row) && !self.evidence_checked.contains(row)
+            })
+            .collect();
+        for row in rows {
+            self.evidence_checked.insert(row);
+            let doc = self.row_docs.get(row).copied().unwrap_or(NO_DOC);
+            if doc == NO_DOC {
+                continue;
+            }
+            let text = index.text(doc);
+            if let Some(evidence) =
+                search::build_lexical_evidence(&text, &self.conversations[row].preview, &parsed)
+            {
+                self.lexical_evidence.insert(row, evidence);
+            }
         }
     }
 
     /// Stops searching the index; queries then run over the loaded
-    /// conversations, which must be loaded.
-    pub(super) fn drop_search_index(&mut self) {
+    /// conversations.
+    fn drop_search_index(&mut self) {
         if self.search_index.take().is_some() {
             self.doc_rows.clear();
             let _ = self.search_tx.send(SearchCommand::UseIndex(None));
         }
     }
 
-    /// Append a batch of conversations during loading
-    /// Note: Does NOT precompute search text - that's deferred to finish_loading
-    pub fn append_conversations(&mut self, new_convs: Vec<Conversation>) {
-        if let Some(pending) = &mut self.pending {
-            pending.extend(new_convs);
-            self.readiness.reconcile = ReconcileState::Running {
-                loaded: pending.len(),
-            };
-            return;
-        }
-        let start_idx = self.conversations.len();
-        Arc::make_mut(&mut self.conversations).extend(new_convs);
-        let end_idx = self.conversations.len();
-
-        let new_filtered = self.filter_indices(start_idx..end_idx);
-        self.filtered.extend(new_filtered);
-
-        // Select first item if nothing selected yet
-        if self.selected.is_none() && !self.filtered.is_empty() {
-            self.selected = Some(0);
-        }
-
-        self.readiness.reconcile = ReconcileState::Running {
-            loaded: self.conversations.len(),
-        };
-    }
-
-    /// Mark loading as complete: sort, share the corpus with the search
-    /// workers, and transition to ready. Replaces any snapshot cards, keeping
-    /// the selected session.
-    pub fn finish_loading(&mut self) {
-        if let Some(loaded) = self.pending.take() {
-            self.snapshot = None;
-            if self.selection_anchor.is_none() {
-                self.selection_anchor = self.get_selected_path();
-            }
-            self.conversations = Arc::new(loaded);
-            self.filtered.clear();
-            self.selected = None;
-        }
-        let conversations = Arc::make_mut(&mut self.conversations);
-
-        // Sort all conversations by timestamp (newest first)
-        conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-
-        // Reindex after sorting
-        for (idx, conv) in conversations.iter_mut().enumerate() {
-            conv.index = idx;
-        }
-
-        self.refresh_search_data();
-
-        self.readiness = Readiness::ready();
-
-        if self.query.trim().is_empty() {
-            // Apply filter (handles exclusions and workspace filter)
-            self.update_filter();
-            self.prewarm_semantic_cache();
-        } else {
-            // Keep the list populated until the worker answers the query.
-            let anchor = self.selection_anchor.clone();
-            self.apply_filtered(self.filter_indices(0..self.conversations.len()));
-            self.selection_anchor = anchor;
-            self.dispatch_search();
-        }
-    }
-
-    /// Replace the loaded corpus while preserving the current picker state.
-    pub fn replace_conversations(&mut self, mut conversations: Vec<Conversation>) {
-        let mut paths = HashSet::new();
-        conversations.retain(|conversation| {
-            let path = conversation
-                .path
-                .canonicalize()
-                .unwrap_or_else(|_| conversation.path.clone());
-            paths.insert(path)
-        });
-        conversations.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
-        for (index, conversation) in conversations.iter_mut().enumerate() {
-            conversation.index = index;
-        }
-
-        self.selection_anchor = self.get_selected_path();
-        self.conversations = Arc::new(conversations);
-        self.filtered.clear();
-        self.selected = None;
-        // The index holds the corpus before the refresh.
-        self.drop_search_index();
-        self.refresh_search_data();
-
-        if self.query.trim().is_empty() {
-            self.update_filter();
-            self.prewarm_semantic_cache();
-        } else {
-            self.dispatch_search();
-        }
+    /// The conversation of the row stored at `path`, for acting on it after
+    /// the TUI exits.
+    pub fn conversation_at(&self, path: &std::path::Path) -> Option<Conversation> {
+        self.conversations.iter().find(|c| c.path == path).cloned()
     }
 
     pub fn set_status_message(&mut self, message: String) {
         self.status_message = Some((message, std::time::Instant::now()));
     }
 
-    /// Consume the app and return its conversations
-    pub fn into_conversations(self) -> Arc<Vec<Conversation>> {
-        self.conversations
-    }
-
     pub fn readiness(&self) -> &Readiness {
         &self.readiness
     }
 
-    /// Whether the full corpus is still loading, so edits wait.
+    /// Whether there are no rows yet, so only typing works.
     pub fn is_loading(&self) -> bool {
-        self.readiness.reconcile != ReconcileState::Done
+        !self.readiness.list
+    }
+
+    /// Records whether a reconcile pass is running.
+    pub fn set_reconciling(&mut self, running: bool) {
+        self.readiness.reconcile = if running {
+            ReconcileState::Running
+        } else {
+            ReconcileState::Done
+        };
     }
 
     // Getters for UI access

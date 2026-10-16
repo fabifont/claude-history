@@ -117,6 +117,9 @@ impl App {
     }
 
     pub(crate) fn has_multiple_sources(&self) -> bool {
+        if let Some(snapshot) = &self.snapshot {
+            return snapshot.has_multiple_sources();
+        }
         let sources = self
             .conversations
             .iter()
@@ -138,6 +141,29 @@ impl App {
         let Some(&conv_idx) = self.filtered.get(selected) else {
             return;
         };
+
+        if let Some(snapshot) = &self.snapshot {
+            // Rows stay put so row indices remain valid; the row is hidden
+            // until a generation without it is shown.
+            let doc = self
+                .row_docs
+                .get(conv_idx)
+                .copied()
+                .unwrap_or(super::NO_DOC);
+            if doc != super::NO_DOC {
+                self.removed.insert(snapshot.key_hash(doc));
+            }
+            self.filtered.retain(|&idx| idx != conv_idx);
+            if self.filtered.is_empty() {
+                self.selected = None;
+            } else if selected >= self.filtered.len() {
+                self.selected = Some(self.filtered.len() - 1);
+            }
+            self.send_index_scope();
+            self.semantic_sent_scope_signature = None;
+            self.request_reconcile();
+            return;
+        }
 
         Arc::make_mut(&mut self.conversations).remove(conv_idx);
 

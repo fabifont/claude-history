@@ -59,13 +59,13 @@ fn corpus() -> Vec<Conversation> {
 }
 
 #[test]
-fn snapshot_rows_show_before_loading_and_swap_keeps_selection() {
+fn snapshot_rows_show_first_and_index_lists_the_rest_keeping_selection() {
     let root = publish(&corpus());
     let mut app = loading_app(None, vec![]);
     show(&mut app, &root, TimeFilter::default());
 
     assert!(app.readiness().list);
-    assert!(app.is_loading());
+    assert!(!app.is_loading());
     assert_eq!(
         listed_paths(&app),
         vec![
@@ -75,21 +75,11 @@ fn snapshot_rows_show_before_loading_and_swap_keeps_selection() {
         ]
     );
     assert_eq!(&*app.conversations()[0].preview, "last");
+    assert_eq!(&*app.conversations()[0].full_text, "");
     app.select_next();
 
-    let mut loaded = corpus();
-    loaded.push(conversation("/p/-tmp-beta/d.jsonl", 4 * HOUR_MS));
-    app.append_conversations(loaded);
-    assert_eq!(app.conversations().len(), 3, "batches wait for the swap");
-    assert_eq!(
-        app.readiness().reconcile,
-        ReconcileState::Running { loaded: 4 }
-    );
-
-    app.finish_loading();
-    assert_eq!(*app.readiness(), Readiness::ready());
-    assert_eq!(app.conversations().len(), 4);
-    assert_eq!(&*app.conversations()[0].full_text, "full text");
+    assert!(app.open_search_index());
+    assert_eq!(listed_paths(&app).len(), 3);
     assert_eq!(
         app.get_selected_path(),
         Some(PathBuf::from("/p/-tmp-beta/b.jsonl"))
@@ -97,27 +87,20 @@ fn snapshot_rows_show_before_loading_and_swap_keeps_selection() {
 }
 
 #[test]
-fn query_typed_over_snapshot_runs_after_loading() {
+fn query_typed_before_the_index_opens_runs_on_it() {
     let mut corpus = corpus();
     corpus[1].full_text = "needle".into();
     let root = publish(&corpus);
     let mut app = loading_app(None, vec![]);
     show(&mut app, &root, TimeFilter::default());
 
-    for c in "needle".chars() {
-        app.handle_key(KeyCode::Char(c), KeyModifiers::NONE, 20);
-    }
+    type_query(&mut app, "needle");
     assert_eq!(app.query(), "needle");
     assert!(!app.has_search_work_in_flight());
     assert_eq!(app.filtered().len(), 3);
 
-    app.append_conversations(corpus);
-    app.finish_loading();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while app.has_search_work_in_flight() && std::time::Instant::now() < deadline {
-        app.receive_search_results();
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    assert!(app.open_search_index());
+    wait_for_search(&mut app);
     assert_eq!(listed_paths(&app), vec!["/p/-tmp-beta/b.jsonl"]);
 }
 
@@ -144,7 +127,7 @@ fn snapshot_rows_honor_workspace_exclusions_and_time_window() {
 }
 
 #[test]
-fn snapshot_rows_open_resume_and_fork_but_wait_to_edit() {
+fn snapshot_rows_open_resume_fork_and_edit() {
     let root = publish(&corpus());
     let mut app = loading_app(None, vec![]);
     show(&mut app, &root, TimeFilter::default());
@@ -160,19 +143,22 @@ fn snapshot_rows_open_resume_and_fork_but_wait_to_edit() {
         Some(Action::ForkResume(path)) if path == selected
     ));
     assert!(app.handle_list_click(4, Rect::new(0, 0, 80, 30)));
+    assert_eq!(
+        app.conversation_at(&selected).map(|c| c.session_id),
+        Some("c".to_string())
+    );
 
     app.handle_key(keys.delete.code, keys.delete.modifiers, 20);
-    app.handle_key(keys.rename.code, keys.rename.modifiers, 20);
-    assert_eq!(*app.dialog_mode(), DialogMode::None);
+    assert_eq!(*app.dialog_mode(), DialogMode::ConfirmDelete);
 }
 
 #[test]
-fn without_snapshot_rows_wait_for_loading() {
+fn without_a_generation_rows_wait() {
     let mut app = loading_app(None, vec![]);
-    app.append_conversations(corpus());
     assert!(!app.readiness().list);
+    assert!(app.is_loading());
     assert!(!app.handle_list_click(4, Rect::new(0, 0, 80, 30)));
-    app.finish_loading();
+    app.show_conversations(corpus());
     assert!(app.readiness().list);
     assert_eq!(listed_paths(&app)[0], "/p/-tmp-alpha/c.jsonl");
 }
@@ -192,6 +178,7 @@ fn snapshot_pi_rows_match_workspace_by_canonical_project_path() {
     let mut app = loading_app(Some(&project_dir), vec![]);
     show(&mut app, &root, TimeFilter::default());
     assert_eq!(listed_paths(&app), vec!["/pi/sessions/here.jsonl"]);
+    assert!(!app.has_multiple_sources());
 }
 
 fn needle_corpus() -> Vec<Conversation> {
@@ -202,14 +189,13 @@ fn needle_corpus() -> Vec<Conversation> {
 }
 
 #[test]
-fn index_answers_queries_before_loading_with_evidence_from_frames() {
+fn index_answers_queries_with_evidence_from_frames() {
     let root = publish(&needle_corpus());
     let mut app = loading_app(None, vec![]);
     show(&mut app, &root, TimeFilter::default());
     assert!(!app.readiness().lexical);
     assert!(app.open_search_index());
     assert!(app.readiness().lexical);
-    assert!(app.is_loading());
 
     type_query(&mut app, "needle");
     wait_for_search(&mut app);
@@ -225,33 +211,25 @@ fn index_answers_queries_before_loading_with_evidence_from_frames() {
     assert_eq!(&evidence.text[start..end], "needle");
     assert!(evidence.text.len() < 4000);
 
-    // Loading keeps the index and maps its results to loaded conversations.
-    app.append_conversations(needle_corpus());
-    app.finish_loading();
-    wait_for_search(&mut app);
-    assert_eq!(
-        listed_paths(&app),
-        vec!["/p/-tmp-alpha/c.jsonl", "/p/-tmp-alpha/a.jsonl"]
-    );
-    assert_eq!(
-        &*app.conversations()[app.filtered()[0]].full_text,
-        "needle in the newest"
-    );
+    // Rows the worker left without evidence get it from their frames when
+    // shown.
+    app.lexical_evidence.clear();
+    app.fill_visible_evidence(10);
+    let evidence = app.lexical_evidence(hidden).expect("filled from the frame");
+    let (start, end) = evidence.context_ranges[0];
+    assert_eq!(&evidence.text[start..end], "needle");
 }
 
 #[test]
-fn index_results_match_in_memory_search_after_loading() {
+fn index_results_match_in_memory_search() {
     let corpus = needle_corpus();
     let root = publish(&corpus);
     let mut app = loading_app(None, vec![]);
     show(&mut app, &root, TimeFilter::default());
     assert!(app.open_search_index());
-    app.append_conversations(corpus.clone());
-    app.finish_loading();
 
     let mut in_memory = loading_app(None, vec![]);
-    in_memory.append_conversations(corpus);
-    in_memory.finish_loading();
+    in_memory.show_conversations(corpus);
     for query in [
         "needle",
         "full",
@@ -293,14 +271,8 @@ fn newer_generation_swaps_in_and_reruns_the_query_keeping_selection() {
     let mut app = loading_app(None, vec![]);
     show(&mut app, &root, TimeFilter::default());
     assert!(app.open_search_index());
-    let mut loaded = corpus.clone();
-    loaded.push(conversation("/p/-tmp-beta/d.jsonl", 4 * HOUR_MS));
-    loaded[3].full_text = "late needle".into();
-    app.append_conversations(loaded.clone());
-    app.finish_loading();
     type_query(&mut app, "needle");
     wait_for_search(&mut app);
-    // The new conversation is not in the index yet.
     assert_eq!(
         listed_paths(&app),
         vec!["/p/-tmp-alpha/c.jsonl", "/p/-tmp-alpha/a.jsonl"]
@@ -308,11 +280,15 @@ fn newer_generation_swaps_in_and_reruns_the_query_keeping_selection() {
     app.select_next();
 
     let same = crate::store::Snapshot::open(root.path(), true, TimeFilter::default()).unwrap();
-    assert!(!app.swap_search_index(same), "same generation");
+    assert!(!app.swap_generation(same), "same generation");
 
-    crate::store::generation::publish(root.path(), &loaded).unwrap();
+    let mut newer = corpus.clone();
+    newer.push(conversation("/p/-tmp-beta/d.jsonl", 4 * HOUR_MS));
+    newer[3].full_text = "late needle".into();
+    crate::store::generation::publish(root.path(), &newer).unwrap();
     let newer = crate::store::Snapshot::open(root.path(), true, TimeFilter::default()).unwrap();
-    assert!(app.swap_search_index(newer));
+    assert!(app.swap_generation(newer));
+    assert_eq!(app.generation_len(), Some(4));
     wait_for_search(&mut app);
     assert_eq!(
         listed_paths(&app),
@@ -329,7 +305,7 @@ fn newer_generation_swaps_in_and_reruns_the_query_keeping_selection() {
 }
 
 #[test]
-fn snapshot_without_index_files_waits_for_loading() {
+fn snapshot_without_index_files_browses_until_a_generation_has_them() {
     let root = publish(&needle_corpus());
     let generation = std::fs::read_to_string(root.path().join("CURRENT")).unwrap();
     std::fs::remove_file(root.path().join(generation.trim()).join("base.fst")).unwrap();
@@ -338,12 +314,139 @@ fn snapshot_without_index_files_waits_for_loading() {
     assert!(!app.open_search_index());
     type_query(&mut app, "needle");
     assert!(!app.has_search_work_in_flight());
+    assert_eq!(app.filtered().len(), 3);
 
-    app.append_conversations(needle_corpus());
-    app.finish_loading();
+    let mut newer = needle_corpus();
+    newer[1].custom_title = Some("retitled".to_string());
+    crate::store::generation::publish(root.path(), &newer).unwrap();
+    let newer = crate::store::Snapshot::open(root.path(), true, TimeFilter::default()).unwrap();
+    assert!(app.swap_generation(newer));
     wait_for_search(&mut app);
     assert_eq!(
         listed_paths(&app),
+        vec!["/p/-tmp-alpha/c.jsonl", "/p/-tmp-alpha/a.jsonl"]
+    );
+}
+
+#[test]
+fn deleted_rows_stay_hidden_until_a_generation_drops_them() {
+    let corpus = needle_corpus();
+    let root = publish(&corpus);
+    let mut app = loading_app(None, vec![]);
+    show(&mut app, &root, TimeFilter::default());
+    assert!(app.open_search_index());
+    assert!(!app.take_reconcile_request());
+
+    app.remove_selected_from_list();
+    assert!(app.take_reconcile_request());
+    assert_eq!(
+        listed_paths(&app),
+        vec!["/p/-tmp-beta/b.jsonl", "/p/-tmp-alpha/a.jsonl"]
+    );
+    type_query(&mut app, "needle");
+    wait_for_search(&mut app);
+    assert_eq!(listed_paths(&app), vec!["/p/-tmp-alpha/a.jsonl"]);
+
+    // A generation published before the delete still holds the session.
+    let mut stale = corpus.clone();
+    stale[1].custom_title = Some("stale".to_string());
+    crate::store::generation::publish(root.path(), &stale).unwrap();
+    let stale = crate::store::Snapshot::open(root.path(), true, TimeFilter::default()).unwrap();
+    assert!(app.swap_generation(stale));
+    wait_for_search(&mut app);
+    assert_eq!(listed_paths(&app), vec!["/p/-tmp-alpha/a.jsonl"]);
+
+    crate::store::generation::publish(root.path(), &corpus[..2]).unwrap();
+    let pruned = crate::store::Snapshot::open(root.path(), true, TimeFilter::default()).unwrap();
+    assert!(app.swap_generation(pruned));
+    assert!(app.removed.is_empty());
+}
+
+#[test]
+fn renamed_rows_show_the_new_title_until_the_generation_has_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abc123.jsonl");
+    std::fs::write(
+        &path,
+        r#"{"type":"user","timestamp":"2024-01-01T00:00:00Z","message":{"role":"user","content":"hello body"}}"#.to_string() + "\n",
+    )
+    .unwrap();
+    let mut session = conversation(path.to_str().unwrap(), 10 * HOUR_MS);
+    session.full_text = "hello body".into();
+    let mut corpus = corpus();
+    corpus.push(session.clone());
+    let root = publish(&corpus);
+    let mut app = loading_app(None, vec![]);
+    show(&mut app, &root, TimeFilter::default());
+    assert!(app.open_search_index());
+    assert_eq!(app.get_selected_path(), Some(path.clone()));
+
+    app.start_rename();
+    app.handle_rename_key(KeyCode::Char('u'), KeyModifiers::CONTROL);
+    for c in "fresh".chars() {
+        app.handle_rename_key(KeyCode::Char(c), KeyModifiers::empty());
+    }
+    app.handle_rename_key(KeyCode::Enter, KeyModifiers::empty());
+    assert!(app.take_reconcile_request());
+    let row = app.filtered()[0];
+    assert_eq!(
+        app.conversations()[row].custom_title.as_deref(),
+        Some("fresh")
+    );
+    assert_eq!(app.get_selected_path(), Some(path.clone()));
+
+    // A generation published before the rename keeps the overlay.
+    let mut stale = corpus.clone();
+    stale[0].custom_title = Some("stale".to_string());
+    crate::store::generation::publish(root.path(), &stale).unwrap();
+    let stale = crate::store::Snapshot::open(root.path(), true, TimeFilter::default()).unwrap();
+    assert!(app.swap_generation(stale));
+    let row = app.filtered()[0];
+    assert_eq!(
+        app.conversations()[row].custom_title.as_deref(),
+        Some("fresh")
+    );
+
+    session.custom_title = Some("fresh".to_string());
+    *corpus.last_mut().unwrap() = session;
+    crate::store::generation::publish(root.path(), &corpus).unwrap();
+    let renamed = crate::store::Snapshot::open(root.path(), true, TimeFilter::default()).unwrap();
+    assert!(app.swap_generation(renamed));
+    assert!(app.renamed.is_empty());
+}
+
+#[test]
+fn uuid_query_finds_cards_beyond_the_first_rows() {
+    let root = publish(&corpus());
+    let mut app = loading_app(None, vec![]);
+    show(&mut app, &root, TimeFilter::default());
+    assert_eq!(app.find_or_load_uuid("B"), Some(1));
+    assert_eq!(
+        app.conversations()[1].path,
+        PathBuf::from("/p/-tmp-beta/b.jsonl")
+    );
+}
+
+#[test]
+fn semantic_results_map_to_cards_by_path() {
+    let root = publish(&corpus());
+    let mut app = loading_app(Some("-tmp-alpha"), vec![]);
+    show(&mut app, &root, TimeFilter::default());
+    let mut loaded = corpus();
+    loaded.push(conversation("/p/-tmp-alpha/unpublished.jsonl", 9 * HOUR_MS));
+    app.semantic_corpus = SemanticCorpus::Loaded {
+        conversations: Arc::new(loaded),
+        docs: None,
+    };
+
+    assert_eq!(*app.semantic_scope_indices(), vec![0, 2, 3]);
+    let (rows, _) = app.semantic_rows(vec![2, 3, 0], HashMap::new());
+    let paths: Vec<_> = rows
+        .iter()
+        .map(|&row| app.conversations()[row].path.display().to_string())
+        .collect();
+    assert_eq!(
+        paths,
         vec!["/p/-tmp-alpha/c.jsonl", "/p/-tmp-alpha/a.jsonl"]
     );
 }

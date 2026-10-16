@@ -4,8 +4,8 @@ use crate::search::literal::{Literal, match_literal_ranges};
 use crate::search::normalize_for_search;
 use crate::search::query::ParsedQuery;
 use crate::tui::app::{
-    App, AppMode, DialogMode, ListSearchMode, ReconcileState, SemanticResultMetadata,
-    ViewSearchMode, ViewState, list_lines_per_item,
+    App, AppMode, DialogMode, ListSearchMode, SemanticResultMetadata, ViewSearchMode, ViewState,
+    list_lines_per_item,
 };
 use crate::tui::theme::{self, Theme};
 use crate::tui::viewer::{LineStyle, RenderedLine};
@@ -1062,12 +1062,13 @@ fn styled_span(text: &str, style: &LineStyle) -> Span<'static> {
 }
 
 fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let count_text = match &app.readiness().reconcile {
-        ReconcileState::Running { loaded } => format!("Loading... {}", loaded),
-        ReconcileState::Done => match app.selected() {
+    let count_text = if !app.readiness().list {
+        "Loading...".to_string()
+    } else {
+        match app.selected() {
             Some(selected) => format!("{}/{}", selected + 1, app.filtered().len()),
             None => format!("0/{}", app.filtered().len()),
-        },
+        }
     };
     let status_text = if app.list_search_mode() == ListSearchMode::Semantic {
         app.semantic_status_text()

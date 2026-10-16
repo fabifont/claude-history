@@ -4,7 +4,7 @@ use crate::cli::DebugLevel;
 use crate::config::KeyBindings;
 use crate::debug_log;
 use crate::error::{AppError, Result};
-use crate::history::{Conversation, LoaderMessage};
+use crate::history::Conversation;
 use crate::time_filter::TimeFilter;
 use crate::tui::viewer::ToolDisplayMode;
 use crossterm::event::{
@@ -17,9 +17,9 @@ use std::io::{self, Stderr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stderr>>,
@@ -89,10 +89,9 @@ enum EventLoopResult<T> {
 enum RuntimeEvent {
     Input(Event),
     InputError(io::Error),
-    Loader(LoaderMessage),
-    LoaderDisconnected,
-    /// The snapshot builder finished; `CURRENT` may name a new generation.
-    SnapshotBuilt,
+    /// A reconcile process exited, with this status if it could be waited
+    /// on.
+    Reconciled(Option<std::process::ExitStatus>),
 }
 
 /// How long the input thread waits for terminal input before checking
@@ -140,19 +139,6 @@ impl Drop for InputReader {
     }
 }
 
-/// Forwards loader messages to the runtime channel until the loader finishes.
-fn forward_loader(rx: Receiver<LoaderMessage>, tx: Sender<RuntimeEvent>) {
-    std::thread::spawn(move || {
-        for message in rx {
-            let last = matches!(message, LoaderMessage::Done | LoaderMessage::Fatal(_));
-            if tx.send(RuntimeEvent::Loader(message)).is_err() || last {
-                return;
-            }
-        }
-        let _ = tx.send(RuntimeEvent::LoaderDisconnected);
-    });
-}
-
 fn read_event(wait: Duration) -> Result<Option<Event>> {
     if !event::poll(wait).map_err(|e| AppError::Io(io::Error::other(e)))? {
         return Ok(None);
@@ -169,6 +155,10 @@ fn prepare_frame(app: &mut App, terminal: &mut Terminal<CrosstermBackend<Stderr>
     let content_width = calculate_content_width(frame_area.width as usize, app.show_timing());
 
     app.check_view_resize(content_width, viewport_height);
+    if matches!(app.app_mode(), AppMode::List) {
+        let lines_per_item = super::app::list_lines_per_item(app.list_search_mode(), app.query());
+        app.fill_visible_evidence(viewport_height / lines_per_item.max(1));
+    }
     let viewport_height = match app.app_mode() {
         AppMode::View(state) => {
             ui::view_layout_rects(frame_area, app, state).content.height as usize
@@ -250,159 +240,123 @@ where
     on_action(app, action)
 }
 
-/// Loader bookkeeping for the initial load and for user-triggered refreshes.
-#[derive(Default)]
-struct LoadState {
-    active: bool,
-    refresh_buffer: Option<Vec<Conversation>>,
-    refresh_failed: bool,
-    /// Some project of the initial load failed, so it is not the full corpus.
-    initial_incomplete: bool,
+/// The store the list is read from: generations under `root`, kept up to
+/// date by reconcile processes.
+struct Store {
+    root: PathBuf,
+    show_last: bool,
+    time_filter: TimeFilter,
+    /// Name of the generation shown.
+    shown: Option<String>,
+    /// A reconcile process is running.
+    running: bool,
+    /// Another pass was asked for while one was running.
+    again: bool,
+    /// When to retry a pass that found the store locked by another process.
+    retry_at: Option<Instant>,
 }
 
-impl LoadState {
-    fn start(&mut self, rx: Receiver<LoaderMessage>, tx: &Sender<RuntimeEvent>) {
-        self.active = true;
-        forward_loader(rx, tx.clone());
+/// How often `CURRENT` is checked while a reconcile pass may publish.
+const GENERATION_POLL: Duration = Duration::from_millis(200);
+/// How long to wait before retrying a pass that found the store locked.
+const BUSY_RETRY: Duration = Duration::from_secs(1);
+
+impl Store {
+    fn new(show_last: bool, time_filter: TimeFilter) -> Option<Self> {
+        Some(Self {
+            root: crate::store::default_root()?,
+            show_last,
+            time_filter,
+            shown: None,
+            running: false,
+            again: false,
+            retry_at: None,
+        })
     }
 
-    /// Applies one loader event. Returns true when the initial load finished.
-    fn apply(&mut self, app: &mut App, event: RuntimeEvent) -> Result<bool> {
-        match event {
-            RuntimeEvent::Loader(LoaderMessage::Fatal(err)) => {
-                self.active = false;
-                if self.refresh_buffer.take().is_some() {
-                    app.set_status_message(format!("Refresh failed: {err}"));
-                } else {
-                    return Err(err);
-                }
-            }
-            RuntimeEvent::Loader(LoaderMessage::ProjectError) => {
-                if self.refresh_buffer.is_some() {
-                    self.refresh_failed = true;
-                } else {
-                    self.initial_incomplete = true;
-                }
-            }
-            RuntimeEvent::Loader(LoaderMessage::Batch(convs)) => {
-                if let Some(buffer) = &mut self.refresh_buffer {
-                    buffer.extend(convs);
-                } else {
-                    app.append_conversations(convs);
-                }
-            }
-            RuntimeEvent::Loader(LoaderMessage::Done) => {
-                self.active = false;
-                if let Some(conversations) = self.refresh_buffer.take() {
-                    if self.refresh_failed {
-                        app.set_status_message(
-                            "Refresh incomplete; keeping existing sessions".to_string(),
-                        );
-                    } else {
-                        let old_count = app.conversations().len();
-                        app.replace_conversations(conversations);
-                        let new_count = app.conversations().len();
-                        app.set_status_message(format!(
-                            "Refreshed sessions: {old_count} -> {new_count}"
-                        ));
-                    }
-                    self.refresh_failed = false;
-                } else {
-                    app.finish_loading();
-                    if app.conversations().is_empty() {
-                        return Err(AppError::NoHistoryFound("selected scope".to_string()));
-                    }
-                    return Ok(true);
-                }
-            }
-            RuntimeEvent::LoaderDisconnected => {
-                self.active = false;
-                if self.refresh_buffer.take().is_some() {
-                    app.set_status_message("Refresh failed; keeping existing sessions".to_string());
-                    self.refresh_failed = false;
-                } else if app.is_loading() {
-                    self.initial_incomplete = true;
-                    app.finish_loading();
-                    if app.conversations().is_empty() {
-                        return Err(AppError::NoHistoryFound("selected scope".to_string()));
-                    }
-                }
-            }
-            RuntimeEvent::Input(_) | RuntimeEvent::InputError(_) | RuntimeEvent::SnapshotBuilt => {}
+    fn open(&self) -> Option<crate::store::Snapshot> {
+        crate::store::Snapshot::open(&self.root, self.show_last, self.time_filter)
+    }
+
+    /// Shows the generation `CURRENT` names if it is not the one shown.
+    /// Returns whether it did.
+    fn show_current(&mut self, app: &mut App) -> bool {
+        let current = crate::store::Generation::current_name(&self.root);
+        if current.is_none() || current == self.shown {
+            return false;
         }
-        Ok(false)
-    }
-}
-
-/// Snapshot of the list on disk: read for the first frame, rebuilt from the
-/// loaded corpus.
-struct SnapshotStore {
-    root: Option<PathBuf>,
-    writer: Option<JoinHandle<io::Result<SnapshotWrite>>>,
-}
-
-#[derive(Debug)]
-enum SnapshotWrite {
-    /// A builder process ran and exited with this status.
-    Built(std::process::ExitStatus),
-}
-
-impl SnapshotStore {
-    fn new() -> Self {
-        Self {
-            root: crate::store::default_root(),
-            writer: None,
+        let Some(cards) = self.open() else {
+            return false;
+        };
+        self.shown = Some(cards.generation_name().to_owned());
+        if app.generation_len().is_none() {
+            app.show_snapshot(cards);
+            app.open_search_index();
+            true
+        } else {
+            app.swap_generation(cards)
         }
     }
 
-    fn open(&self, show_last: bool, time_filter: TimeFilter) -> Option<crate::store::Snapshot> {
-        crate::store::Snapshot::open(self.root.as_deref()?, show_last, time_filter)
-    }
-
-    /// Reconciles the store with the session files in the background, and
-    /// calls `built` once the reconcile process has exited. It runs in a
-    /// separate process (`reconcile`) that outlives the TUI and writes
-    /// nothing when no session file changed.
-    fn write(
-        &mut self,
-        _app: &App,
-        load: &LoadState,
-        time_filter: TimeFilter,
-        _loaded_since: SystemTime,
-        built: impl FnOnce() + Send + 'static,
-    ) {
-        if self.root.is_none() {
+    /// Starts a reconcile pass, or another one after the running one.
+    /// `Reconciled` is sent when it exits.
+    fn reconcile(&mut self, tx: &Sender<RuntimeEvent>) {
+        self.retry_at = None;
+        if self.running {
+            self.again = true;
             return;
         }
-        if load.initial_incomplete || time_filter.is_active() || self.writer.is_some() {
-            return;
-        }
-        self.writer = std::thread::Builder::new()
-            .name("snapshot-writer".into())
-            .spawn(move || {
-                let status = spawn_reconciler()?.wait()?;
-                crate::bench::mark("snapshot_built");
-                built();
-                Ok(SnapshotWrite::Built(status))
-            })
-            .ok();
-    }
-
-    /// Waits for the check and any builder process to finish.
-    fn finish(&mut self) -> Option<SnapshotWrite> {
-        let outcome = self.writer.take()?.join().ok()?;
-        match &outcome {
-            Ok(SnapshotWrite::Built(status)) if !status.success() => {
-                let _ = debug_log::log_debug(&format!("List snapshot builder failed: {status}"));
-            }
+        let mut child = match spawn_reconciler() {
+            Ok(child) => child,
             Err(err) => {
-                let _ = debug_log::log_debug(&format!("Failed to build list snapshot: {err}"));
+                let _ = debug_log::log_debug(&format!("Failed to start reconcile: {err}"));
+                return;
             }
-            Ok(_) => {}
+        };
+        let tx = tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("reconcile-wait".into())
+            .spawn(move || {
+                let status = child.wait().ok();
+                let _ = tx.send(RuntimeEvent::Reconciled(status));
+            });
+        self.running = spawned.is_ok();
+    }
+
+    /// Records that the running pass exited with `status`, and starts the
+    /// next one when one was asked for or the store was locked.
+    fn reconciled(&mut self, status: Option<std::process::ExitStatus>, tx: &Sender<RuntimeEvent>) {
+        self.running = false;
+        match status {
+            Some(status) if status.code() == Some(RECONCILE_BUSY) => {
+                self.retry_at = Some(Instant::now() + BUSY_RETRY);
+            }
+            Some(status) if !status.success() => {
+                let _ = debug_log::log_debug(&format!("Reconcile failed: {status}"));
+            }
+            _ => {}
         }
-        outcome.ok()
+        if std::mem::take(&mut self.again) {
+            self.reconcile(tx);
+        }
+    }
+
+    /// Whether a pass is running or due, so `CURRENT` may change.
+    fn pending(&self) -> bool {
+        self.running || self.retry_at.is_some()
+    }
+
+    /// Starts the pass retried after a busy lock once it is due.
+    fn retry_due(&mut self, tx: &Sender<RuntimeEvent>) {
+        if self.retry_at.is_some_and(|at| at <= Instant::now()) {
+            self.reconcile(tx);
+        }
     }
 }
+
+/// Exit status of a reconcile process that found the store locked by
+/// another process (`EX_TEMPFAIL`).
+const RECONCILE_BUSY: i32 = 75;
 
 /// Starts `claude-history --reconcile` in its own session, so it keeps
 /// running when the TUI exits or replaces itself with an agent.
@@ -449,6 +403,9 @@ pub fn reconcile() -> Result<()> {
     let sources = crate::store::reconcile::Sources::from_env();
     let outcome = crate::store::reconcile::reconcile(&root, &sources)?;
     crate::bench::mark("reconcile_done");
+    if outcome.publish == crate::store::generation::Publish::Busy {
+        std::process::exit(RECONCILE_BUSY);
+    }
     if crate::bench::enabled() {
         eprintln!(
             "bench reconcile_bytes_written {}B\nbench reconcile_parsed {}\nbench reconcile_published {}",
@@ -460,6 +417,22 @@ pub fn reconcile() -> Result<()> {
     Ok(())
 }
 
+/// Loads every conversation inside `time_filter` with the full loader, for
+/// runs without a store.
+fn load_in_memory(
+    show_last: bool,
+    debug_level: Option<DebugLevel>,
+    time_filter: TimeFilter,
+) -> Result<Vec<Conversation>> {
+    let mut conversations = crate::history::load_all_conversations(show_last, debug_level)?;
+    if time_filter.is_active() {
+        conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
+    }
+    Ok(conversations)
+}
+
+/// Runs the list TUI and returns the action that ended it, with the
+/// conversation it applies to.
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_loader(
     show_last: bool,
@@ -472,8 +445,8 @@ pub fn run_with_loader(
     current_project_dir_name: Option<String>,
     exclude_projects: Vec<String>,
     search_options: TuiSearchOptions,
-) -> Result<(Action, Arc<Vec<Conversation>>)> {
-    let mut snapshot = SnapshotStore::new();
+) -> Result<(Action, Option<Conversation>)> {
+    let mut store = Store::new(show_last, time_filter);
     let mut guard = TerminalGuard::new()?;
     let (events_tx, events_rx) = mpsc::channel();
     let _input = InputReader::spawn(events_tx.clone());
@@ -486,8 +459,21 @@ pub fn run_with_loader(
         exclude_projects,
         search_options,
     );
-    if let Some(cards) = snapshot.open(show_last, time_filter) {
-        app.show_snapshot(cards);
+    let no_history = || AppError::NoHistoryFound("selected scope".to_string());
+    match &mut store {
+        Some(store) => {
+            if let Some(cards) = store.open() {
+                store.shown = Some(cards.generation_name().to_owned());
+                app.show_snapshot(cards);
+            }
+        }
+        None => {
+            let conversations = load_in_memory(show_last, debug_level, time_filter)?;
+            if conversations.is_empty() {
+                return Err(no_history());
+            }
+            app.show_conversations(conversations);
+        }
     }
     prepare_frame(&mut app, &mut guard.terminal);
     draw_frame(&app, &mut guard.terminal)?;
@@ -495,15 +481,14 @@ pub fn run_with_loader(
     if app.open_search_index() {
         crate::bench::mark("index_open");
     }
-
-    let loaded_since = SystemTime::now();
-    let mut load = LoadState::default();
-    load.start(
-        crate::history::load_all_conversations_streaming(show_last, debug_level, time_filter),
-        &events_tx,
-    );
-
-    let mut report_load_done = false;
+    if let Some(store) = &mut store {
+        store.reconcile(&events_tx);
+        app.set_reconciling(store.pending());
+    }
+    // Generation size before a refresh, while one runs.
+    let mut refreshing: Option<usize> = None;
+    // The first pass has not finished; an empty list may still fill.
+    let mut starting = true;
 
     loop {
         let frame_state = prepare_frame(&mut app, &mut guard.terminal);
@@ -511,124 +496,147 @@ pub fn run_with_loader(
         if !reported_first_rows {
             reported_first_rows = report_first_rows(&app);
         }
-        if std::mem::take(&mut report_load_done) {
-            crate::bench::mark("load_done");
-            crate::bench::mark_peak_rss();
-            let events = events_tx.clone();
-            snapshot.write(&app, &load, time_filter, loaded_since, move || {
-                let _ = events.send(RuntimeEvent::SnapshotBuilt);
-            });
-        }
         if app.receive_search_results() {
             draw_frame(&app, &mut guard.terminal)?;
         }
+        if let Some(store) = &mut store {
+            if app.take_reconcile_request() {
+                store.reconcile(&events_tx);
+            }
+            store.retry_due(&events_tx);
+            store.show_current(&mut app);
+            app.set_reconciling(store.pending());
+        }
 
         // Search results arrive on the workers' own channels, so poll for
-        // them while a search runs; otherwise sleep until an event arrives
-        // or the status message expires.
-        let wait = if app.has_search_work_in_flight() {
-            Some(Duration::from_millis(8))
-        } else {
-            app.status_message_remaining()
-        };
+        // them while a search runs, and poll `CURRENT` while a reconcile
+        // pass may publish; otherwise sleep until an event arrives or the
+        // status message expires.
+        let wait = [
+            app.has_search_work_in_flight()
+                .then_some(Duration::from_millis(8)),
+            store
+                .as_ref()
+                .is_some_and(Store::pending)
+                .then_some(GENERATION_POLL),
+            app.status_message_remaining(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let received = match wait {
             Some(wait) => events_rx.recv_timeout(wait),
             None => events_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
-        let mut next = match received {
-            Ok(event) => Some(event),
+        let event = match received {
+            Ok(event) => event,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => unreachable!("events_tx is held by the loop"),
         };
 
-        // Apply queued loader batches for up to 8 ms before redrawing, but
-        // redraw right after each input event.
-        let batch_started = Instant::now();
-        while let Some(event) = next.take() {
-            let ev = match event {
-                RuntimeEvent::Input(ev) => ev,
-                RuntimeEvent::InputError(err) => return Err(AppError::Io(err)),
-                RuntimeEvent::SnapshotBuilt => {
-                    if let Some(cards) = snapshot.open(show_last, time_filter) {
-                        app.swap_search_index(cards);
-                    }
+        let ev = match event {
+            RuntimeEvent::Input(ev) => ev,
+            RuntimeEvent::InputError(err) => return Err(AppError::Io(err)),
+            RuntimeEvent::Reconciled(status) => {
+                let Some(store) = &mut store else {
+                    continue;
+                };
+                store.reconciled(status, &events_tx);
+                store.show_current(&mut app);
+                app.set_reconciling(store.pending());
+                if store.pending() {
                     continue;
                 }
-                loader_event => {
-                    report_load_done |= load.apply(&mut app, loader_event)?;
-                    if batch_started.elapsed() < Duration::from_millis(8) {
-                        next = events_rx.try_recv().ok();
-                    }
-                    continue;
+                if let Some(old_count) = refreshing.take() {
+                    let new_count = app.generation_len().unwrap_or(0);
+                    app.set_status_message(format!(
+                        "Refreshed sessions: {old_count} -> {new_count}"
+                    ));
                 }
-            };
+                if std::mem::take(&mut starting) && app.generation_is_empty() {
+                    return Err(no_history());
+                }
+                continue;
+            }
+        };
 
-            let event_result =
-                handle_event(
-                    &mut app,
-                    &frame_state,
-                    ev,
-                    true,
-                    |app, action| match action {
-                        Action::Delete(ref path) => {
-                            let source = app
-                                .get_selected_source()
-                                .unwrap_or(crate::history::Source::Claude);
-                            let result = match source {
-                                crate::history::Source::Claude => {
-                                    let uuid =
-                                        path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                                    crate::history::delete_session_by_uuid(uuid).map(|_| ())
-                                }
-                                crate::history::Source::Pi => {
-                                    crate::history::pi_loader::delete_session(path)
-                                }
-                                crate::history::Source::Omp => {
-                                    crate::history::omp_loader::delete_session(path)
-                                }
-                            };
-                            match result {
-                                Ok(()) => {
-                                    app.remove_selected_from_list();
-                                    app.exit_view_mode();
-                                    EventLoopResult::Continue
-                                }
-                                Err(e) => {
-                                    let _ = debug_log::log_debug(&format!(
-                                        "Failed to delete session {}: {}",
-                                        path.display(),
-                                        e
-                                    ));
-                                    EventLoopResult::Continue
-                                }
-                            }
+        let event_result = handle_event(
+            &mut app,
+            &frame_state,
+            ev,
+            true,
+            |app, action| match action {
+                Action::Delete(ref path) => {
+                    let source = app
+                        .get_selected_source()
+                        .unwrap_or(crate::history::Source::Claude);
+                    let result = match source {
+                        crate::history::Source::Claude => {
+                            let uuid = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                            crate::history::delete_session_by_uuid(uuid).map(|_| ())
                         }
-                        _ => EventLoopResult::Return(Some(action)),
-                    },
-                );
+                        crate::history::Source::Pi => {
+                            crate::history::pi_loader::delete_session(path)
+                        }
+                        crate::history::Source::Omp => {
+                            crate::history::omp_loader::delete_session(path)
+                        }
+                    };
+                    match result {
+                        Ok(()) => {
+                            app.remove_selected_from_list();
+                            app.exit_view_mode();
+                            EventLoopResult::Continue
+                        }
+                        Err(e) => {
+                            let _ = debug_log::log_debug(&format!(
+                                "Failed to delete session {}: {}",
+                                path.display(),
+                                e
+                            ));
+                            EventLoopResult::Continue
+                        }
+                    }
+                }
+                _ => EventLoopResult::Return(Some(action)),
+            },
+        );
 
-            match event_result {
-                EventLoopResult::Continue | EventLoopResult::Break => {}
-                EventLoopResult::Return(Some(Action::Refresh)) => {
-                    if !load.active {
-                        load.refresh_buffer = Some(Vec::new());
-                        load.refresh_failed = false;
-                        load.start(
-                            crate::history::load_all_conversations_streaming(
-                                show_last,
-                                debug_level,
-                                time_filter,
-                            ),
-                            &events_tx,
-                        );
+        match event_result {
+            EventLoopResult::Continue | EventLoopResult::Break => {}
+            EventLoopResult::Return(Some(Action::Refresh)) => match &mut store {
+                Some(store) => {
+                    if refreshing.is_none() {
+                        refreshing = Some(app.generation_len().unwrap_or(0));
+                        store.reconcile(&events_tx);
+                        app.set_reconciling(store.pending());
                         app.set_status_message("Refreshing sessions...".to_string());
                     }
                 }
-                EventLoopResult::Return(Some(action)) => {
-                    return Ok((action, app.into_conversations()));
+                None => {
+                    let old_count = app.conversations().len();
+                    match load_in_memory(show_last, debug_level, time_filter) {
+                        Ok(conversations) => {
+                            let new_count = conversations.len();
+                            app.show_conversations(conversations);
+                            app.set_status_message(format!(
+                                "Refreshed sessions: {old_count} -> {new_count}"
+                            ));
+                        }
+                        Err(err) => app.set_status_message(format!("Refresh failed: {err}")),
+                    }
                 }
-                EventLoopResult::Return(None) => {}
+            },
+            EventLoopResult::Return(Some(action)) => {
+                let conversation = match &action {
+                    Action::Select(path) | Action::Resume(path) | Action::ForkResume(path) => {
+                        app.conversation_at(path)
+                    }
+                    _ => None,
+                };
+                return Ok((action, conversation));
             }
+            EventLoopResult::Return(None) => {}
         }
     }
 }
@@ -682,16 +690,15 @@ fn report_first_rows(app: &App) -> bool {
 
 /// Runs the list startup path against an offscreen terminal and prints timing
 /// marks: first populated frame, the first page and complete ranking of
-/// `query`, loading finished, and the snapshot rebuild.
+/// `query`, the reconcile pass, and the swap to the generation it published.
 ///
-/// The query runs as soon as lexical search is ready: right after the first
-/// frame when the snapshot has an index, otherwise after loading. When
+/// The query runs as soon as the generation's index is open, or after the
+/// first pass when there was no generation. When
 /// `CLAUDE_HISTORY_BENCH_QUERIES` names a file, each of its lines is then
 /// run the same way and the latency percentiles are printed.
 #[allow(clippy::too_many_arguments)]
 pub fn bench_startup(
     show_last: bool,
-    debug_level: Option<DebugLevel>,
     time_filter: TimeFilter,
     keys: KeyBindings,
     workspace_filter: bool,
@@ -780,7 +787,9 @@ pub fn bench_startup(
     let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT))
         .map_err(|e| AppError::Io(io::Error::other(e)))?;
 
-    let mut snapshot = SnapshotStore::new();
+    let Some(mut store) = Store::new(show_last, time_filter) else {
+        return Err(AppError::Io(io::Error::other("no cache directory")));
+    };
     let mut app = App::new_loading_with_options(
         ToolDisplayMode::Hidden,
         false,
@@ -790,8 +799,9 @@ pub fn bench_startup(
         exclude_projects,
         TuiSearchOptions::default(),
     );
-    if let Some(cards) = snapshot.open(show_last, time_filter) {
+    if let Some(cards) = store.open() {
         eprintln!("bench generation {}", cards.generation_name());
+        store.shown = Some(cards.generation_name().to_owned());
         app.show_snapshot(cards);
     }
     draw(&mut terminal, &app)?;
@@ -809,58 +819,38 @@ pub fn bench_startup(
         searched = true;
     }
 
-    let loaded_since = SystemTime::now();
-    let rx = crate::history::load_all_conversations_streaming(show_last, debug_level, time_filter);
-    let mut load = LoadState::default();
-    for message in rx {
-        match message {
-            LoaderMessage::Fatal(err) => return Err(err),
-            LoaderMessage::ProjectError => load.initial_incomplete = true,
-            LoaderMessage::Batch(convs) => app.append_conversations(convs),
-            LoaderMessage::Done => break,
+    let status = spawn_reconciler()
+        .and_then(|mut child| child.wait())
+        .map_err(AppError::Io)?;
+    bench::mark("reconcile_exited");
+    eprintln!("bench reconcile_status {status}");
+    if store.show_current(&mut app) {
+        bench::mark("generation_shown");
+        while app.has_search_work_in_flight() {
+            if !app.receive_search_results() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        draw(&mut terminal, &app)?;
+        if !first_rows {
+            report_first_rows(&app);
+        }
+        if searched {
+            let (page, complete) = run_query(&mut terminal, &mut app, query, false)?;
+            eprintln!(
+                "bench swapped_query page {:.1}ms complete {:.1}ms results {}",
+                page.as_secs_f64() * 1e3,
+                complete.as_secs_f64() * 1e3,
+                app.filtered().len()
+            );
         }
     }
-    bench::mark("load_received");
-
-    app.finish_loading();
-    while app.has_search_work_in_flight() {
-        if !app.receive_search_results() {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
-    draw(&mut terminal, &app)?;
-    if !first_rows {
-        report_first_rows(&app);
-    }
-    bench::mark("load_done");
-    bench::mark_peak_rss_as("load_peak_rss");
-    let (built_tx, built_rx) = mpsc::channel();
-    snapshot.write(&app, &load, time_filter, loaded_since, move || {
-        let _ = built_tx.send(());
-    });
-
     if !searched {
         run_query(&mut terminal, &mut app, query, true)?;
         eprintln!("bench results {}", app.filtered().len());
         run_bench_queries(&mut terminal, &mut app)?;
     }
-    eprintln!("bench conversations {}", app.conversations().len());
-    if let Some(outcome) = snapshot.finish() {
-        eprintln!("bench snapshot {outcome:?}");
-    }
-    if built_rx.try_recv().is_ok()
-        && let Some(cards) = snapshot.open(show_last, time_filter)
-        && app.swap_search_index(cards)
-    {
-        bench::mark("index_swapped");
-        let (page, complete) = run_query(&mut terminal, &mut app, query, false)?;
-        eprintln!(
-            "bench swapped_query page {:.1}ms complete {:.1}ms results {}",
-            page.as_secs_f64() * 1e3,
-            complete.as_secs_f64() * 1e3,
-            app.filtered().len()
-        );
-    }
+    eprintln!("bench conversations {}", app.generation_len().unwrap_or(0));
     bench::mark_peak_rss();
     Ok(())
 }

@@ -489,7 +489,7 @@ fn replacing_conversations_preserves_selection_by_path() {
 
     let mut refreshed_second = test_conversation(second.clone(), Some("renamed".to_string()));
     refreshed_second.timestamp = Local.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap();
-    app.replace_conversations(vec![test_conversation(first, None), refreshed_second]);
+    app.show_conversations(vec![test_conversation(first, None), refreshed_second]);
 
     assert_eq!(app.get_selected_path().as_deref(), Some(second.as_path()));
     let selected = app.get_selected_conversation_index().unwrap();
@@ -506,7 +506,7 @@ fn replacing_conversations_removes_deleted_sessions_and_deduplicates_paths() {
     let new = dir.path().join("new.jsonl");
     let mut app = app_with_conversation(old, None);
 
-    app.replace_conversations(vec![
+    app.show_conversations(vec![
         test_conversation(new.clone(), None),
         test_conversation(new.clone(), None),
     ]);
