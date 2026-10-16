@@ -217,6 +217,7 @@ fn push_part(text: &mut String, part: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text_match::starts_word;
 
     /// Char-by-char reference for `find_case_insensitive_ranges`.
     fn reference_case_insensitive_ranges(text: &str, needle: &str) -> Vec<(usize, usize)> {
@@ -226,10 +227,10 @@ mod tests {
         };
         let mut ranges = Vec::new();
         let mut resume = 0;
-        let mut prev_alnum = false;
+        let mut prev = None;
         for (start, ch) in text.char_indices() {
-            let word_start = !prev_alnum;
-            prev_alnum = ch.is_alphanumeric();
+            let word_start = prev.is_none_or(|prev| starts_word(prev, Some(ch)));
+            prev = Some(ch);
             if start < resume || !word_start || ch.to_lowercase().next() != Some(first) {
                 continue;
             }
@@ -341,6 +342,33 @@ mod tests {
         }
         assert!(Literal::new("ünchen".to_string()).matches("(ünchen)"));
         assert!(!Literal::new("nchen".to_string()).matches("münchen"));
+    }
+
+    #[test]
+    fn literal_matches_at_letter_digit_transitions() {
+        for (needle, text) in [
+            ("1.2.3", "bump v1.2.3"),
+            ("264", "H264"),
+            ("V", "2V"),
+            ("8", "UTF8"),
+        ] {
+            let literal = Literal::new(needle.to_string());
+            assert!(literal.matches(text), "{needle:?} in {text:?}");
+        }
+        assert_eq!(
+            Literal::new("264".to_string()).match_ranges("h264 x264"),
+            [(1, 4), (6, 9)]
+        );
+        for (needle, text) in [
+            ("Config", "AppConfig"),
+            ("config", "appconfig"),
+            ("64", "h264"),
+        ] {
+            assert!(
+                !Literal::new(needle.to_string()).matches(text),
+                "{needle:?} in {text:?}"
+            );
+        }
     }
 
     #[test]

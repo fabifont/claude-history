@@ -324,7 +324,9 @@ Unquoted search matches words flexibly:
 - `config` matches `CONFIG`
 - `api key` matches `API_KEY`
 - `auth` matches `authentication` and `authorize`
-- `red` won't match inside `fired`
+- `red` won't match inside `fired`, and `config` won't match inside `AppConfig`
+- a switch between letters and digits starts a word, so `1.2.3` matches `v1.2.3`
+  and `264` matches `h264`
 - multiple words must all match
 
 Identifier-style terms with underscores keep the underscore, so `api_key` matches

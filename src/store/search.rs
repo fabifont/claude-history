@@ -31,7 +31,7 @@ use crate::search::lexical::{
 };
 use crate::search::literal::{Literal, matches_all_literals};
 use crate::search::query::ParsedQuery;
-use crate::text_match::{contains_cjk, normalize_for_search};
+use crate::text_match::{contains_cjk, is_word_start, normalize_for_search};
 use chrono::{DateTime, Local};
 use rayon::prelude::*;
 use std::borrow::Cow;
@@ -634,20 +634,15 @@ pub fn is_exact_word(word: &str) -> bool {
 }
 
 /// Whether an occurrence of `word` can begin at a word start inside another
-/// occurrence: when a proper suffix of `word` that follows a
-/// non-alphanumeric char is also a prefix of it (`a.a` in `a.a.a`). The
-/// index counts every word-start occurrence, while the scorer counts
+/// occurrence: when a proper suffix of `word` that starts a word within it
+/// is also a prefix of it (`a.a` in `a.a.a`, `a1a` in `a1a1a`). The index
+/// counts every word-start occurrence, while the scorer counts
 /// non-overlapping occurrences left to right and keeps those at word starts,
 /// so the two agree for words that cannot overlap themselves.
 fn overlaps_itself(word: &str) -> bool {
-    let mut prev_alnum = true;
-    for (i, ch) in word.char_indices() {
-        if i > 0 && !prev_alnum && word.starts_with(&word[i..]) {
-            return true;
-        }
-        prev_alnum = ch.is_alphanumeric();
-    }
-    false
+    word.char_indices()
+        .skip(1)
+        .any(|(i, _)| is_word_start(word, i) && word.starts_with(&word[i..]))
 }
 
 /// Title, summary and project score of `doc`, accumulated exactly as the
@@ -998,11 +993,22 @@ mod tests {
         for word in ["error", "a.b", "foo.bar", "x", "café", "a.", ".a"] {
             assert!(is_exact_word(word), "{word}");
         }
-        for word in ["a.a", "..", "ab.ab", "x(x", &"y".repeat(TERM_CAP + 1)] {
+        for word in [
+            "a.a",
+            "..",
+            "ab.ab",
+            "x(x",
+            "a1a",
+            "1a1",
+            &"y".repeat(TERM_CAP + 1),
+        ] {
             assert!(!is_exact_word(word), "{word}");
         }
-        // Borders after an alphanumeric char cannot start at a word start.
+        // Borders after a letter before a letter, or a digit before a digit,
+        // cannot start at a word start.
         assert!(is_exact_word("abab"));
+        assert!(is_exact_word("1212"));
+        assert!(is_exact_word("v1x"));
     }
 
     /// The fixture corpus of `score_impl_golden_results`.
@@ -1113,6 +1119,58 @@ mod tests {
     }
 
     #[test]
+    fn letter_digit_transitions_start_words_in_both_indexes() {
+        let now = Local.timestamp_opt(1_760_000_000, 0).unwrap();
+        let mut conversations = vec![
+            conv("bump to v1.2.3 now", None, None, None, now, "/0"),
+            conv(
+                "encode h264 video",
+                None,
+                None,
+                None,
+                now - Duration::hours(1),
+                "/1",
+            ),
+            conv(
+                "the AppConfig type",
+                None,
+                None,
+                None,
+                now - Duration::hours(2),
+                "/2",
+            ),
+            conv(
+                "utf8 2v x264",
+                None,
+                None,
+                None,
+                now - Duration::hours(3),
+                "/3",
+            ),
+        ];
+        for conversation in &mut conversations {
+            conversation.own_text = conversation.full_text.clone();
+        }
+        let corpus = Corpus::new(conversations.clone());
+        let own = Corpus::user_only(conversations);
+        for corpus in [&corpus, &own] {
+            for (query, hits) in [
+                ("1.2.3", 1),
+                ("264", 2),
+                ("264 video", 1),
+                ("8", 1),
+                ("v", 3),
+                ("onfig", 0),
+                ("config", 0),
+                ("64", 0),
+            ] {
+                corpus.check(query, now, 10);
+                assert_eq!(corpus.expected(query, now).len(), hits, "{query:?}");
+            }
+        }
+    }
+
+    #[test]
     fn self_overlapping_word_is_counted_like_the_scorer() {
         let now = Local.timestamp_opt(1_760_000_000, 0).unwrap();
         let corpus = Corpus::new(vec![
@@ -1120,11 +1178,15 @@ mod tests {
             conva("x.x.x.x", now - Duration::hours(1), "/1"),
             conva("ya.a.a z", now - Duration::hours(2), "/2"),
             conva("..x ... .", now - Duration::hours(3), "/3"),
+            conva("a1a1a a1a b2b2", now - Duration::hours(4), "/4"),
         ]);
         fn conva(text: &str, timestamp: DateTime<Local>, path: &str) -> Conversation {
             conv(text, None, None, None, timestamp, path)
         }
-        for query in ["a.a", "a.a a.a", "x.x", "x.x.x", "..", ".", "a.a z", "ya.a"] {
+        for query in [
+            "a.a", "a.a a.a", "x.x", "x.x.x", "..", ".", "a.a z", "ya.a", "a1a", "a1a a1a", "b2b",
+            "2b",
+        ] {
             corpus.check(query, now, 10);
         }
         // The index alone overcounts these, so their candidates are read.
@@ -1516,8 +1578,8 @@ mod tests {
     }
 
     /// Words that stress normalization and term boundaries: chars whose
-    /// lowercase changes length or adds word starts, self-overlapping
-    /// versions, words around `TERM_CAP` with multibyte chars at the cut,
+    /// lowercase changes length or adds word starts, letter↔digit
+    /// transitions, self-overlapping versions, words around `TERM_CAP` with multibyte chars at the cut,
     /// pair prefixes that split a multibyte char, and long ideograph runs.
     const ADVERSARIAL_VOCAB: &[&str] = &[
         "İstanbul",
@@ -1548,6 +1610,20 @@ mod tests {
         "1.1.1",
         "aaa.aaa.aaa",
         "a.a",
+        "h264",
+        "264",
+        "utf8",
+        "2v",
+        "a1a",
+        "a1a1a",
+        "1080p",
+        "x²",
+        "Ⅻa",
+        "测试2",
+        "2测试",
+        "i\u{307}2",
+        "AppConfig",
+        "onfig",
         "x::y::z",
         "::new",
         "#intro",

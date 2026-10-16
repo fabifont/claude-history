@@ -477,6 +477,22 @@ mod tests {
             ["Straße"]
         );
         assert_eq!(
+            snippets("1.2.3", "unrelated preview then bump to v1.2.3 today"),
+            ["1.2.3"]
+        );
+        assert_eq!(
+            snippets("264", "unrelated preview then encode H264 video"),
+            ["264"]
+        );
+        assert_eq!(
+            build_lexical_evidence(
+                "unrelated preview AppConfig",
+                "unrelated preview",
+                &ParsedQuery::parse("onfig")
+            ),
+            None
+        );
+        assert_eq!(
             build_lexical_evidence(
                 "unrelated preview asp.net",
                 "unrelated preview",

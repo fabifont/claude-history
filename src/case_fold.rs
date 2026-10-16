@@ -252,9 +252,17 @@ mod tests {
             let lower: String = ch.to_lowercase().collect();
             assert_eq!(fold(&lower), folded, "{ch:?} and its lowercase differ");
             assert_eq!(
-                folded.chars().next().map(char::is_alphanumeric),
-                Some(ch.is_alphanumeric()),
+                folded
+                    .chars()
+                    .next()
+                    .map(|c| (c.is_alphanumeric(), c.is_numeric())),
+                Some((ch.is_alphanumeric(), ch.is_numeric())),
                 "{ch:?} changes word starts"
+            );
+            assert_eq!(
+                folded.chars().next_back().map(char::is_numeric),
+                Some(ch.is_numeric()),
+                "{ch:?} changes letter-digit word starts"
             );
         }
     }

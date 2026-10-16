@@ -809,6 +809,21 @@ mod tests {
     }
 
     #[test]
+    fn letter_digit_transitions_start_words() {
+        let transcript = transcript(vec![
+            text_message(1, AgentMessageRole::User, "bump to v1.2.3 and h264"),
+            text_message(2, AgentMessageRole::Assistant, "the AppConfig type"),
+        ]);
+        assert_eq!(
+            retrieve_agent_hits(&transcript, "1.2.3", options()).len(),
+            1
+        );
+        assert_eq!(retrieve_agent_hits(&transcript, "264", options()).len(), 1);
+        assert!(retrieve_agent_hits(&transcript, "onfig", options()).is_empty());
+        assert!(retrieve_agent_hits(&transcript, "64", options()).is_empty());
+    }
+
+    #[test]
     fn cjk_queries_match_their_words_anywhere() {
         let transcript = transcript(vec![text_message(
             1,

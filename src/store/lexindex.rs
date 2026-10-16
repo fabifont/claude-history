@@ -11,12 +11,12 @@
 //! Each segment indexes every `Field` of its documents in its own files,
 //! `own-base.*` for `Field::Own`, under the same doc ids.
 //!
-//! A document has one term per word start of its normalized text: the rest
-//! of that space-delimited chunk, cut to `TERM_CAP` bytes on a char
-//! boundary. When the chunk rest fits uncut and the chunk is followed by a
-//! single space and another chunk, the term continues with that space and
-//! the next chunk's `pair_prefix`: its first `PAIR_PREFIX` bytes, or its
-//! first char when that char is longer.
+//! A document has one term per word start (see `text_match::starts_word`)
+//! of its normalized text: the rest of that space-delimited chunk, cut to
+//! `TERM_CAP` bytes on a char boundary. When the chunk rest fits uncut and
+//! the chunk is followed by a single space and another chunk, the term
+//! continues with that space and the next chunk's `pair_prefix`: its first
+//! `PAIR_PREFIX` bytes, or its first char when that char is longer.
 //!
 //! Normalized query words contain no spaces and every prefix match starts at
 //! a word start inside one chunk, so the summed term frequencies of all terms
@@ -26,11 +26,11 @@
 //! `count_adjacent_pairs` count unless matches can overlap or a word is
 //! longer than `TERM_CAP` (see `search::is_exact_word`).
 //!
-//! Ideographs (U+4E00..=U+9FFF) that follow an alphanumeric char in their
-//! chunk also get an inner term: a space, then the rest of the chunk cut to
-//! `TERM_CAP` bytes. No ordinary term or query word starts with a space, so
-//! inner terms leave word-start counts untouched while letting `inner_tf`
-//! find ideographic words inside runs of CJK text.
+//! Ideographs (U+4E00..=U+9FFF) that follow a letter in their chunk, and so
+//! do not start a word, also get an inner term: a space, then the rest of
+//! the chunk cut to `TERM_CAP` bytes. No ordinary term or query word starts
+//! with a space, so inner terms leave word-start counts untouched while
+//! letting `inner_tf` find ideographic words inside runs of CJK text.
 //!
 //! Term frequencies are capped at `TF_CAP` per (term, document). Doc ids are
 //! row indices of the generation's cards, newest first.
@@ -45,7 +45,7 @@
 
 use super::generation::write_synced;
 use crate::search::lexical::pair_prefix;
-use crate::text_match::truncate_on_char_boundary;
+use crate::text_match::{starts_word, truncate_on_char_boundary};
 use bytemuck::{Pod, Zeroable};
 use fst::{IntoStreamer, Streamer};
 use rayon::prelude::*;
@@ -181,9 +181,9 @@ pub fn for_each_term<'t>(lowered: &'t str, mut emit: impl FnMut(&'t str)) {
             .map_or(lowered.len(), |i| chunk_start + i);
         let next = &lowered[(chunk_end + 1).min(lowered.len())..];
         let next = pair_prefix(&next[..next.find(' ').unwrap_or(next.len())]);
-        let mut prev_alnum = false;
+        let mut prev = None;
         for (i, ch) in lowered[chunk_start..chunk_end].char_indices() {
-            if !prev_alnum {
+            if prev.is_none_or(|prev| starts_word(prev, Some(ch))) {
                 let start = chunk_start + i;
                 let end = if chunk_end - start > TERM_CAP {
                     start + truncate_on_char_boundary(&lowered[start..chunk_end], TERM_CAP).len()
@@ -194,7 +194,7 @@ pub fn for_each_term<'t>(lowered: &'t str, mut emit: impl FnMut(&'t str)) {
                 };
                 emit(&lowered[start..end]);
             }
-            prev_alnum = ch.is_alphanumeric();
+            prev = Some(ch);
         }
         chunk_start = chunk_end + 1;
     }
@@ -206,20 +206,21 @@ pub fn is_ideograph(c: char) -> bool {
 }
 
 /// Calls `emit` with the chunk rest, cut to `TERM_CAP` bytes, at every
-/// ideograph of `lowered` (normalized text) that follows an alphanumeric char
-/// in its chunk. The stored inner term is a space followed by that rest.
+/// ideograph of `lowered` (normalized text) that follows a letter in its
+/// chunk, where it does not start a word. The stored inner term is a space
+/// followed by that rest.
 pub fn for_each_inner_term<'t>(lowered: &'t str, mut emit: impl FnMut(&'t str)) {
     // Ideographs are three-byte sequences with these lead bytes.
     if !lowered.bytes().any(|b| (0xE4..=0xE9).contains(&b)) {
         return;
     }
     for chunk in lowered.split(' ') {
-        let mut prev_alnum = false;
+        let mut prev = None;
         for (i, ch) in chunk.char_indices() {
-            if prev_alnum && is_ideograph(ch) {
+            if is_ideograph(ch) && prev.is_some_and(|prev| !starts_word(prev, Some(ch))) {
                 emit(truncate_on_char_boundary(&chunk[i..], TERM_CAP));
             }
-            prev_alnum = ch.is_alphanumeric();
+            prev = Some(ch);
         }
     }
 }
@@ -1055,7 +1056,7 @@ mod tests {
                     && lowered[..i]
                         .chars()
                         .next_back()
-                        .is_none_or(|c| !c.is_alphanumeric())
+                        .is_none_or(|c| starts_word(c, Some(ch)))
                     && lowered[i..].starts_with(key)
             })
             .count();
@@ -1082,6 +1083,24 @@ mod tests {
                 "x"
             ]
         );
+        // Letter↔digit transitions start words; case changes do not.
+        let mut terms = Vec::new();
+        for_each_term("v1.2.3 h264 appconfig", |term| terms.push(term.to_string()));
+        assert_eq!(
+            terms,
+            [
+                "v1.2.3 h26",
+                "1.2.3 h26",
+                "2.3 h26",
+                "3 h26",
+                "h264 app",
+                "264 app",
+                "appconfig"
+            ]
+        );
+        let mut inner = Vec::new();
+        for_each_inner_term("2测试 x测", |rest| inner.push(rest.to_string()));
+        assert_eq!(inner, ["试", "测"]);
         let mut terms = Vec::new();
         for_each_term("a 测试", |term| terms.push(term.to_string()));
         assert_eq!(terms, ["a 测", "测试"]);
@@ -1115,6 +1134,7 @@ mod tests {
             "零 测试 cache 会话 café cafe 这是测试测试 x会话",
             &"x".repeat(40),
             "the then there theme the.foo",
+            "v1.2.3 h264 utf8 2v x264 a1a1a 2测试 AppConfig",
         ];
         let lowered: Vec<String> = texts.iter().map(|t| normalize_for_search(t)).collect();
         let (_dir, index) = index_of(&texts);
@@ -1143,6 +1163,15 @@ mod tests {
             "runtime",
             "main",
             "foo",
+            "1.2.3",
+            "264",
+            "8",
+            "v",
+            "a1a",
+            "1a",
+            "测试",
+            "config",
+            "onfig",
         ] {
             let tf = index.prefix_tf(word);
             for (doc, text) in lowered.iter().enumerate() {

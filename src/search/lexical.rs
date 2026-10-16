@@ -5,7 +5,7 @@ use crate::search::literal::{
 };
 use crate::search::query::ParsedQuery;
 pub use crate::text_match::normalize_for_search;
-use crate::text_match::truncate_on_char_boundary;
+use crate::text_match::{starts_word, truncate_on_char_boundary};
 use chrono::{DateTime, Duration, Local};
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -552,16 +552,18 @@ pub fn score_text_debug(
     score_impl(s, query_words, adjacent_pairs, timestamp, now)
 }
 
-/// Returns true if `pos` in `text` is at the start of a word (i.e. preceded by
-/// a non-alphanumeric character or is the start of the string). This treats
-/// markdown punctuation (`*`, `(`, `:`, `.`, etc.) as word boundaries, so a
-/// phrase like `**media pipeline**` is matched the same as `media pipeline`.
+/// Returns true if `pos` in `text` is at the start of a word: the start of
+/// the string, after a non-alphanumeric character, or at a letter↔digit
+/// transition (see `starts_word`). This treats markdown punctuation (`*`,
+/// `(`, `:`, `.`, etc.) as word boundaries, so a phrase like
+/// `**media pipeline**` is matched the same as `media pipeline`, and finds
+/// `1.2` in `v1.2`.
 fn is_word_start(text: &str, pos: usize) -> bool {
     pos == 0
         || text[..pos]
             .chars()
             .next_back()
-            .is_some_and(|c| !c.is_alphanumeric())
+            .is_some_and(|c| starts_word(c, text[pos..].chars().next()))
 }
 
 /// Count prefix matches of `word` in `text`, up to `max_count`: occurrences
@@ -1137,9 +1139,24 @@ mod tests {
     }
 
     #[test]
+    fn letter_digit_transitions_start_words() {
+        assert_eq!(count_prefix_matches("bump to v1.2.3 now", "1.2.3", 10), 1);
+        assert_eq!(count_prefix_matches("h264 and x264", "264", 10), 2);
+        assert_eq!(count_prefix_matches("utf8 2v", "8", 10), 1);
+        assert_eq!(count_prefix_matches("utf8 2v", "v", 10), 1);
+        assert_eq!(count_prefix_matches("1.1.1 x1.1", "1.1", 10), 2);
+        assert_eq!(count_prefix_matches("AppConfig", "config", 10), 0);
+        assert_eq!(count_prefix_matches("h264", "64", 10), 0);
+        assert_eq!(
+            count_adjacent_pairs("encode h264 video", &["264 vid".to_owned()], 3),
+            1
+        );
+    }
+
+    #[test]
     fn mid_word_occurrence_does_not_hide_a_word_start_inside_it() {
-        assert_eq!(count_prefix_matches("bump to v1.1.1 now", "1.1", 10), 1);
-        assert_eq!(count_prefix_matches("1.1.1 x1.1", "1.1", 10), 1);
+        assert_eq!(count_prefix_matches("bump to va.a.a now", "a.a", 10), 1);
+        assert_eq!(count_prefix_matches("a.a.a xa.a", "a.a", 10), 1);
         assert_eq!(count_prefix_matches("aab ab", "ab", 10), 1);
         assert_eq!(
             count_adjacent_pairs("v1.1.1 xa", &["1.1 xa".to_owned()], 3),

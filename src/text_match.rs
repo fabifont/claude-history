@@ -224,16 +224,38 @@ pub fn is_word_separator(c: char) -> bool {
     c.is_whitespace() || c == '_' || c == '-' || c == '/' || is_cjk_punctuation(c)
 }
 
-/// Whether `pos` starts a word: it follows nothing or a non-alphanumeric
-/// char. A combining dot above that folding drops (see `case_fold`) belongs
-/// to the word before it, so raw and normalized text agree on word starts.
+/// Whether a word starts at `next` (`None` at the end of the text) when it
+/// follows `prev`: `prev` is not alphanumeric, or one of the two is a letter
+/// and the other a digit, so `1` starts a word in `v1` and `v` in `2v`.
+/// Letters are alphanumeric chars that are not numeric. Case changes are not
+/// word starts.
+#[inline]
+pub fn starts_word(prev: char, next: Option<char>) -> bool {
+    if prev.is_ascii() && next.is_none_or(|c| c.is_ascii()) {
+        let next = next.map_or(b' ', |c| c as u8);
+        let prev = prev as u8;
+        return !prev.is_ascii_alphanumeric()
+            || (next.is_ascii_alphanumeric() && prev.is_ascii_digit() != next.is_ascii_digit());
+    }
+    !prev.is_alphanumeric()
+        || next.is_some_and(|next| next.is_alphanumeric() && prev.is_numeric() != next.is_numeric())
+}
+
+/// Whether `pos` starts a word: it follows nothing, or `starts_word` holds
+/// for the chars around it. A combining dot above that folding drops (see
+/// `case_fold`) belongs to the char before it, so raw and normalized text
+/// agree on word starts.
 pub fn is_word_start(text: &str, pos: usize) -> bool {
     let mut before = text[..pos].chars().rev();
-    match before.next() {
-        None => true,
-        Some('\u{307}') => !before.next().is_some_and(drops_following_dot_above),
-        Some(c) => !c.is_alphanumeric(),
-    }
+    let prev = match before.next() {
+        None => return true,
+        Some('\u{307}') => match before.next() {
+            Some(c) if drops_following_dot_above(c) => c,
+            _ => return true,
+        },
+        Some(c) => c,
+    };
+    starts_word(prev, text[pos..].chars().next())
 }
 
 /// ASCII chars that a non-ASCII char lowercases to, with that char's first
@@ -409,7 +431,8 @@ mod tests {
 
     #[test]
     fn word_matches_follow_word_starts_unless_anywhere() {
-        assert_eq!(word_match_ranges("v1.1.1 x", "1.1", false), [(3, 6)]);
+        assert_eq!(word_match_ranges("v1.1.1 x", "1.1", false), [(1, 4)]);
+        assert_eq!(word_match_ranges("1.1.1 x", "1.1", false), [(0, 3)]);
         assert_eq!(word_match_ranges("aab ab", "ab", false), [(4, 6)]);
         assert_eq!(word_match_ranges("aab ab", "ab", true), [(1, 3), (4, 6)]);
     }
@@ -430,5 +453,57 @@ mod tests {
         assert!(!is_word_start("i\u{307}stanbul", 3));
         assert!(!is_word_start("\u{FB01}\u{307}x", 5));
         assert!(is_word_start("x\u{307}stanbul", 3));
+        assert!(is_word_start("i\u{307}2", 3));
+    }
+
+    #[test]
+    fn letter_digit_transitions_start_words() {
+        for (text, word) in [
+            ("v1.2.3", "1.2.3"),
+            ("h264", "264"),
+            ("utf8", "8"),
+            ("2v", "v"),
+            ("x²", "²"),
+            ("测试2", "2"),
+            ("Ⅻa", "a"),
+            ("ü1", "1"),
+        ] {
+            assert!(contains_prefix_match(text, word), "{word:?} in {text:?}");
+        }
+        for (text, word) in [
+            ("AppConfig", "Config"),
+            ("appconfig", "onfig"),
+            ("h264", "64"),
+            ("utf8", "tf8"),
+            ("1080p", "80p"),
+            ("ab_c", "b_c"),
+        ] {
+            assert!(!contains_prefix_match(text, word), "{word:?} in {text:?}");
+        }
+        assert!(starts_word('a', Some('1')));
+        assert!(starts_word('1', Some('a')));
+        assert!(!starts_word('a', Some('b')));
+        assert!(!starts_word('1', Some('2')));
+        assert!(!starts_word('a', Some('.')));
+        assert!(!starts_word('1', None));
+        assert!(starts_word('.', Some('a')));
+        assert!(starts_word('.', None));
+    }
+
+    #[test]
+    fn starts_word_ascii_path_matches_the_unicode_rule() {
+        let unicode = |prev: char, next: Option<char>| {
+            !prev.is_alphanumeric()
+                || next.is_some_and(|n| n.is_alphanumeric() && prev.is_numeric() != n.is_numeric())
+        };
+        for prev in (0..128u8).map(char::from) {
+            for next in (0..128u8).map(|b| Some(char::from(b))).chain([None]) {
+                assert_eq!(
+                    starts_word(prev, next),
+                    unicode(prev, next),
+                    "{prev:?} {next:?}"
+                );
+            }
+        }
     }
 }

@@ -640,6 +640,10 @@ mod tests {
         assert!(matches("the hidden needle_token appears", "needle token"));
         assert!(matches("late mention of İstanbul", "istanbul"));
         assert!(matches("tag v1.1.1", "1.1"));
+        assert!(matches("tag v1.2.3", "1.2.3"));
+        assert!(matches("encode H264", "264"));
+        assert!(!matches("the AppConfig type", "onfig"));
+        assert!(!matches("encode H264", "64"));
         assert!(matches("needle only", "needle token"));
         assert!(!matches("the fired plan", "ired"));
         assert!(matches("exact audio_generation", "\"audio_generation\""));

@@ -91,6 +91,7 @@ conv("S11", "load_all_conversations_streaming() is slow", cwd="/home/user/qa/gam
 conv("S12", "subconversations_streaming is unrelated", cwd="/home/user/qa/gamma")
 conv("S13", "AppConfig struct holds settings", cwd="/home/user/qa/gamma")
 conv("S14", "bump to v1.1.1 now", cwd="/home/user/qa/gamma")
+conv("S15", "transcode clip h264 utf8 subtitles", cwd="/home/user/qa/gamma")
 
 # L: quoted literals.
 conv("L1", "deploy with DEPLOYMENT_TOKEN set", cwd="/home/user/qa/delta")

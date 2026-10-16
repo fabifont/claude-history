@@ -269,11 +269,13 @@
 "id": 35,
 "group": "separators",
 "q": "1.2.3",
-"expect": [],
+"expect": [
+"S7"
+],
 "user": [
 "S7"
 ],
-"note": "digits after a letter are mid-word"
+"note": "a digit after a letter starts a word"
 },
 {
 "id": 36,
@@ -295,7 +297,7 @@
 "S14",
 "H3"
 ],
-"note": "v1.1.1 holds 1.1 at a word start (after the first dot)"
+"note": "v1.1.1 holds 1.1 at a word start (after the v)"
 },
 {
 "id": 38,
@@ -1586,5 +1588,62 @@
 ],
 "user_only": true,
 "note": "[Images] is typed text, not a placeholder"
+},
+{
+"id": 206,
+"group": "separators",
+"q": "\"1.2.3\"",
+"expect": [
+"S7"
+],
+"note": "literals start words at letter-digit switches too"
+},
+{
+"id": 207,
+"group": "separators",
+"q": "264",
+"expect": [
+"S15"
+],
+"note": "a digit after a letter starts a word"
+},
+{
+"id": 208,
+"group": "separators",
+"q": "264 utf8",
+"expect": [
+"S15"
+]
+},
+{
+"id": 209,
+"group": "separators",
+"q": "\"264\"",
+"expect": [
+"S15"
+]
+},
+{
+"id": 210,
+"group": "separators",
+"q": "64",
+"expect": [],
+"note": "digit to digit is mid-word"
+},
+{
+"id": 211,
+"group": "separators",
+"q": "onfig",
+"expect": [],
+"note": "camelCase is not split: no match in AppConfig"
+},
+{
+"id": 212,
+"group": "separators",
+"q": "1.2.3",
+"expect": [
+"S7"
+],
+"user_only": true
 }
 ]
