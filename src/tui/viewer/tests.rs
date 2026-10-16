@@ -396,14 +396,14 @@ fn tool_summary_entries() -> Vec<Owned> {
 }
 
 #[test]
-fn hidden_tool_mode_renders_activity_summary() {
+fn summary_tool_mode_renders_activity_summary() {
     let entry = entry(
         0,
         r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Grep","input":{"pattern":"one"}},{"type":"tool_use","id":"toolu_2","name":"Grep","input":{"pattern":"two"}},{"type":"tool_use","id":"toolu_3","name":"Read","input":{"file_path":"src/main.rs"}}]}}"#,
     );
     let rendered = render_parsed_conversation(
         &renderable(&[entry]),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
     let text = rendered_text(&rendered);
 
@@ -414,11 +414,11 @@ fn hidden_tool_mode_renders_activity_summary() {
 }
 
 #[test]
-fn hidden_tool_mode_coalesces_tool_only_entries_across_results() {
+fn summary_tool_mode_coalesces_tool_only_entries_across_results() {
     let entries = tool_summary_entries();
     let rendered = render_parsed_conversation(
         &renderable(&entries),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
     let text = rendered_text(&rendered);
 
@@ -437,7 +437,7 @@ fn collapsed_tool_summary_uses_fixed_timestamp_format() {
             timestamp.to_rfc3339()
         ),
     );
-    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    let mut options = test_render_options(ToolDisplayMode::Summary);
     options.show_timing = true;
 
     let rendered = render_parsed_conversation(&renderable(&[entry]), &options);
@@ -462,13 +462,13 @@ fn tool_summary_uses_source_agent_label() {
 
     let collapsed = render_parsed_conversation(
         &renderable(&entries),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
     let collapsed_text = rendered_text(&collapsed);
     assert!(collapsed_text.contains("Pi"));
     assert!(!collapsed_text.contains("Claude"));
 
-    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    let mut options = test_render_options(ToolDisplayMode::Summary);
     options.expanded_tool_outputs.insert(summary_id);
     let expanded = render_parsed_conversation(&renderable(&entries), &options);
     let expanded_text = rendered_text(&expanded);
@@ -500,7 +500,7 @@ fn hidden_pi_thinking_allows_clickable_grouped_tool_summary() {
 
     let collapsed = render_parsed_conversation(
         &renderable(&entries),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
     let collapsed_text = rendered_text(&collapsed);
     assert_eq!(collapsed_text.matches("Pi").count(), 1);
@@ -511,7 +511,7 @@ fn hidden_pi_thinking_allows_clickable_grouped_tool_summary() {
             .any(|line| { line.clickable && line.tool_output_id.as_ref() == Some(&summary_id) })
     );
 
-    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    let mut options = test_render_options(ToolDisplayMode::Summary);
     options.expanded_tool_outputs.insert(summary_id);
     let expanded = render_parsed_conversation(&renderable(&entries), &options);
     let expanded_text = rendered_text(&expanded);
@@ -524,7 +524,7 @@ fn hidden_pi_thinking_allows_clickable_grouped_tool_summary() {
 #[test]
 fn expanded_tool_summary_renders_truncated_details() {
     let entries = tool_summary_entries();
-    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    let mut options = test_render_options(ToolDisplayMode::Summary);
     options
         .expanded_tool_outputs
         .insert(make_tool_summary_output_id(0, None));
@@ -562,7 +562,7 @@ fn subagent_summary_label_parity() {
     let summary_id = make_tool_summary_output_id(0, Some("toolu_parent_abc"));
 
     // Collapsed: subagent label appears, no literal "Claude".
-    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    let mut options = test_render_options(ToolDisplayMode::Summary);
     options.show_thinking = true;
     let collapsed = render_parsed_conversation(&renderable(&entries), &options);
     let collapsed_text = rendered_text(&collapsed);
@@ -578,7 +578,7 @@ fn subagent_summary_label_parity() {
     );
 
     // Expanded: detail rows must use the same nested label, not "Claude".
-    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    let mut options = test_render_options(ToolDisplayMode::Summary);
     options.show_thinking = true;
     options.expanded_tool_outputs.insert(summary_id);
     let expanded = render_parsed_conversation(&renderable(&entries), &options);
@@ -601,8 +601,109 @@ fn subagent_summary_label_parity() {
 }
 
 #[test]
-fn hidden_tool_mode_status_label_is_summary() {
-    assert_eq!(ToolDisplayMode::Hidden.status_label(), "sum");
+fn summary_tool_mode_status_label_is_summary() {
+    assert_eq!(ToolDisplayMode::Summary.status_label(), "sum");
+}
+
+#[test]
+fn off_tool_mode_status_label_is_off() {
+    assert_eq!(ToolDisplayMode::Off.status_label(), "off");
+}
+
+#[test]
+fn tool_display_mode_cycles_from_off_through_full() {
+    let mut mode = ToolDisplayMode::Off;
+    let mut seen = vec![mode];
+    for _ in 0..4 {
+        mode = mode.next();
+        seen.push(mode);
+    }
+    assert_eq!(
+        seen,
+        vec![
+            ToolDisplayMode::Off,
+            ToolDisplayMode::Summary,
+            ToolDisplayMode::Truncated,
+            ToolDisplayMode::Full,
+            ToolDisplayMode::Off,
+        ]
+    );
+    assert!(!ToolDisplayMode::Off.is_visible());
+}
+
+fn conversation_with_tool_only_turns() -> Vec<Owned> {
+    let mut entries = vec![entry(
+        0,
+        r#"{"type":"user","message":{"role":"user","content":"please check the build"}}"#,
+    )];
+    entries.extend(tool_summary_entries().into_iter().map(|mut owned| {
+        owned.entry_index += 1;
+        owned
+    }));
+    entries.push(entry(
+        5,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Running the tests now."},{"type":"tool_use","id":"toolu_4","name":"Bash","input":{"command":"cargo build"}}]}}"#,
+    ));
+    entries.push(entry(
+        6,
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_4","content":"build output"}]}}"#,
+    ));
+    entries.push(entry(
+        7,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The build passes."}]}}"#,
+    ));
+    entries
+}
+
+#[test]
+fn off_tool_mode_hides_tool_calls_results_and_summaries() {
+    let entries = conversation_with_tool_only_turns();
+    let rendered = render_parsed_conversation(
+        &renderable(&entries),
+        &test_render_options(ToolDisplayMode::Off),
+    );
+    let text = rendered_text(&rendered);
+
+    assert!(text.contains("please check the build"));
+    assert!(text.contains("Running the tests now."));
+    assert!(text.contains("The build passes."));
+    for hidden in [
+        "Searched",
+        "Grep",
+        "Bash",
+        "cargo",
+        "grep result",
+        "bash result",
+        "build output",
+    ] {
+        assert!(!text.contains(hidden), "{hidden:?} leaked into:\n{text}");
+    }
+}
+
+#[test]
+fn off_tool_mode_leaves_no_empty_headers_or_gaps() {
+    let entries = conversation_with_tool_only_turns();
+    let rendered = render_parsed_conversation(
+        &renderable(&entries),
+        &test_render_options(ToolDisplayMode::Off),
+    );
+
+    // One user message and two assistant text messages; tool-only entries
+    // produce neither lines nor navigable ranges.
+    let entry_indices: Vec<usize> = rendered.messages.iter().map(|m| m.entry_index).collect();
+    assert_eq!(entry_indices, vec![0, 5, 7]);
+    for range in &rendered.messages {
+        assert!(!rendered.lines[range.start_line].spans.is_empty());
+    }
+    let blank_runs = rendered
+        .lines
+        .windows(2)
+        .filter(|pair| pair[0].spans.is_empty() && pair[1].spans.is_empty())
+        .count();
+    assert_eq!(blank_runs, 0);
+    let text = rendered_text(&rendered);
+    assert_eq!(text.matches("Claude").count(), 2, "{text}");
+    assert!(rendered.lines.iter().all(|line| !line.clickable));
 }
 
 #[test]
@@ -669,12 +770,12 @@ fn show_thinking_controls_subagent_entries() {
     ];
     let hidden = render_parsed_conversation(
         &renderable(&entries),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
     assert!(!rendered_text(&hidden).contains("subagent text"));
     assert!(!rendered_text(&hidden).contains("agent progress text"));
 
-    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    let mut options = test_render_options(ToolDisplayMode::Summary);
     options.show_thinking = true;
     let shown = render_parsed_conversation(&renderable(&entries), &options);
     let text = rendered_text(&shown);
@@ -805,7 +906,7 @@ fn message_ranges_track_user_and_assistant_entries() {
     ];
     let rendered = render_parsed_conversation(
         &renderable(&entries),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
 
     // Two messages, each with one content line and one trailing blank.
@@ -836,7 +937,7 @@ fn message_ranges_skip_non_message_entries() {
     ];
     let rendered = render_parsed_conversation(
         &renderable(&entries),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
 
     assert_eq!(rendered.messages.len(), 1);
@@ -848,7 +949,7 @@ fn message_ranges_skip_non_message_entries() {
 fn timing_enabled_renders_timestamp_prefix_span() {
     let timestamp = Local.with_ymd_and_hms(2026, 9, 4, 12, 34, 56).unwrap();
     let entries = vec![user_entry(0, "Hello", Some(&timestamp.to_rfc3339()))];
-    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    let mut options = test_render_options(ToolDisplayMode::Summary);
     options.show_timing = true;
 
     let rendered = render_parsed_conversation(&renderable(&entries), &options);
@@ -864,7 +965,7 @@ fn timing_disabled_omits_timestamp_prefix_span() {
     let entries = vec![user_entry(0, "Hello", Some("2026-02-04T12:34:56Z"))];
     let rendered = render_parsed_conversation(
         &renderable(&entries),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
     let first = &rendered.lines[0];
 
@@ -876,7 +977,7 @@ fn timing_disabled_omits_timestamp_prefix_span() {
 fn invalid_timestamp_skips_timestamp_prefix() {
     // Even with show_timing=true, a non-RFC3339 timestamp produces no time prefix.
     let entries = vec![user_entry(0, "Hello", Some("not-a-timestamp"))];
-    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    let mut options = test_render_options(ToolDisplayMode::Summary);
     options.show_timing = true;
 
     let rendered = render_parsed_conversation(&renderable(&entries), &options);
@@ -897,7 +998,7 @@ fn assistant_continuation_line_aligns_under_timestamp() {
         "line one\\n\\nline two",
         Some("2026-02-04T12:34:56Z"),
     )];
-    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    let mut options = test_render_options(ToolDisplayMode::Summary);
     options.show_timing = true;
 
     let rendered = render_parsed_conversation(&renderable(&entries), &options);
@@ -924,7 +1025,7 @@ fn timing_enabled_wrapping_leaves_room_for_timestamp_prefix() {
         "one two three four five six seven eight nine ten eleven twelve",
         Some("2026-09-04T12:34:56Z"),
     )];
-    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    let mut options = test_render_options(ToolDisplayMode::Summary);
     options.show_timing = true;
     options.content_width = 32;
 
@@ -949,7 +1050,7 @@ fn user_label_uses_text_primary_bold() {
     let entries = vec![user_entry(0, "Hello", None)];
     let rendered = render_parsed_conversation(
         &renderable(&entries),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
     let line = &rendered.lines[0];
     let name_text = format!("{:>width$}", "You", width = NAME_WIDTH);
@@ -965,7 +1066,7 @@ fn assistant_label_uses_accent_bold() {
     let entries = vec![assistant_text_entry(0, "Hi", None)];
     let rendered = render_parsed_conversation(
         &renderable(&entries),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
     let line = &rendered.lines[0];
     let name_text = format!("{:>width$}", "Claude", width = NAME_WIDTH);
@@ -981,7 +1082,7 @@ fn subagent_assistant_uses_nested_label_when_thinking_shown() {
         0,
         r#"{"type":"assistant","parent_tool_use_id":"toolu_parent_abc","message":{"role":"assistant","content":[{"type":"text","text":"sub text"}]}}"#,
     )];
-    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    let mut options = test_render_options(ToolDisplayMode::Summary);
     options.show_thinking = true;
 
     let rendered = render_parsed_conversation(&renderable(&entries), &options);
@@ -1082,7 +1183,7 @@ fn assistant_with_reordered_blocks_entry() -> Owned {
 #[test]
 fn assistant_block_order_hidden_mode_text_then_summary_then_thinking() {
     let entries = vec![assistant_with_reordered_blocks_entry()];
-    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    let mut options = test_render_options(ToolDisplayMode::Summary);
     options.show_thinking = true;
 
     let rendered = render_parsed_conversation(&renderable(&entries), &options);
@@ -1170,7 +1271,7 @@ fn fixture_file_round_trip_renders_user_and_assistant() {
     .unwrap();
 
     let transcript = crate::history::sources::decode_path(&path, None, false).unwrap();
-    let rendered = render_conversation(&transcript, &test_render_options(ToolDisplayMode::Hidden));
+    let rendered = render_conversation(&transcript, &test_render_options(ToolDisplayMode::Summary));
     let text = rendered_text(&rendered);
     assert!(text.contains("hello"));
     assert!(text.contains("world"));
@@ -1359,7 +1460,7 @@ fn pending_summary_flushes_at_eof() {
     )];
     let rendered = render_parsed_conversation(
         &renderable(&entries),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
 
     let text = rendered_text(&rendered);
@@ -1382,7 +1483,7 @@ fn pending_summary_flushes_before_non_tool_message() {
     ];
     let rendered = render_parsed_conversation(
         &renderable(&entries),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
 
     assert_eq!(rendered.messages.len(), 2);
@@ -1401,7 +1502,7 @@ fn consecutive_blank_lines_collapse_and_remap_ranges() {
     let entries = vec![user_entry(0, "first", None), user_entry(1, "second", None)];
     let rendered = render_parsed_conversation(
         &renderable(&entries),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
 
     // No two consecutive empty lines should remain.
@@ -1469,7 +1570,7 @@ fn skill_marker_user_message_renders_dimmed_but_top_level() {
     )];
     let rendered = render_parsed_conversation(
         &renderable(&entries),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
     let line = &rendered.lines[0];
     let name_text = format!("{:>width$}", "You", width = NAME_WIDTH);
@@ -1513,7 +1614,7 @@ fn excluded_entry_kinds_produce_no_lines() {
     ];
     let rendered = render_parsed_conversation(
         &renderable(&entries),
-        &test_render_options(ToolDisplayMode::Hidden),
+        &test_render_options(ToolDisplayMode::Summary),
     );
     assert!(rendered.lines.is_empty());
     assert!(rendered.messages.is_empty());

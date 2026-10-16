@@ -56,29 +56,32 @@ pub struct ToolOutputId(pub String);
 /// Controls how tool calls and results are displayed
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ToolDisplayMode {
+    /// Tool calls and results are not rendered at all
+    Off,
     #[default]
-    Hidden,
+    Summary,
     Truncated,
     Full,
 }
 
 impl ToolDisplayMode {
-    /// Cycle to the next mode: Summary → Truncated → Full → Summary
+    /// Cycle to the next mode: Off → Summary → Truncated → Full → Off
     pub fn next(self) -> Self {
         match self {
-            Self::Hidden => Self::Truncated,
+            Self::Off => Self::Summary,
+            Self::Summary => Self::Truncated,
             Self::Truncated => Self::Full,
-            Self::Full => Self::Hidden,
+            Self::Full => Self::Off,
         }
     }
 
     pub fn is_summary(self) -> bool {
-        matches!(self, Self::Hidden)
+        matches!(self, Self::Summary)
     }
 
     /// Whether full or truncated tool details should be rendered
     pub fn shows_details(self) -> bool {
-        !matches!(self, Self::Hidden)
+        matches!(self, Self::Truncated | Self::Full)
     }
 
     /// Whether tools should be included in exported text
@@ -89,7 +92,8 @@ impl ToolDisplayMode {
     /// Fixed-width label for the status bar (3 chars each)
     pub fn status_label(self) -> &'static str {
         match self {
-            Self::Hidden => "sum",
+            Self::Off => "off",
+            Self::Summary => "sum",
             Self::Truncated => "trn",
             Self::Full => "all",
         }

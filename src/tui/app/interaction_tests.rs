@@ -44,7 +44,7 @@ fn test_conversation(path: PathBuf, custom_title: Option<String>) -> Conversatio
 fn app_with_conversation(path: PathBuf, custom_title: Option<String>) -> App {
     App::new(
         vec![test_conversation(path, custom_title)],
-        ToolDisplayMode::Hidden,
+        ToolDisplayMode::Summary,
         false,
         KeyBindings::default(),
         vec![],
@@ -162,7 +162,7 @@ fn semantic_ranked_selection_opens_selected_conversation_and_returns() {
             test_conversation(first.clone(), None),
             test_conversation(second.clone(), None),
         ],
-        ToolDisplayMode::Hidden,
+        ToolDisplayMode::Summary,
         false,
         KeyBindings::default(),
         vec![],
@@ -213,7 +213,7 @@ fn semantic_list_click_uses_three_line_rows() {
             test_conversation(first, None),
             test_conversation(second, None),
         ],
-        ToolDisplayMode::Hidden,
+        ToolDisplayMode::Summary,
         false,
         KeyBindings::default(),
         vec![],
@@ -268,6 +268,49 @@ fn view_click_toggles_clickable_output() {
         assert!(state.expanded_tool_outputs.is_empty());
         assert_eq!(state.hovered_tool_output, Some(expanded_id));
     }
+}
+
+#[test]
+fn cycling_tools_to_off_keeps_focus_on_a_visible_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tools.jsonl");
+    let lines = [
+        r#"{"type":"user","timestamp":"2024-01-01T00:00:00Z","message":{"role":"user","content":"please check"}}"#,
+        r#"{"type":"assistant","timestamp":"2024-01-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+        r#"{"type":"user","timestamp":"2024-01-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#,
+        r#"{"type":"assistant","timestamp":"2024-01-01T00:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"all good"}]}}"#,
+    ];
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    let mut app = app_with_conversation(path, None);
+    app.selected = Some(0);
+    app.enter_view_mode(80);
+
+    // Focus the tool summary row, then cycle summary → truncated → full → off.
+    if let AppMode::View(ref mut state) = app.app_mode {
+        assert_eq!(state.message_ranges[1].entry_index, 1);
+        state.focused_message = Some(1);
+        state.message_nav_active = true;
+    }
+    assert!(view_text(&app).contains("Ran 1 shell command"));
+    for _ in 0..3 {
+        app.toggle_view_tools(20);
+    }
+
+    assert_eq!(app.tool_display, ToolDisplayMode::Off);
+    let text = view_text(&app);
+    assert!(text.contains("please check"));
+    assert!(text.contains("all good"));
+    assert!(!text.contains("cargo test"));
+    assert!(!text.contains("shell command"));
+    if let AppMode::View(state) = app.app_mode() {
+        assert_eq!(state.message_ranges.len(), 2);
+        let focused = state.focused_message.unwrap();
+        assert_eq!(state.message_ranges[focused].entry_index, 0);
+    }
+
+    app.toggle_view_tools(20);
+    assert_eq!(app.tool_display, ToolDisplayMode::Summary);
+    assert!(view_text(&app).contains("Ran 1 shell command"));
 }
 
 #[test]
@@ -355,7 +398,7 @@ fn configured_rename_key_starts_rename() {
     };
     let mut app = App::new(
         vec![test_conversation(path, None)],
-        ToolDisplayMode::Hidden,
+        ToolDisplayMode::Summary,
         false,
         keys,
         vec![],
@@ -426,7 +469,7 @@ fn submit_rename_preserves_selected_path() {
             test_conversation(first, None),
             test_conversation(second.clone(), None),
         ],
-        ToolDisplayMode::Hidden,
+        ToolDisplayMode::Summary,
         false,
         KeyBindings::default(),
         vec![],
@@ -484,7 +527,7 @@ fn replacing_conversations_preserves_selection_by_path() {
             test_conversation(first.clone(), None),
             test_conversation(second.clone(), None),
         ],
-        ToolDisplayMode::Hidden,
+        ToolDisplayMode::Summary,
         false,
         KeyBindings::default(),
         vec![],
@@ -529,7 +572,7 @@ fn orphaned_conversations_refuse_every_action() {
     conversation.provenance.orphaned = true;
     let mut app = App::new(
         vec![conversation],
-        ToolDisplayMode::Hidden,
+        ToolDisplayMode::Summary,
         false,
         KeyBindings::default(),
         vec![],
@@ -557,7 +600,7 @@ fn codex_conversations_resume_but_do_not_rename() {
     conversation.source = crate::history::model::SourceKind::Codex;
     let mut app = App::new(
         vec![conversation],
-        ToolDisplayMode::Hidden,
+        ToolDisplayMode::Summary,
         false,
         KeyBindings::default(),
         vec![],

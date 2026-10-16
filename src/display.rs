@@ -758,7 +758,11 @@ fn process_agent_message<F: OutputFormatter>(
 }
 
 /// Render a conversation in TUI ledger format to terminal (for debugging)
-pub fn render_to_terminal(file_path: &Path, options: &DisplayOptions) -> Result<()> {
+pub fn render_to_terminal(
+    file_path: &Path,
+    options: &DisplayOptions,
+    tool_display: crate::tui::ToolDisplayMode,
+) -> Result<()> {
     use crate::tui::{RenderOptions, render_conversation};
     use std::collections::BTreeSet;
 
@@ -768,11 +772,7 @@ pub fn render_to_terminal(file_path: &Path, options: &DisplayOptions) -> Result<
     let content_width = terminal_width.saturating_sub(NAME_WIDTH + SEPARATOR_WIDTH);
 
     let render_options = RenderOptions {
-        tool_display: if options.no_tools {
-            crate::tui::ToolDisplayMode::Hidden
-        } else {
-            crate::tui::ToolDisplayMode::Full
-        },
+        tool_display,
         show_thinking: options.show_thinking,
         show_timing: false, // Non-TUI render doesn't support timing toggle
         content_width,

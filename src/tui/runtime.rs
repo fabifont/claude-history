@@ -886,7 +886,7 @@ pub fn bench_startup(
         return Err(AppError::Io(io::Error::other("no cache directory")));
     };
     let mut app = App::new_loading_with_options(
-        ToolDisplayMode::Hidden,
+        ToolDisplayMode::Summary,
         false,
         keys,
         workspace_filter,

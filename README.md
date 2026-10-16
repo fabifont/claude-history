@@ -272,7 +272,7 @@ JSONL files and their matching session artifact directories.
 | `/`            | Start search                                       |
 | `n`            | Next search match                                  |
 | `N`            | Previous search match                              |
-| `t`            | Cycle tools: summary/truncated/full                |
+| `t`            | Cycle tools: off/summary/truncated/full            |
 | `T`            | Toggle thinking                                    |
 | `e`            | Export conversation to file                        |
 | `y`            | Copy to clipboard (message if selected, else menu) |
@@ -467,7 +467,8 @@ conversations in a ledger-style format with scrolling support.
   mouse wheel
 - **Search**: Press `/` to search within the conversation, then `n`/`N` to
   navigate matches
-- **Cycle tools**: Press `t` to cycle tool display (summary → truncated → full)
+- **Cycle tools**: Press `t` to cycle tool display (off → summary → truncated →
+  full)
 - **Toggle thinking**: Press `T` to show/hide thinking blocks
 - **Show path**: Press `p` to display the conversation file path
 - **Light/dark theme**: Automatically detects terminal background color and
@@ -529,11 +530,13 @@ Options:
 
 In the TUI viewer, tool calls default to **summary** mode — showing condensed
 activity like "Searched for 2 patterns, read 1 file" without tool inputs or
-outputs. Press `t` to cycle through modes: summary → truncated → full. Truncated
-mode shows the tool header plus the first few body lines with a "(N more
-lines...)" indicator. Click a truncated tool call/result to expand that specific
-output, and click it again to collapse it. Use `--show-tools` (or `-t`) to start
-in full mode, or `--no-tools` to start in summary mode.
+outputs. Press `t` to cycle through modes: off → summary → truncated → full. Off
+mode hides tool calls and results entirely, leaving only the conversation text;
+messages that consist only of tool calls disappear. Truncated mode shows the
+tool header plus the first few body lines with a "(N more lines...)" indicator.
+Click a truncated tool call/result to expand that specific output, and click it
+again to collapse it. Use `--show-tools` (or `-t`) to start in full mode, or
+`--no-tools` to start with tools off.
 
 ### Showing thinking blocks and subagent messages
 
@@ -702,7 +705,7 @@ Create the config file:
 mkdir -p ~/.config/claude-history
 cat > ~/.config/claude-history/config.toml << 'EOF'
 [display]
-# Tool display: true = summary, false = full (default: unset = summary)
+# Tool display: true = off, false = full (default: unset = summary)
 # no_tools = false
 
 # Show last messages in TUI preview (default: true)
@@ -754,8 +757,8 @@ EOF
 
 #### Display options
 
-- `no_tools` (boolean): When `true` or unset (default), shows tool summaries;
-  when `false`, shows full tool details
+- `no_tools` (boolean): When `true`, hides tool calls and results; when
+  `false`, shows full tool details. When unset (default), shows tool summaries
 - `last` (boolean): Show last messages instead of first in TUI preview (default:
   true)
 - `show_thinking` (boolean): Show thinking blocks and subagent internals in
@@ -829,7 +832,7 @@ Each display option has opposing flags for explicit override:
 - `--no-pager` / `--pager`
 
 For example, if your config has `no_tools = false` (showing full tool details),
-you can temporarily switch to summaries with `--no-tools`.
+you can temporarily hide tools with `--no-tools`.
 
 ## Custom Claude config directory
 

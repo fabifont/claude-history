@@ -199,16 +199,16 @@ fn run() -> Result<()> {
         false, // Default: hide tools
     );
     // Map CLI flag to ToolDisplayMode
-    // --show-tools → Full, --no-tools → Hidden, default → Hidden summary
+    // --show-tools → Full, --no-tools → Off, default → Summary
     let tool_display = if args.show_tools {
         tui::ToolDisplayMode::Full
     } else if args.no_tools {
-        tui::ToolDisplayMode::Hidden
+        tui::ToolDisplayMode::Off
     } else {
         match display_config.no_tools {
-            Some(true) => tui::ToolDisplayMode::Hidden,
+            Some(true) => tui::ToolDisplayMode::Off,
             Some(false) => tui::ToolDisplayMode::Full,
-            None => tui::ToolDisplayMode::Hidden,
+            None => tui::ToolDisplayMode::Summary,
         }
     };
     let show_last = resolve_bool_setting(args.last, args.first, display_config.last, true);
@@ -386,7 +386,7 @@ fn run() -> Result<()> {
             use_pager,
             no_color: args.no_color,
         };
-        return display::render_to_terminal(render_path, &display_options);
+        return display::render_to_terminal(render_path, &display_options, tool_display);
     }
 
     // Handle direct file input mode
