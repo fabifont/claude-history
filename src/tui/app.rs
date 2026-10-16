@@ -557,13 +557,40 @@ impl App {
                 .find(path)
                 .is_none_or(|doc| snapshot.card(doc).custom_title != *title)
         });
-        self.reset_rows(snapshot);
+        // Rows shown stay listed, as rows of the new generation, until the
+        // query has run on it.
+        let shown: Vec<u64> = match &self.snapshot {
+            Some(old) => self
+                .filtered
+                .iter()
+                .filter_map(|&row| self.row_docs.get(row).copied())
+                .filter(|&doc| doc != NO_DOC)
+                .map(|doc| old.key_hash(doc))
+                .collect(),
+            None => Vec::new(),
+        };
+        self.reset_rows(snapshot.clone());
         self.readiness.list = true;
         self.search_index = None;
         self.semantic_search.results.clear();
         if let Some(path) = viewed {
             self.row_of_path(&path);
         }
+        let docs: Vec<u32> = shown
+            .iter()
+            .filter_map(|key| snapshot.docs_by_key().get(key).copied())
+            .filter(|&doc| !self.is_removed(doc))
+            .collect();
+        self.filtered = docs.into_iter().map(|doc| self.card_row(doc)).collect();
+        self.selected = self
+            .selection_anchor
+            .as_ref()
+            .and_then(|path| {
+                self.filtered
+                    .iter()
+                    .position(|&row| self.conversations[row].path == *path)
+            })
+            .or((!self.filtered.is_empty()).then_some(0));
         self.invalidate_search_generation();
         self.semantic_sent_scope_signature = None;
         self.open_search_index();

@@ -289,6 +289,15 @@ fn newer_generation_swaps_in_and_reruns_the_query_keeping_selection() {
     let newer = crate::store::Snapshot::open(root.path(), true, TimeFilter::default()).unwrap();
     assert!(app.swap_generation(newer));
     assert_eq!(app.generation_len(), Some(4));
+    // The rows shown stay listed while the query runs on the new index.
+    assert_eq!(
+        listed_paths(&app),
+        vec!["/p/-tmp-alpha/c.jsonl", "/p/-tmp-alpha/a.jsonl"]
+    );
+    assert_eq!(
+        app.get_selected_path(),
+        Some(PathBuf::from("/p/-tmp-alpha/a.jsonl"))
+    );
     wait_for_search(&mut app);
     assert_eq!(
         listed_paths(&app),
@@ -448,5 +457,24 @@ fn semantic_results_map_to_cards_by_path() {
     assert_eq!(
         paths,
         vec!["/p/-tmp-alpha/c.jsonl", "/p/-tmp-alpha/a.jsonl"]
+    );
+}
+
+#[test]
+fn typed_uuid_selects_its_card() {
+    let mut corpus = corpus();
+    corpus.push(conversation(
+        "/p/-tmp-beta/6dd62dc0-8b64-4f5e-a651-5bd95216478e.jsonl",
+        HOUR_MS / 2,
+    ));
+    let root = publish(&corpus);
+    let mut app = loading_app(None, vec![]);
+    show(&mut app, &root, TimeFilter::default());
+    assert!(app.open_search_index());
+    type_query(&mut app, "6dd62dc0-8b64-4f5e-a651-5bd95216478e");
+    wait_for_search(&mut app);
+    assert_eq!(
+        listed_paths(&app),
+        vec!["/p/-tmp-beta/6dd62dc0-8b64-4f5e-a651-5bd95216478e.jsonl"]
     );
 }
