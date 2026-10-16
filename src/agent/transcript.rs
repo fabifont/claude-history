@@ -7,7 +7,7 @@ use crate::history::model::{EventKind, Message, Part, Role, TitleKind, Transcrip
 use crate::history::{MessageOrdinals, Placement, extract_skill_preview, retained_user_text};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentTranscript {
@@ -70,7 +70,8 @@ pub struct AgentPartSource {
 }
 
 impl AgentTranscript {
-    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+    #[cfg(test)]
+    pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let path = path.as_ref();
         let transcript =
             crate::history::sources::decode_path(path, None, false).map_err(|error| {

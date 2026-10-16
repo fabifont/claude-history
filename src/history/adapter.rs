@@ -117,6 +117,10 @@ pub trait Adapter: Send + Sync {
     /// artifact. `scan_started` dates the pass for `Stamp::of`.
     fn discover(&self, scan_started: SystemTime) -> Discovery;
 
+    /// Locates the history the conversation `native_id` selects, as
+    /// `discover` would list it.
+    fn resolve(&self, native_id: &str, scan_started: SystemTime) -> crate::error::Result<Located>;
+
     /// Decodes the history `located` selects; `None` when its artifacts
     /// hold no conversation.
     fn decode(&self, located: &Located) -> crate::error::Result<Option<Transcript>>;

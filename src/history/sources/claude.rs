@@ -51,6 +51,10 @@ impl Adapter for ClaudeAdapter {
         discovery
     }
 
+    fn resolve(&self, native_id: &str, scan_started: SystemTime) -> Result<Located> {
+        super::resolve_file(&self.instance, native_id, scan_started)
+    }
+
     fn decode(&self, located: &Located) -> Result<Option<Transcript>> {
         super::decode_file(located, false)
     }

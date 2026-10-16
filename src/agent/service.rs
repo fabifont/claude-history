@@ -91,6 +91,7 @@ fn project_is_excluded(path: &Path, excluded: &[String]) -> bool {
 
 #[derive(Default)]
 pub struct AgentService {
+    history: crate::history::service::HistoryService,
     transcripts: RefCell<
         HashMap<PathBuf, std::result::Result<agent::transcript::AgentTranscript, AgentError>>,
     >,
@@ -132,20 +133,31 @@ impl AgentService {
         #[cfg(test)]
         self.transcript_parse_count
             .set(self.transcript_parse_count.get() + 1);
-        let loaded = agent::transcript::AgentTranscript::load(path).map_err(|error| match error {
-            AppError::Agent(error) => error,
-            AppError::Io(error) => AgentError::io(
-                Some(&path.to_string_lossy()),
-                format!("failed to read transcript: {error}"),
-            ),
-            AppError::Json(error) => AgentError::malformed_transcript(
-                Some(&path.to_string_lossy()),
-                format!("failed to parse transcript JSONL: {error}"),
-            ),
-            error => {
+        let loaded = self
+            .history
+            .open_path(path)
+            .map_err(|error| {
                 AgentError::malformed_transcript(Some(&path.to_string_lossy()), error.to_string())
-            }
-        });
+                    .into()
+            })
+            .and_then(|(_, transcript)| {
+                agent::transcript::AgentTranscript::from_transcript(&transcript)
+            })
+            .map_err(|error| match error {
+                AppError::Agent(error) => error,
+                AppError::Io(error) => AgentError::io(
+                    Some(&path.to_string_lossy()),
+                    format!("failed to read transcript: {error}"),
+                ),
+                AppError::Json(error) => AgentError::malformed_transcript(
+                    Some(&path.to_string_lossy()),
+                    format!("failed to parse transcript JSONL: {error}"),
+                ),
+                error => AgentError::malformed_transcript(
+                    Some(&path.to_string_lossy()),
+                    error.to_string(),
+                ),
+            });
         self.transcripts
             .borrow_mut()
             .insert(path.to_path_buf(), loaded.clone());

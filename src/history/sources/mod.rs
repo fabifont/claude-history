@@ -58,6 +58,18 @@ impl Registry {
         &self.adapters
     }
 
+    /// The conversation whose own artifact is `path`, in the first instance
+    /// whose root holds it.
+    pub fn key_of(&self, path: &Path) -> Option<ConversationKey> {
+        self.adapters.iter().find_map(|adapter| {
+            let instance = adapter.instance();
+            path.starts_with(&instance.root).then(|| ConversationKey {
+                instance: instance.clone(),
+                native_id: native_id(&instance.root, path),
+            })
+        })
+    }
+
     /// The adapter of `instance`.
     pub fn get(&self, instance: &SourceInstance) -> Option<&Arc<dyn Adapter>> {
         self.adapters
@@ -80,25 +92,45 @@ fn locate_files(
         .collect()
 }
 
+/// `Located` for the session file `native_id` names in `instance`.
+fn resolve_file(
+    instance: &SourceInstance,
+    native_id: &str,
+    scan_started: SystemTime,
+) -> Result<Located> {
+    let path = instance.root.join(native_id);
+    let metadata = fs::metadata(&path)?;
+    Ok(located(instance, path, &metadata, scan_started))
+}
+
 fn locate_file(
     instance: &SourceInstance,
     path: PathBuf,
     scan_started: SystemTime,
 ) -> Option<Located> {
     let metadata = fs::metadata(&path).ok()?;
+    Some(located(instance, path, &metadata, scan_started))
+}
+
+fn located(
+    instance: &SourceInstance,
+    path: PathBuf,
+    metadata: &fs::Metadata,
+    scan_started: SystemTime,
+) -> Located {
     let modified = metadata.modified().ok();
     let size = metadata.len();
-    Some(Located {
+    Located {
         key: ConversationKey {
             instance: instance.clone(),
             native_id: native_id(&instance.root, &path),
         },
         stamp: Stamp::of(size, modified, scan_started),
-        file_id: file_id(&metadata),
+        file_id: file_id(metadata),
         path,
         size,
         modified,
-    })
+    }
 }
 
 /// Native id of a session file: its path relative to the instance root.

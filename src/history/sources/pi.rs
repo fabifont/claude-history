@@ -67,6 +67,10 @@ impl Adapter for PiAdapter {
         }
     }
 
+    fn resolve(&self, native_id: &str, scan_started: SystemTime) -> Result<Located> {
+        super::resolve_file(&self.instance, native_id, scan_started)
+    }
+
     fn decode(&self, located: &Located) -> Result<Option<Transcript>> {
         let omp_owned = self.instance.kind == SourceKind::Omp && omp_owned(&self.instance.root);
         super::decode_file(located, omp_owned)

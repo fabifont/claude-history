@@ -23,6 +23,7 @@ pub mod path;
 pub mod pi;
 pub mod pi_loader;
 mod rename;
+pub mod service;
 mod session_loader;
 pub mod sources;
 
