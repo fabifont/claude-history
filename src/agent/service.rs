@@ -171,13 +171,15 @@ impl AgentService {
         // Resolved before loading so an inverted range fails without paying for
         // a full corpus parse.
         let time = args.time.resolve()?;
-        let mut conversations =
-            crate::store::load_conversations(false, crate::store::Contents::Full)?;
-        conversations.retain(|conversation| {
-            !conversation.provenance.hidden_by_default()
-                && !project_is_excluded(&conversation.path, &agent_config.exclude_projects)
-                && time.matches(conversation.timestamp)
-        });
+        let mut conversations = crate::store::load_conversations_where(
+            false,
+            crate::store::Contents::Full,
+            &|conversation| {
+                !conversation.provenance.hidden_by_default()
+                    && !project_is_excluded(&conversation.path, &agent_config.exclude_projects)
+                    && time.matches(conversation.timestamp)
+            },
+        )?;
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         let scope = configured_scope(args, &agent_config);
         let current_project_dir_name = if scope == agent::search::AgentSearchScope::Local {
@@ -531,13 +533,11 @@ fn discover_agent_keys(
             .ok()
             .map(|path| path.canonicalize().unwrap_or(path));
         for path in pi_files {
-            let Ok(Some(projection)) = history::pi::parse_file(&path) else {
+            let Ok(Some((history::model::SourceKind::Pi, header))) =
+                history::pi::read_header(&path, None)
+            else {
                 continue;
             };
-            if projection.source != history::model::SourceKind::Pi {
-                continue;
-            }
-            let header = projection.header;
             if let Some(filter) = project_filter {
                 let cwd = header
                     .cwd
@@ -578,10 +578,11 @@ fn discover_agent_keys(
             .ok()
             .map(|path| path.canonicalize().unwrap_or(path));
         for path in omp_files {
-            let Ok(Some(projection)) = history::pi::parse_omp_file(&path) else {
+            let Ok(Some((_, header))) =
+                history::pi::read_header(&path, Some(history::model::SourceKind::Omp))
+            else {
                 continue;
             };
-            let header = projection.header;
             if let Some(filter) = project_filter {
                 let cwd = header
                     .cwd

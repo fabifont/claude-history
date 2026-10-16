@@ -100,12 +100,24 @@ pub fn load_conversations(
     show_last: bool,
     contents: Contents,
 ) -> crate::error::Result<Vec<Conversation>> {
+    load_conversations_where(show_last, contents, &|_| true)
+}
+
+/// The conversations of `load_conversations` whose card `keep` accepts.
+/// Contents beyond the card are read only for those.
+pub fn load_conversations_where(
+    show_last: bool,
+    contents: Contents,
+    keep: &(dyn Fn(&Conversation) -> bool + Sync),
+) -> crate::error::Result<Vec<Conversation>> {
     if let Some(conversations) =
-        default_root().and_then(|root| load_from_store(&root, show_last, contents))
+        default_root().and_then(|root| load_from_store(&root, show_last, contents, keep))
     {
         return Ok(conversations);
     }
-    load_in_memory(show_last)
+    let mut conversations = load_in_memory(show_last)?;
+    conversations.retain(|conversation| keep(conversation));
+    Ok(conversations)
 }
 
 /// Every conversation the environment's instances hold, parsed in memory
@@ -136,7 +148,12 @@ pub fn load_in_memory(show_last: bool) -> crate::error::Result<Vec<Conversation>
     Ok(conversations)
 }
 
-fn load_from_store(root: &Path, show_last: bool, contents: Contents) -> Option<Vec<Conversation>> {
+fn load_from_store(
+    root: &Path,
+    show_last: bool,
+    contents: Contents,
+    keep: &(dyn Fn(&Conversation) -> bool + Sync),
+) -> Option<Vec<Conversation>> {
     let sources = crate::history::sources::Registry::from_env();
     for _ in 0..2 {
         let outcome = reconcile::reconcile(root, &sources).ok()?;
@@ -146,11 +163,15 @@ fn load_from_store(root: &Path, show_last: bool, contents: Contents) -> Option<V
         generation::PublishLock::wait(root).ok()?;
     }
     let cards = Snapshot::open(root, show_last, TimeFilter::default())?;
-    read_conversations(&cards, contents)
+    read_conversations(&cards, contents, keep)
 }
 
-/// Every card of `cards` with `contents`, in doc order.
-fn read_conversations(cards: &Snapshot, contents: Contents) -> Option<Vec<Conversation>> {
+/// Every card of `cards` that `keep` accepts, with `contents`, in doc order.
+fn read_conversations(
+    cards: &Snapshot,
+    contents: Contents,
+    keep: &(dyn Fn(&Conversation) -> bool + Sync),
+) -> Option<Vec<Conversation>> {
     let generation = &cards.generation;
     let files = match contents {
         Contents::Cards => None,
@@ -159,10 +180,14 @@ fn read_conversations(cards: &Snapshot, contents: Contents) -> Option<Vec<Conver
             generation.open_semantic_files()?,
         )),
     };
-    (0..generation.rows().len() as u32)
+    // A card whose contents cannot be read fails the whole load.
+    let read: Option<Vec<Option<Conversation>>> = (0..generation.rows().len() as u32)
         .into_par_iter()
         .map(|doc| {
             let mut conversation = cards.card(doc);
+            if !keep(&conversation) {
+                return Some(None);
+            }
             if let Some((text, semantic)) = &files {
                 let row = &generation.rows()[doc as usize];
                 conversation.full_text = text.read(row.text)?.into();
@@ -172,9 +197,10 @@ fn read_conversations(cards: &Snapshot, contents: Contents) -> Option<Vec<Conver
                         .apply(&mut conversation);
                 }
             }
-            Some(conversation)
+            Some(Some(conversation))
         })
-        .collect()
+        .collect();
+    Some(read?.into_iter().flatten().collect())
 }
 
 /// Cards of one generation.
