@@ -290,22 +290,37 @@ impl Snapshot {
     }
 
     /// Ids of the newest `n` listed cards inside the time filter whose
-    /// project passes `project_visible`.
-    pub fn head(&self, n: usize, project_visible: impl FnMut(&ProjectView) -> bool) -> Vec<u32> {
+    /// project passes `project_visible`. `all_kinds` lists automated and
+    /// child conversations too.
+    pub fn head(
+        &self,
+        n: usize,
+        all_kinds: bool,
+        project_visible: impl FnMut(&ProjectView) -> bool,
+    ) -> Vec<u32> {
         let visible = self.project_visibility(project_visible);
         self.generation.head(n, |row| {
-            listed(row) && visible[row.project_id as usize] && in_time(&self.time, row)
+            listed(row, all_kinds) && visible[row.project_id as usize] && in_time(&self.time, row)
         })
     }
 
     /// For every card, whether it is listed, inside the time filter and its
-    /// project passes `project_visible`.
-    pub fn scope(&self, project_visible: impl FnMut(&ProjectView) -> bool) -> Vec<bool> {
+    /// project passes `project_visible`. `all_kinds` lists automated and
+    /// child conversations too.
+    pub fn scope(
+        &self,
+        all_kinds: bool,
+        project_visible: impl FnMut(&ProjectView) -> bool,
+    ) -> Vec<bool> {
         let visible = self.project_visibility(project_visible);
         self.generation
             .rows()
             .iter()
-            .map(|row| listed(row) && visible[row.project_id as usize] && in_time(&self.time, row))
+            .map(|row| {
+                listed(row, all_kinds)
+                    && visible[row.project_id as usize]
+                    && in_time(&self.time, row)
+            })
             .collect()
     }
 
@@ -335,9 +350,9 @@ impl Snapshot {
 }
 
 /// Whether the list shows the card: automated and child conversations stay
-/// out of it.
-fn listed(row: &card::CardRow) -> bool {
-    row.flags & card::card_flags::HIDDEN == 0
+/// out of it unless `all_kinds`.
+fn listed(row: &card::CardRow, all_kinds: bool) -> bool {
+    all_kinds || row.flags & card::card_flags::HIDDEN == 0
 }
 
 fn in_time(time: &TimeFilter, row: &card::CardRow) -> bool {

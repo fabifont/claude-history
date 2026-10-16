@@ -157,6 +157,9 @@ pub struct AgentSearchArgs {
     /// Search all workspaces
     #[arg(long, group = "agent_search_scope")]
     pub all: bool,
+    /// Also search automated (Codex exec) and subagent conversations
+    #[arg(long)]
+    pub all_kinds: bool,
     #[command(flatten)]
     pub search_mode: AgentSearchModeArgs,
     #[command(flatten)]
@@ -396,6 +399,14 @@ pub struct Args {
         help = "Show only conversations from the current workspace directory"
     )]
     pub local: bool,
+
+    /// List automated (Codex exec) and subagent conversations, which are
+    /// hidden by default
+    #[arg(
+        long,
+        help = "List automated (Codex exec) and subagent conversations too"
+    )]
+    pub all_kinds: bool,
 
     #[command(flatten)]
     pub time: TimeRangeArgs,

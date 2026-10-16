@@ -113,6 +113,8 @@ pub struct App {
     keys: KeyBindings,
     /// Whether workspace filter is active (only show current project's conversations)
     workspace_filter: bool,
+    /// Whether automated and child conversations are listed
+    all_kinds: bool,
     /// The encoded project directory name for the current workspace (for filtering)
     current_project_dir_name: Option<String>,
     /// Exact project names hidden from list-mode display
@@ -148,6 +150,7 @@ struct AppParts {
     single_file_mode: bool,
     keys: KeyBindings,
     workspace_filter: bool,
+    all_kinds: bool,
     current_project_dir_name: Option<String>,
     excluded_projects: HashSet<String>,
     search_tx: mpsc::Sender<SearchCommand>,
@@ -189,6 +192,7 @@ impl App {
             single_file_mode: parts.single_file_mode,
             keys: parts.keys,
             workspace_filter: parts.workspace_filter,
+            all_kinds: parts.all_kinds,
             current_project_dir_name: parts.current_project_dir_name,
             excluded_projects: parts.excluded_projects,
             search_tx: parts.search_tx,
@@ -250,6 +254,7 @@ impl App {
             0..conversations.len(),
             &conversations,
             &excluded_projects,
+            search_options.all_kinds,
             false,
             None,
         );
@@ -273,6 +278,7 @@ impl App {
             single_file_mode: false,
             keys,
             workspace_filter: false,
+            all_kinds: search_options.all_kinds,
             current_project_dir_name: None,
             excluded_projects,
             search_tx,
@@ -306,6 +312,7 @@ impl App {
             single_file_mode: false,
             keys,
             workspace_filter,
+            all_kinds: search_options.all_kinds,
             current_project_dir_name,
             excluded_projects: exclude_projects.into_iter().collect(),
             search_tx,
@@ -359,6 +366,7 @@ impl App {
             single_file_mode: true,
             keys,
             workspace_filter: false,
+            all_kinds: false,
             current_project_dir_name: None,
             excluded_projects: HashSet::new(),
             search_tx,
@@ -430,7 +438,7 @@ impl App {
     pub fn generation_is_empty(&self) -> bool {
         self.snapshot
             .as_ref()
-            .is_none_or(|snapshot| snapshot.head(1, |_| true).is_empty())
+            .is_none_or(|snapshot| snapshot.head(1, self.all_kinds, |_| true).is_empty())
     }
 
     /// Makes `snapshot` the source of rows, dropping rows of the previous
@@ -450,7 +458,7 @@ impl App {
             return;
         };
         let workspace = self.workspace_scope();
-        let docs = snapshot.head(limit, |project| {
+        let docs = snapshot.head(limit, self.all_kinds, |project| {
             list_state::card_project_visible(project, &self.excluded_projects, &workspace)
         });
         let docs: Vec<u32> = docs
@@ -619,7 +627,7 @@ impl App {
             return;
         };
         let workspace = self.workspace_scope();
-        let mut docs = index.cards().scope(|project| {
+        let mut docs = index.cards().scope(self.all_kinds, |project| {
             list_state::card_project_visible(project, &self.excluded_projects, &workspace)
         });
         if !self.removed.is_empty() {
@@ -782,6 +790,10 @@ impl App {
 
     pub fn workspace_filter(&self) -> bool {
         self.workspace_filter
+    }
+
+    pub fn all_kinds(&self) -> bool {
+        self.all_kinds
     }
 
     pub fn list_search_mode(&self) -> ListSearchMode {

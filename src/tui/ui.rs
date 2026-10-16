@@ -248,6 +248,15 @@ fn render_list_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         ]);
     }
 
+    if app.all_kinds() {
+        spans.extend([
+            Span::styled(keys.all_kinds.short_label(), key_style),
+            Span::styled("\u{b7}", label_style),
+            Span::styled("all kinds", Style::default().fg(rgb(th().accent)).bold()),
+            Span::raw("  "),
+        ]);
+    }
+
     if app.semantic_toggle_available() {
         let mode_style = if app.list_search_mode() == ListSearchMode::Semantic {
             Style::default().fg(rgb(th().accent)).bold()
@@ -1349,6 +1358,10 @@ fn render_help_overlay(
             (keys.rename.help_label(), "Rename"),
             (keys.delete.help_label(), "Delete"),
             (keys.refresh.help_label(), "Refresh sessions"),
+            (
+                keys.all_kinds.help_label(),
+                "Show/hide automated and subagent sessions",
+            ),
             ("Esc".into(), "Quit"),
         ];
         if semantic_available {
@@ -1537,10 +1550,14 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 .project_name
                 .as_ref()
                 .map(|name| {
+                    let name = match conv.provenance.list_label() {
+                        Some(kind) => format!("{kind} · {name}"),
+                        None => name.to_string(),
+                    };
                     if app.has_multiple_sources() {
                         format!("{:<3} · {name}", conv.source.list_label())
                     } else {
-                        name.to_string()
+                        name
                     }
                 })
                 .unwrap_or_default();
@@ -2758,6 +2775,7 @@ mod tests {
             vec![],
             TuiSearchOptions {
                 default_mode: ListSearchMode::Semantic,
+                ..Default::default()
             },
         )
     }
@@ -3127,6 +3145,7 @@ mod tests {
             vec![],
             TuiSearchOptions {
                 default_mode: ListSearchMode::Semantic,
+                ..Default::default()
             },
         );
         app.set_query_for_test("sentinel");
@@ -3575,6 +3594,7 @@ mod tests {
             vec![],
             TuiSearchOptions {
                 default_mode: ListSearchMode::Semantic,
+                ..Default::default()
             },
         );
         app.set_query_for_test("semantic \"audio_generation\"");
@@ -3652,6 +3672,7 @@ mod tests {
             vec![],
             TuiSearchOptions {
                 default_mode: ListSearchMode::Semantic,
+                ..Default::default()
             },
         );
         app.set_query_for_test("semantic \"alpha_exact\" \"beta_exact\"");

@@ -468,6 +468,10 @@ impl App {
         if self.keys.refresh.matches(code, modifiers) {
             return Some(Action::Refresh);
         }
+        if self.keys.all_kinds.matches(code, modifiers) {
+            self.toggle_all_kinds();
+            return None;
+        }
 
         match code {
             _ if self.keys.rename.matches(code, modifiers) => {

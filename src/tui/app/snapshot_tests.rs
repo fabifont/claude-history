@@ -532,3 +532,54 @@ fn typed_uuid_selects_its_card() {
         vec!["/p/-tmp-beta/6dd62dc0-8b64-4f5e-a651-5bd95216478e.jsonl"]
     );
 }
+
+#[test]
+fn hidden_kinds_toggle_in_and_out_of_the_list_and_its_search() {
+    let mut corpus = corpus();
+    corpus[0].full_text = "needle".into();
+    let mut exec = conversation("/p/-tmp-alpha/exec.jsonl", 4 * HOUR_MS);
+    exec.provenance.automated = true;
+    exec.full_text = "needle".into();
+    let mut child = conversation("/p/-tmp-beta/child.jsonl", 5 * HOUR_MS);
+    child.provenance.child = true;
+    corpus.extend([exec, child]);
+    let root = publish(&corpus);
+    let mut app = loading_app(None, vec![]);
+    show(&mut app, &root, TimeFilter::default());
+    assert!(app.open_search_index());
+    let shown = [
+        "/p/-tmp-alpha/c.jsonl",
+        "/p/-tmp-beta/b.jsonl",
+        "/p/-tmp-alpha/a.jsonl",
+    ];
+    assert_eq!(listed_paths(&app), shown);
+
+    let toggle = app.keys().all_kinds;
+    app.handle_key(toggle.code, toggle.modifiers, 20);
+    assert!(app.all_kinds());
+    assert_eq!(
+        listed_paths(&app),
+        [
+            "/p/-tmp-beta/child.jsonl",
+            "/p/-tmp-alpha/exec.jsonl",
+            "/p/-tmp-alpha/c.jsonl",
+            "/p/-tmp-beta/b.jsonl",
+            "/p/-tmp-alpha/a.jsonl",
+        ]
+    );
+
+    type_query(&mut app, "needle");
+    wait_for_search(&mut app);
+    assert_eq!(
+        listed_paths(&app),
+        ["/p/-tmp-alpha/exec.jsonl", "/p/-tmp-alpha/a.jsonl"]
+    );
+
+    app.handle_key(toggle.code, toggle.modifiers, 20);
+    wait_for_search(&mut app);
+    assert!(!app.all_kinds());
+    assert_eq!(listed_paths(&app), ["/p/-tmp-alpha/a.jsonl"]);
+
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE, 20);
+    assert_eq!(listed_paths(&app), shown);
+}

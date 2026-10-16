@@ -96,6 +96,8 @@ than its upper bound. Grouped search ranks
 conversations. `--flat` ranks message hits across conversations. Use
 `--hits-per-conv` when one conversation needs more evidence and `--all-hits`
 only when duplicate suppression hides relevant tool-heavy evidence.
+Automated runs (`codex exec`) and subagent threads are left out of search unless
+you pass `--all-kinds`, and semantic modes never find them.
 
 Compact records are the only output. Headers identify the `agent-search`,
 `agent-within`, `agent-read`, or `agent-outline` record grammar. Header `chars=`

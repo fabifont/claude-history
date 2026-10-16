@@ -309,6 +309,7 @@ pub struct KeysConfig {
     pub rename: Option<KeyBinding>,
     pub delete: Option<KeyBinding>,
     pub refresh: Option<KeyBinding>,
+    pub all_kinds: Option<KeyBinding>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -409,6 +410,8 @@ pub struct KeyBindings {
     pub rename: KeyBinding,
     pub delete: KeyBinding,
     pub refresh: KeyBinding,
+    /// Lists or hides automated and child conversations
+    pub all_kinds: KeyBinding,
 }
 
 impl Default for KeyBindings {
@@ -434,6 +437,10 @@ impl Default for KeyBindings {
                 code: KeyCode::Char('l'),
                 modifiers: KeyModifiers::CONTROL,
             },
+            all_kinds: KeyBinding {
+                code: KeyCode::Char('g'),
+                modifiers: KeyModifiers::CONTROL,
+            },
         }
     }
 }
@@ -449,6 +456,7 @@ impl KeyBindings {
                 rename: cfg.rename.unwrap_or(defaults.rename),
                 delete: cfg.delete.unwrap_or(defaults.delete),
                 refresh: cfg.refresh.unwrap_or(defaults.refresh),
+                all_kinds: cfg.all_kinds.unwrap_or(defaults.all_kinds),
             },
         }
     }

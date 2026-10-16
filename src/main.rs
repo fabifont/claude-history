@@ -459,6 +459,7 @@ fn run() -> Result<()> {
         exclude_projects,
         tui::TuiSearchOptions {
             default_mode: tui_search_mode(search_mode),
+            all_kinds: args.all_kinds,
         },
     )
     .map_err(describe_empty)?

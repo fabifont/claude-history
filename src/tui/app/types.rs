@@ -100,12 +100,16 @@ pub enum ViewSearchMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TuiSearchOptions {
     pub default_mode: ListSearchMode,
+    /// Whether the list starts out showing automated and child
+    /// conversations.
+    pub all_kinds: bool,
 }
 
 impl Default for TuiSearchOptions {
     fn default() -> Self {
         Self {
             default_mode: ListSearchMode::Lexical,
+            all_kinds: false,
         }
     }
 }

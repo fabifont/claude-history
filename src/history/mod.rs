@@ -113,6 +113,17 @@ impl Provenance {
     pub fn hidden_by_default(&self) -> bool {
         self.automated || self.child
     }
+
+    /// The tag marking a conversation hidden by default when it is listed.
+    pub fn list_label(&self) -> Option<&'static str> {
+        if self.child {
+            Some("sub")
+        } else if self.automated {
+            Some("auto")
+        } else {
+            None
+        }
+    }
 }
 
 pub(crate) fn semantic_route_text(full_text: &str, agent_search_text: &str) -> String {

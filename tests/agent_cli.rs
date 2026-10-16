@@ -755,4 +755,27 @@ fn codex_threads_support_agent_search_read_and_outline() {
     let hidden = run_codex(&["agent", "search", "--lexical", "iguana report"]);
     assert!(hidden.status.success());
     assert!(!String::from_utf8_lossy(&hidden.stdout).contains(EXEC));
+
+    // --all-kinds searches them, and their refs resolve without it.
+    let all = run_codex(&[
+        "agent",
+        "search",
+        "--lexical",
+        "--all-kinds",
+        "iguana report",
+    ]);
+    assert!(
+        all.status.success(),
+        "{}",
+        String::from_utf8_lossy(&all.stderr)
+    );
+    assert!(String::from_utf8_lossy(&all.stdout).contains(&format!("uuid={EXEC}")));
+    let exec_ref = first_ref(&all.stdout);
+    let exec_outline = run_codex(&["agent", "outline", &exec_ref]);
+    assert!(
+        exec_outline.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exec_outline.stderr)
+    );
+    assert!(String::from_utf8_lossy(&exec_outline.stdout).contains(&format!("uuid={EXEC}")));
 }

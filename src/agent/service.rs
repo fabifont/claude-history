@@ -175,7 +175,7 @@ impl AgentService {
             false,
             crate::store::Contents::Full,
             &|conversation| {
-                !conversation.provenance.hidden_by_default()
+                (args.all_kinds || !conversation.provenance.hidden_by_default())
                     && !project_is_excluded(&conversation.path, &agent_config.exclude_projects)
                     && time.matches(conversation.timestamp)
             },
@@ -216,8 +216,11 @@ impl AgentService {
             request.config_mode,
             request.tui_semantic_search,
         );
-        let (mut keys, mut base_warnings) =
-            discover_agent_keys(current_project_dir_name.as_deref(), Some(&conversations))?;
+        let (mut keys, mut base_warnings) = discover_agent_keys(
+            current_project_dir_name.as_deref(),
+            Some(&conversations),
+            args.all_kinds,
+        )?;
         keys.retain(|key| !project_is_excluded(&key.path, &agent_config.exclude_projects));
         if time.is_active() {
             // Key discovery walks the projects directory independently, so
@@ -350,7 +353,7 @@ impl AgentService {
         let config = config::load_config()?;
         let search_config = config.search.unwrap_or_default();
         let agent_config = config.agent.unwrap_or_default();
-        let (keys, _) = discover_agent_keys(None, None)?;
+        let (keys, _) = discover_agent_keys(None, None, true)?;
         let resolved = resolve_agent_conversation_arg(&args.conversation, Some(&keys))?;
         let transcript = self
             .load_transcript(&resolved.key.path)
@@ -434,12 +437,14 @@ impl AgentService {
 }
 
 /// Keys of every Claude, Pi and OMP transcript on disk, and of the listed
-/// Codex threads among `listed`, else among the store's conversations.
-/// Codex keys need the thread's working directory, which only decoding
-/// reveals, so they come from the cards the store keeps.
+/// Codex threads among `listed`, else among the store's conversations;
+/// automated and child threads only with `all_kinds`. Codex keys need the
+/// thread's working directory, which only decoding reveals, so they come
+/// from the cards the store keeps.
 fn discover_agent_keys(
     project_filter: Option<&str>,
     listed: Option<&[history::Conversation]>,
+    all_kinds: bool,
 ) -> Result<(Vec<agent::refs::AgentConversationKey>, Vec<AgentWarning>)> {
     let root = history::get_claude_projects_root().map_err(structured_agent_error)?;
     let projects = if root.exists() {
@@ -630,7 +635,7 @@ fn discover_agent_keys(
             .iter()
             .filter(|conversation| {
                 conversation.source == history::model::SourceKind::Codex
-                    && !conversation.provenance.hidden_by_default()
+                    && (all_kinds || !conversation.provenance.hidden_by_default())
             })
             .filter_map(|conversation| {
                 agent::refs::AgentConversationKey::from_conversation_in(conversation, &registry)
@@ -1386,7 +1391,7 @@ impl AgentService {
         let keys = match keys {
             Some(keys) => keys,
             None => {
-                discovered = discover_agent_keys(None, None)?.0;
+                discovered = discover_agent_keys(None, None, true)?.0;
                 &discovered
             }
         };
@@ -1478,7 +1483,7 @@ impl AgentService {
         let keys = match keys {
             Some(keys) => keys,
             None => {
-                discovered = discover_agent_keys(None, None)?.0;
+                discovered = discover_agent_keys(None, None, true)?.0;
                 &discovered
             }
         };

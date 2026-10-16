@@ -382,6 +382,7 @@ impl App {
                 0..conversations.len(),
                 conversations.as_slice(),
                 &self.excluded_projects,
+                self.all_kinds,
                 self.workspace_filter,
                 self.current_project_dir_name.as_deref(),
             );
@@ -985,6 +986,23 @@ impl App {
             } else {
                 self.dispatch_search();
             }
+        }
+    }
+
+    /// Lists or hides automated and child conversations, keeping the query
+    /// and the selected session.
+    pub(super) fn toggle_all_kinds(&mut self) {
+        self.all_kinds = !self.all_kinds;
+        if self.selection_anchor.is_none() {
+            self.selection_anchor = self.get_selected_path();
+        }
+        self.semantic_sent_scope_signature = None;
+        self.invalidate_search_generation();
+        self.send_index_scope();
+        if self.query.trim().is_empty() || !self.readiness.lexical {
+            self.update_filter();
+        } else {
+            self.dispatch_search();
         }
     }
 

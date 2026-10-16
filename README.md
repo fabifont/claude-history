@@ -182,7 +182,12 @@ Thread titles come from the name set in Codex, else Codex's
 `session_index.jsonl`, else the first user message.
 
 `codex exec` runs and subagent threads are indexed for lexical search but stay
-out of the list and of semantic search.
+out of the list and of `agent search`. Press `Ctrl+G` in the list, or start with
+`--all-kinds`, to list them too, tagged `auto` (exec) or `sub` (subagent); the
+status bar shows `^G·all kinds` while they are listed. `agent search
+--all-kinds` searches them as well, and `agent read`/`outline` resolve their
+refs either way. They are never embedded, so semantic search does not find
+them.
 
 Codex actions use the Codex CLI with `CODEX_HOME` set to the thread's home:
 
@@ -241,6 +246,7 @@ JSONL files and their matching session artifact directories.
 | `F2`                    | Rename selected session          |
 | `Ctrl+X`                | Delete conversation              |
 | `Ctrl+L`                | Refresh sessions                 |
+| `Ctrl+G`                | Show / hide exec and subagents   |
 | `Tab`                   | Toggle all / workspace scope     |
 | `Ctrl+T`                | Toggle lexical / semantic search |
 | `?`                     | Show keyboard shortcuts          |
@@ -483,6 +489,7 @@ Options:
       --debug-search <QUERY>  Debug search result scoring for a query
       --debug [<LEVEL>]  Print debug information (optionally filter by level: debug, info, warn, error)
   -L, --local            Show only conversations from the current workspace directory
+      --all-kinds        List automated (Codex exec) and subagent conversations too
       --since <WHEN>     Only conversations this recent (duration or date)
       --after <WHEN>     Alias for --since
       --before <WHEN>    Only conversations older than this duration or date
@@ -699,7 +706,7 @@ pager = true
 # Example: default_args = ["--yolo"]
 
 [keys]
-# Customize keybindings (default: ctrl+r, ctrl+f, f2, ctrl+x, ctrl+l)
+# Customize keybindings (default: ctrl+r, ctrl+f, f2, ctrl+x, ctrl+l, ctrl+g)
 # Supports ctrl+<key>, alt+<key>, single-character keys, and f1-f12
 # rename = "alt+r"
 # fork = "alt+f"
@@ -746,14 +753,16 @@ EOF
 
 #### Key bindings
 
-Customize the keybindings for resume, fork, rename, and delete actions. Values
-are key combinations like `"ctrl+r"`, `"alt+f"`, or `"f2"`.
+Customize the keybindings for list actions. Values are key combinations like
+`"ctrl+r"`, `"alt+f"`, or `"f2"`.
 
 - `resume` (string): Resume conversation (default: `"ctrl+r"`)
 - `fork` (string): Fork and resume conversation (default: `"ctrl+f"`)
 - `rename` (string): Rename selected session (default: `"f2"`)
 - `delete` (string): Delete conversation (default: `"ctrl+x"`)
 - `refresh` (string): Refresh sessions from disk (default: `"ctrl+l"`)
+- `all_kinds` (string): Show or hide automated (Codex exec) and subagent
+  conversations (default: `"ctrl+g"`)
 
 #### Search options
 

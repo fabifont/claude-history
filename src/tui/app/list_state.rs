@@ -14,6 +14,7 @@ impl App {
             indices,
             &self.conversations,
             &self.excluded_projects,
+            self.all_kinds,
             self.workspace_filter,
             self.current_project_dir_name.as_deref(),
         )
@@ -208,6 +209,7 @@ pub(super) fn filter_conversation_indices<I, C>(
     indices: I,
     conversations: &[C],
     excluded_projects: &HashSet<String>,
+    all_kinds: bool,
     workspace_filter: bool,
     current_project_dir_name: Option<&str>,
 ) -> Vec<usize>
@@ -217,7 +219,7 @@ where
 {
     indices
         .into_iter()
-        .filter(|&idx| !conversations[idx].borrow().provenance.hidden_by_default())
+        .filter(|&idx| all_kinds || !conversations[idx].borrow().provenance.hidden_by_default())
         .filter(|&idx| {
             conversations[idx]
                 .borrow()
