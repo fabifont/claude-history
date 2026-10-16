@@ -171,8 +171,9 @@ def main():
         a = agent(args.session, query, by_id, uo)
         t, count, screen = (None, None, "") if args.no_tui else tui(args.session, query, uo)
         exp_oracle = q.get("oracle", expect)
-        # agent search --all-kinds honours exclude_paths but not exclude_projects.
-        exp_agent = q.get("agent", [] if expect == "ALL" else [x for x in exp_oracle if x != "X1"])
+        # agent search --all-kinds honours exclude_paths and exclude_projects.
+        exp_agent = q.get("agent", [] if expect == "ALL"
+                          else [x for x in exp_oracle if x not in ("X1", "X2")])
         exp_tui = expect if expect == "ALL" else [x for x in expect if x not in TUI_HIDDEN]
 
         def ok(actual, wanted):
@@ -188,6 +189,12 @@ def main():
         def ok_agent(actual, wanted):
             return sorted(actual) == sorted(wanted)
 
+        # Agent search lists conversations in keyword search rank order, as
+        # the TUI does.
+        agent_vs_oracle = None
+        if a is not None and o is not None and "oracle" not in q:
+            agent_vs_oracle = a == [x for x in o if x in a]
+
         tui_vs_oracle = None
         # An "oracle" override marks queries where the TUI deliberately differs
         # from --debug-search, such as a pasted UUID jumping to its session.
@@ -199,10 +206,12 @@ def main():
         row = dict(id=q["id"], group=q["group"], query=query, expect=expect,
                    user=q.get("user"), oracle=o, agent=a, tui=t, tui_count=count,
                    oracle_ok=ok(o, exp_oracle), agent_ok=ok_agent(a, exp_agent),
-                   tui_ok=ok(t, exp_tui), tui_vs_oracle=tui_vs_oracle, note=q.get("note"))
+                   tui_ok=ok(t, exp_tui), tui_vs_oracle=tui_vs_oracle,
+                   agent_vs_oracle=agent_vs_oracle, note=q.get("note"))
         results.append(row)
         flag = "PASS" if all(v in (True, None) for v in
-                              (row["oracle_ok"], row["agent_ok"], row["tui_ok"], tui_vs_oracle)) else "FAIL"
+                              (row["oracle_ok"], row["agent_ok"], row["tui_ok"], tui_vs_oracle,
+                               agent_vs_oracle)) else "FAIL"
         print(f"{flag} #{q['id']:3} {query[:40]!r:44} exp={expect} oracle={o} agent={a} "
               f"tui={t}({count})", flush=True)
         if flag == "FAIL" and t is not None and os.environ.get("QA_SCREENS"):

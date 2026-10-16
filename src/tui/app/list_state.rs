@@ -1,6 +1,7 @@
 use super::App;
 use crate::history::Conversation;
 use crate::history::actions::{self, Capabilities};
+use crate::history::path::project_is_excluded;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -307,11 +308,4 @@ pub(super) fn card_project_visible(
     } else {
         crate::history::path::is_same_project(project.workspace_key, project_dir_name)
     }
-}
-
-fn project_is_excluded(project_name: &str, excluded_projects: &HashSet<String>) -> bool {
-    excluded_projects.contains(project_name)
-        || project_name
-            .split_once('/')
-            .is_some_and(|(parent, _)| excluded_projects.contains(parent))
 }

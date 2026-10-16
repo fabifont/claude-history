@@ -1093,13 +1093,12 @@
 "X6"
 ],
 "agent": [
-"X2",
 "X3",
 "X4",
 "X5",
 "X6"
 ],
-"note": "TUI hides X1 path, X2 project, X4/X5 kinds; agent search --all-kinds honours exclude_paths only"
+"note": "TUI hides X1 path, X2 project, X4/X5 kinds; agent search --all-kinds honours exclude_paths and exclude_projects"
 },
 {
 "id": 138,

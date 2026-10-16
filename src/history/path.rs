@@ -16,6 +16,19 @@ pub(crate) fn cwd_is_excluded(cwd: Option<&Path>, prefixes: &[String]) -> bool {
     })
 }
 
+/// Whether `[tui] exclude_projects` hides the project named `project_name`
+/// (`Conversation::project_name`): the name or, for `parent/child` names,
+/// the parent is listed.
+pub(crate) fn project_is_excluded(
+    project_name: &str,
+    excluded_projects: &std::collections::HashSet<String>,
+) -> bool {
+    excluded_projects.contains(project_name)
+        || project_name
+            .split_once('/')
+            .is_some_and(|(parent, _)| excluded_projects.contains(parent))
+}
+
 /// Convert the current working directory into Claude's project directory name.
 pub fn convert_path_to_project_dir_name(path: &Path) -> String {
     path.to_string_lossy()

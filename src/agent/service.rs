@@ -168,7 +168,13 @@ impl AgentService {
         let config = config::load_config()?;
         let search_config = config.search.unwrap_or_default();
         let agent_config = config.agent.unwrap_or_default();
-        let exclude_paths = config.tui.unwrap_or_default().exclude_paths;
+        let tui_config = config.tui.unwrap_or_default();
+        let exclude_paths = tui_config.exclude_paths;
+        // Projects the TUI hides stay out of agent search too.
+        let tui_excluded_projects = tui_config
+            .exclude_projects
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
         // Resolved before loading so an inverted range fails without paying for
         // a full corpus parse.
         let time = args.time.resolve()?;
@@ -177,7 +183,11 @@ impl AgentService {
             false,
             crate::store::Contents::Full,
             &|conversation| {
-                if history::path::cwd_is_excluded(conversation.cwd.as_deref(), &exclude_paths) {
+                if history::path::cwd_is_excluded(conversation.cwd.as_deref(), &exclude_paths)
+                    || conversation.project_name.as_deref().is_some_and(|name| {
+                        history::path::project_is_excluded(name, &tui_excluded_projects)
+                    })
+                {
                     excluded_paths
                         .lock()
                         .unwrap()
