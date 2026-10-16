@@ -757,8 +757,6 @@ pub struct PublishLock {
 }
 
 impl PublishLock {
-    /// Takes `LOCK` under `root` without waiting; `None` when another
-    /// process or thread holds it.
     /// Waits until no process holds `LOCK` under `root`.
     pub fn wait(root: &Path) -> io::Result<()> {
         let file = File::options()
@@ -770,6 +768,8 @@ impl PublishLock {
         file.unlock()
     }
 
+    /// Takes `LOCK` under `root` without waiting; `None` when another
+    /// process or thread holds it.
     pub fn try_acquire(root: &Path) -> io::Result<Option<Self>> {
         fs::create_dir_all(root)?;
         let file = File::options()

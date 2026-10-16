@@ -16,6 +16,7 @@ use super::card::Fingerprint;
 use super::generation::{
     self, Doc, Generation, MergePolicy, Publish, PublishLock, Update, Written,
 };
+use super::legacy;
 use crate::history::omp_loader::{self, OmpSessionRoot};
 use crate::history::parser::{process_conversation_file, process_omp_conversation_file};
 use crate::history::path::decode_project_dir_name_to_path;
@@ -66,6 +67,8 @@ pub struct Outcome {
     pub scanned: usize,
     /// Files parsed because they were new or changed.
     pub parsed: usize,
+    /// Old caches removed after publishing.
+    pub removed: legacy::Removed,
 }
 
 /// Runs one pass over `sources` into the store at `root`.
@@ -80,6 +83,7 @@ pub fn reconcile_with(root: &Path, sources: &Sources, policy: MergePolicy) -> io
         written: Written::default(),
         scanned: 0,
         parsed: 0,
+        removed: legacy::Removed::default(),
     };
     let Some(lock) = PublishLock::try_acquire(root)? else {
         return Ok(outcome);
@@ -140,6 +144,12 @@ pub fn reconcile_with(root: &Path, sources: &Sources, policy: MergePolicy) -> io
         let (publish, written) = generation::compact(&lock, &current, policy)?;
         add_written(&mut outcome, publish, written);
     }
+    if outcome.published > 0
+        && let Some(cache) = legacy::cache_dir_of(root)
+    {
+        outcome.removed = legacy::remove_old_caches(cache);
+    }
+    drop(lock);
     Ok(outcome)
 }
 

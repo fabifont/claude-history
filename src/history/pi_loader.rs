@@ -151,13 +151,10 @@ pub(super) fn stream_pi_conversations(
     let root = session_root()?;
     let files = discover_files(&root)?;
     super::session_loader::load(
-        &root.path,
         files,
         Source::Pi,
         show_last,
         debug_level,
-        super::cache::read_pi_cache(&root.path),
-        |entries| super::cache::write_pi_cache(&root.path, entries),
         |path, modified| process_conversation_file(path, modified, debug_level),
         emit,
     )

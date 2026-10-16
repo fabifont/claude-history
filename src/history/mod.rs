@@ -11,7 +11,6 @@
 //! - `parser` - Parsing individual JSONL files
 //! - `path` - Path encoding/decoding utilities
 
-pub mod cache;
 mod loader;
 mod messages;
 pub mod omp_loader;

@@ -8,6 +8,7 @@
 
 pub mod card;
 pub mod generation;
+pub mod legacy;
 pub mod lexindex;
 pub mod reconcile;
 pub mod search;
@@ -41,7 +42,22 @@ pub fn default_root() -> Option<PathBuf> {
         pi.as_ref().map(|root| root.path.as_path()),
         omp.as_ref().map(|root| root.path.as_path()),
     );
-    crate::history::cache::cache_base_dir().map(|base| base.join("v3").join(namespace))
+    cache_base_dir().map(|base| base.join("v3").join(namespace))
+}
+
+/// Cache directory for this config root: `~/.cache/claude-history`, or a
+/// `config-<hash>` directory inside it when CLAUDE_CONFIG_DIR is set, to
+/// avoid cross-config cache collisions.
+pub(crate) fn cache_base_dir() -> Option<PathBuf> {
+    let base = home::home_dir()?.join(".cache").join("claude-history");
+    if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&config_dir, &mut hasher);
+        let hash = std::hash::Hasher::finish(&hasher);
+        Some(base.join(format!("config-{:016x}", hash)))
+    } else {
+        Some(base)
+    }
 }
 
 /// Directory name identifying the Pi and OMP session roots, canonicalized
