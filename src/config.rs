@@ -162,16 +162,16 @@ default_args = ["--yolo"]
         )
         .unwrap();
         let resume = config.resume.unwrap();
-        use crate::history::Source;
+        use crate::history::model::SourceKind;
         assert_eq!(
-            resume.default_args(Source::Claude),
+            resume.default_args(SourceKind::Claude),
             ["--dangerously-skip-permissions"]
         );
-        assert_eq!(resume.default_args(Source::Codex), ["--yolo"]);
-        assert!(resume.default_args(Source::Pi).is_empty());
+        assert_eq!(resume.default_args(SourceKind::Codex), ["--yolo"]);
+        assert!(resume.default_args(SourceKind::Pi).is_empty());
         assert!(
             ResumeConfig::default()
-                .default_args(Source::Codex)
+                .default_args(SourceKind::Codex)
                 .is_empty()
         );
     }
@@ -287,15 +287,15 @@ pub struct AgentResumeConfig {
 
 impl ResumeConfig {
     /// The configured arguments for resuming a conversation of `source`.
-    pub fn default_args(&self, source: crate::history::Source) -> &[String] {
-        use crate::history::Source;
+    pub fn default_args(&self, source: crate::history::model::SourceKind) -> &[String] {
+        use crate::history::model::SourceKind;
         let args = match source {
-            Source::Claude => self.default_args.as_ref(),
-            Source::Codex => self
+            SourceKind::Claude => self.default_args.as_ref(),
+            SourceKind::Codex => self
                 .codex
                 .as_ref()
                 .and_then(|codex| codex.default_args.as_ref()),
-            Source::Pi | Source::Omp => None,
+            SourceKind::Pi | SourceKind::Omp => None,
         };
         args.map(Vec::as_slice).unwrap_or(&[])
     }

@@ -19,7 +19,7 @@ pub fn one_message_conversation(
     }
 
     Conversation {
-        source: crate::history::Source::Claude,
+        source: crate::history::model::SourceKind::Claude,
         session_id: String::new(),
         path: PathBuf::new(),
         index: 0,

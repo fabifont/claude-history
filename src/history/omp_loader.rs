@@ -1,6 +1,3 @@
-use super::parser::process_omp_conversation_file;
-use super::{Conversation, Source};
-use crate::cli::DebugLevel;
 use crate::error::{AppError, Result};
 use std::fs::read_dir;
 use std::path::{Path, PathBuf};
@@ -125,46 +122,6 @@ fn collect_jsonl(directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
-}
-
-pub fn load_omp_conversations(
-    show_last: bool,
-    debug_level: Option<DebugLevel>,
-) -> Result<Vec<Conversation>> {
-    let mut conversations = Vec::new();
-    stream_omp_conversations(show_last, debug_level, |batch| conversations.extend(batch))?;
-    conversations.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
-    for (index, conversation) in conversations.iter_mut().enumerate() {
-        conversation.index = index;
-    }
-    Ok(conversations)
-}
-
-pub(super) fn stream_omp_conversations(
-    show_last: bool,
-    debug_level: Option<DebugLevel>,
-    emit: impl FnMut(Vec<Conversation>),
-) -> Result<()> {
-    let root = session_root()?;
-    let files = discover_files(&root)?;
-    super::session_loader::load(
-        files,
-        Source::Omp,
-        show_last,
-        debug_level,
-        |path, modified| {
-            let root_is_omp_owned = root
-                .path
-                .components()
-                .any(|component| matches!(component.as_os_str().to_str(), Some(".omp" | "omp")));
-            if root_is_omp_owned {
-                process_omp_conversation_file(path, modified, debug_level)
-            } else {
-                super::parser::process_conversation_file(path, modified, debug_level)
-            }
-        },
-        emit,
-    )
 }
 
 pub fn delete_session(path: &Path) -> Result<()> {

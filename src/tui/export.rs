@@ -9,7 +9,9 @@
 //! Conversations can be exported to files or copied to the clipboard.
 //! Export respects the current display settings for thinking blocks and tool calls.
 
-use crate::claude::{self, AgentContent, ContentBlock, LogEntry, UserContent, UserMessage};
+use crate::claude;
+use crate::history::model::{Part, Role, Transcript};
+use crate::history::view::{self, Entry, EntryKind};
 use crate::tool_format;
 use crate::tui::parse_command_name_and_args;
 use chrono::Local;
@@ -17,7 +19,6 @@ use crossterm::clipboard::CopyToClipboard;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
@@ -66,7 +67,7 @@ pub struct ExportOptions {
 
 /// Export conversation to file
 pub fn export_to_file(
-    source_path: &Path,
+    transcript: &Transcript,
     format: ExportFormat,
     options: ExportOptions,
 ) -> ExportResult {
@@ -74,7 +75,7 @@ pub fn export_to_file(
     let ext = format.extension();
     let filename = format!("conversation-{}.{}", timestamp, ext);
 
-    let content = match generate_content(source_path, format, options) {
+    let content = match generate_content(transcript, format, options) {
         Ok(c) => c,
         Err(e) => {
             return ExportResult {
@@ -221,11 +222,11 @@ fn copy_via_command(cmd: &str, args: &[&str], text: &str) -> Result<Result<(), S
 
 /// Copy conversation to clipboard
 pub fn export_to_clipboard(
-    source_path: &Path,
+    transcript: &Transcript,
     format: ExportFormat,
     options: ExportOptions,
 ) -> ExportResult {
-    let content = match generate_content(source_path, format, options) {
+    let content = match generate_content(transcript, format, options) {
         Ok(c) => c,
         Err(e) => {
             return ExportResult {
@@ -245,20 +246,17 @@ pub fn export_to_clipboard(
     }
 }
 
-/// Extract the text content of a single message by its entry index in the JSONL file.
-/// Returns the message text suitable for clipboard copying.
+/// Extract the text content of a single message by its entry index among
+/// the transcript's entries. Returns the message text suitable for
+/// clipboard copying.
 pub fn extract_message_text(
-    source_path: &Path,
+    transcript: &Transcript,
     entry_index: usize,
     options: ExportOptions,
 ) -> Result<String, String> {
-    let entries = crate::history::normalized_log_entries(source_path)
-        .map_err(|e| format!("Failed to read: {e}"))?;
-    entries
-        .into_iter()
-        .map(|(_, entry)| entry)
-        .nth(entry_index)
-        .map(|entry| format_entry_for_clipboard(&entry, options))
+    view::entries(transcript)
+        .get(entry_index)
+        .map(|entry| format_entry_for_clipboard(entry, options))
         .ok_or_else(|| "Message not found".to_string())
 }
 
@@ -273,19 +271,21 @@ fn append_separated(output: &mut String, text: &str) {
 
 /// Iterate content blocks and append formatted output for clipboard-style export.
 /// Handles Text, ToolUse, ToolResult, and Thinking blocks guarded by options.
-fn append_clipboard_blocks(output: &mut String, blocks: &[ContentBlock], options: &ExportOptions) {
-    for block in blocks {
-        match block {
-            ContentBlock::Text { text } => {
+fn append_clipboard_blocks(output: &mut String, parts: &[Part], options: &ExportOptions) {
+    for part in parts {
+        match part {
+            Part::Text(text) => {
                 append_separated(output, text);
             }
-            ContentBlock::ToolUse { name, input, .. } if options.show_tools => {
+            Part::ToolCall { name, input, .. } if options.show_tools => {
                 append_separated(output, &format_tool_call_for_export(name, input));
             }
-            ContentBlock::ToolResult { content, .. } if options.show_tools => {
+            Part::ToolResult {
+                output: content, ..
+            } if options.show_tools => {
                 append_separated(output, &format_tool_result_for_export(content.as_ref()));
             }
-            ContentBlock::Thinking { thinking, .. } if options.show_thinking => {
+            Part::Thinking(thinking) if options.show_thinking => {
                 append_separated(output, thinking);
             }
             _ => {}
@@ -293,141 +293,113 @@ fn append_clipboard_blocks(output: &mut String, blocks: &[ContentBlock], options
     }
 }
 
-/// Invoke `f` with the formatted content string for each ToolResult block
-/// in a user message, when show_tools is enabled.
-fn for_user_tool_results(message: &UserMessage, options: &ExportOptions, mut f: impl FnMut(&str)) {
-    if options.show_tools
-        && let UserContent::Blocks(blocks) = &message.content
-    {
-        for block in blocks {
-            if let ContentBlock::ToolResult { content, .. } = block {
-                let content_str = format_tool_result_for_export(content.as_ref());
+/// Invoke `f` with the formatted content string for each tool result in
+/// a user message, when show_tools is enabled.
+fn for_user_tool_results(parts: &[Part], options: &ExportOptions, mut f: impl FnMut(&str)) {
+    if options.show_tools {
+        for part in parts {
+            if let Part::ToolResult { output, .. } = part {
+                let content_str = format_tool_result_for_export(output.as_ref());
                 f(&content_str);
             }
         }
     }
 }
 
-fn format_entry_for_clipboard(entry: &LogEntry, options: ExportOptions) -> String {
+fn format_entry_for_clipboard(entry: &Entry<'_>, options: ExportOptions) -> String {
     let mut output = String::new();
-    match entry {
-        LogEntry::User {
-            message,
-            parent_tool_use_id,
-            ..
-        } => {
-            if let Some(text) = extract_user_text(message) {
-                output.push_str(&text);
+    match entry.kind {
+        EntryKind::Message { message, .. } => match message.role {
+            Role::User => {
+                if let Some(text) = extract_user_text(&message.parts) {
+                    output.push_str(&text);
+                }
+                for_user_tool_results(&message.parts, &options, |content| {
+                    append_separated(&mut output, content);
+                });
             }
-            for_user_tool_results(message, &options, |content| {
-                append_separated(&mut output, content);
-            });
-            let _ = parent_tool_use_id;
-        }
-        LogEntry::Assistant {
-            message,
-            parent_tool_use_id,
-            ..
-        } => {
-            append_clipboard_blocks(&mut output, &message.content, &options);
-            let _ = parent_tool_use_id;
-        }
-        LogEntry::PiMetadata {
+            Role::Assistant => append_clipboard_blocks(&mut output, &message.parts, &options),
+        },
+        EntryKind::Note {
             label,
             text,
             searchable: true,
-            ..
         } => {
             output.push_str(&format!("[{label}] {text}"));
         }
-        LogEntry::Progress { data, .. } => {
-            if let Some(agent_progress) = claude::parse_agent_progress(data) {
-                let AgentContent::Blocks(blocks) = &agent_progress.message.message.content;
-                append_clipboard_blocks(&mut output, blocks, &options);
-            }
+        EntryKind::Subagent { message, .. } => {
+            append_clipboard_blocks(&mut output, &message.parts, &options);
         }
-        _ => {}
+        EntryKind::Note { .. } | EntryKind::Hidden => {}
     }
     output
 }
 
 /// Generate content in the specified format
 fn generate_content(
-    source_path: &Path,
+    transcript: &Transcript,
     format: ExportFormat,
     options: ExportOptions,
 ) -> std::io::Result<String> {
     match format {
-        ExportFormat::Jsonl => fs::read_to_string(source_path),
-        ExportFormat::Plain => generate_plain(source_path, options),
-        ExportFormat::Markdown => generate_markdown(source_path, options),
-        ExportFormat::Ledger => generate_ledger(source_path, options),
+        ExportFormat::Jsonl => fs::read_to_string(transcript.path()),
+        ExportFormat::Plain => Ok(generate_plain(transcript, options)),
+        ExportFormat::Markdown => Ok(generate_markdown(transcript, options)),
+        ExportFormat::Ledger => Ok(generate_ledger(transcript, options)),
     }
 }
 
 fn generate_plain_or_markdown_content(
-    path: &Path,
+    transcript: &Transcript,
     options: ExportOptions,
     mut handle_user_text: impl FnMut(&mut String, &str, &str),
     mut handle_user_tool_result: impl FnMut(&mut String, &str, &str),
     mut handle_assistant_text: impl FnMut(&mut String, &str, &str, &str),
     mut handle_assistant_tool_use: impl FnMut(&mut String, &str, &str, &serde_json::Value),
     mut handle_assistant_thinking: impl FnMut(&mut String, &str, &str),
-) -> std::io::Result<String> {
-    let entries = crate::history::normalized_log_entries(path)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
+) -> String {
     let mut output = String::new();
 
-    for (_, entry) in entries {
-        match entry {
-            LogEntry::User {
-                message,
-                parent_tool_use_id,
-                ..
-            } => {
+    for entry in view::entries(transcript) {
+        match entry.kind {
+            EntryKind::Message { message, speaker } => {
+                let parent_tool_use_id = &message.parent_tool_use_id;
                 if parent_tool_use_id.is_some() && !options.show_thinking {
                     continue;
                 }
-                let prefix = subagent_prefix(&parent_tool_use_id);
-                if let Some(text) = extract_user_text(&message) {
-                    handle_user_text(&mut output, &prefix, &text);
-                }
-                // Tool results
-                for_user_tool_results(&message, &options, |content| {
-                    handle_user_tool_result(&mut output, &prefix, content);
-                });
-            }
-            LogEntry::Assistant {
-                message,
-                agent,
-                parent_tool_use_id,
-                ..
-            } => {
-                if parent_tool_use_id.is_some() && !options.show_thinking {
-                    continue;
-                }
-                let prefix = subagent_prefix(&parent_tool_use_id);
-                let speaker = agent.as_deref().unwrap_or("Claude");
-                for block in &message.content {
-                    match block {
-                        ContentBlock::Text { text } => {
-                            handle_assistant_text(&mut output, &prefix, speaker, text);
+                let prefix = subagent_prefix(parent_tool_use_id);
+                match message.role {
+                    Role::User => {
+                        if let Some(text) = extract_user_text(&message.parts) {
+                            handle_user_text(&mut output, &prefix, &text);
                         }
-                        ContentBlock::ToolUse { name, input, .. } if options.show_tools => {
-                            handle_assistant_tool_use(&mut output, &prefix, name, input);
+                        // Tool results
+                        for_user_tool_results(&message.parts, &options, |content| {
+                            handle_user_tool_result(&mut output, &prefix, content);
+                        });
+                    }
+                    Role::Assistant => {
+                        for part in &message.parts {
+                            match part {
+                                Part::Text(text) => {
+                                    handle_assistant_text(&mut output, &prefix, speaker, text);
+                                }
+                                Part::ToolCall { name, input, .. } if options.show_tools => {
+                                    handle_assistant_tool_use(&mut output, &prefix, name, input);
+                                }
+                                Part::Thinking(thinking) if options.show_thinking => {
+                                    handle_assistant_thinking(&mut output, &prefix, thinking);
+                                }
+                                _ => {}
+                            }
                         }
-                        ContentBlock::Thinking { thinking, .. } if options.show_thinking => {
-                            handle_assistant_thinking(&mut output, &prefix, thinking);
-                        }
-                        _ => {}
                     }
                 }
             }
-            LogEntry::PiMetadata {
+            EntryKind::Note {
                 label,
                 text,
                 searchable: true,
-                ..
             } => {
                 let rendered = if text.is_empty() {
                     format!("[{label}]")
@@ -440,13 +412,13 @@ fn generate_plain_or_markdown_content(
         }
     }
 
-    Ok(output)
+    output
 }
 
 /// Generate plain text format (simple "Speaker: message" lines)
-fn generate_plain(path: &Path, options: ExportOptions) -> std::io::Result<String> {
+fn generate_plain(transcript: &Transcript, options: ExportOptions) -> String {
     generate_plain_or_markdown_content(
-        path,
+        transcript,
         options,
         |output, prefix, text| {
             output.push_str(&format!("{}You: {}\n\n", prefix, text));
@@ -468,9 +440,9 @@ fn generate_plain(path: &Path, options: ExportOptions) -> std::io::Result<String
 }
 
 /// Generate markdown format (with ## headers for speakers)
-fn generate_markdown(path: &Path, options: ExportOptions) -> std::io::Result<String> {
+fn generate_markdown(transcript: &Transcript, options: ExportOptions) -> String {
     generate_plain_or_markdown_content(
-        path,
+        transcript,
         options,
         |output, prefix, text| {
             output.push_str(&format!("## {}You\n\n{}\n\n", prefix, text));
@@ -497,102 +469,110 @@ fn generate_markdown(path: &Path, options: ExportOptions) -> std::io::Result<Str
 const LEDGER_WIDTH: usize = 90;
 
 /// Generate ledger-style format (formatted like the TUI viewer)
-fn generate_ledger(path: &Path, options: ExportOptions) -> std::io::Result<String> {
-    let entries = crate::history::normalized_log_entries(path)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
+fn generate_ledger(transcript: &Transcript, options: ExportOptions) -> String {
     let mut output = String::new();
 
     const NAME_WIDTH: usize = 9;
     // 3 for " │ " separator
     let content_width = LEDGER_WIDTH - NAME_WIDTH - 3;
 
-    for (_, entry) in entries {
-        match entry {
-            LogEntry::User {
-                message,
-                parent_tool_use_id,
-                ..
-            } => {
+    for entry in view::entries(transcript) {
+        match entry.kind {
+            EntryKind::Message { message, speaker } => {
+                let parent_tool_use_id = &message.parent_tool_use_id;
                 if parent_tool_use_id.is_some() && !options.show_thinking {
                     continue;
                 }
-                let speaker = match &parent_tool_use_id {
-                    Some(id) => format!("↳{}", claude::short_parent_id(id)),
-                    None => "You".to_string(),
-                };
-                if let Some(text) = extract_user_text(&message) {
-                    let wrapped = wrap_plain_text(&text, content_width);
-                    append_ledger_block(&mut output, &speaker, &wrapped, NAME_WIDTH);
-                    output.push('\n');
-                }
-                // Tool results
-                for_user_tool_results(&message, &options, |content| {
-                    if !content.trim().is_empty() {
-                        let wrapped = wrap_plain_text(content, content_width);
-                        append_ledger_block(&mut output, "↳ Result", &wrapped, NAME_WIDTH);
-                        output.push('\n');
+                match message.role {
+                    Role::User => {
+                        let speaker = match parent_tool_use_id {
+                            Some(id) => format!("↳{}", claude::short_parent_id(id)),
+                            None => "You".to_string(),
+                        };
+                        if let Some(text) = extract_user_text(&message.parts) {
+                            let wrapped = wrap_plain_text(&text, content_width);
+                            append_ledger_block(&mut output, &speaker, &wrapped, NAME_WIDTH);
+                            output.push('\n');
+                        }
+                        // Tool results
+                        for_user_tool_results(&message.parts, &options, |content| {
+                            if !content.trim().is_empty() {
+                                let wrapped = wrap_plain_text(content, content_width);
+                                append_ledger_block(&mut output, "↳ Result", &wrapped, NAME_WIDTH);
+                                output.push('\n');
+                            }
+                        });
                     }
-                });
-            }
-            LogEntry::Assistant {
-                message,
-                agent,
-                parent_tool_use_id,
-                ..
-            } => {
-                if parent_tool_use_id.is_some() && !options.show_thinking {
-                    continue;
-                }
-                let speaker = match &parent_tool_use_id {
-                    Some(id) => format!("↳{}", claude::short_parent_id(id)),
-                    None => agent.unwrap_or_else(|| "Claude".to_string()),
-                };
-                for block in &message.content {
-                    match block {
-                        ContentBlock::Text { text } => {
-                            let rendered =
-                                crate::markdown::render_markdown_plain(text, content_width);
-                            let rendered = rendered.trim_end();
-                            append_ledger_block(&mut output, &speaker, rendered, NAME_WIDTH);
-                            output.push('\n');
+                    Role::Assistant => {
+                        let speaker = match parent_tool_use_id {
+                            Some(id) => format!("↳{}", claude::short_parent_id(id)),
+                            None => speaker.to_string(),
+                        };
+                        for part in &message.parts {
+                            match part {
+                                Part::Text(text) => {
+                                    let rendered =
+                                        crate::markdown::render_markdown_plain(text, content_width);
+                                    let rendered = rendered.trim_end();
+                                    append_ledger_block(
+                                        &mut output,
+                                        &speaker,
+                                        rendered,
+                                        NAME_WIDTH,
+                                    );
+                                    output.push('\n');
+                                }
+                                Part::ToolCall { name, input, .. } if options.show_tools => {
+                                    let formatted =
+                                        format_tool_call_for_ledger(name, input, content_width);
+                                    let tool_label = if parent_tool_use_id.is_some() {
+                                        &speaker
+                                    } else {
+                                        "Tool"
+                                    };
+                                    append_ledger_block(
+                                        &mut output,
+                                        tool_label,
+                                        &formatted,
+                                        NAME_WIDTH,
+                                    );
+                                    output.push('\n');
+                                }
+                                Part::Thinking(thinking)
+                                    if options.show_thinking && !thinking.is_empty() =>
+                                {
+                                    let rendered = crate::markdown::render_markdown_plain(
+                                        thinking,
+                                        content_width,
+                                    );
+                                    let rendered = rendered.trim_end();
+                                    append_ledger_block(
+                                        &mut output,
+                                        "Thinking",
+                                        rendered,
+                                        NAME_WIDTH,
+                                    );
+                                    output.push('\n');
+                                }
+                                _ => {}
+                            }
                         }
-                        ContentBlock::ToolUse { name, input, .. } if options.show_tools => {
-                            let formatted = format_tool_call_for_ledger(name, input, content_width);
-                            let tool_label = if parent_tool_use_id.is_some() {
-                                &speaker
-                            } else {
-                                "Tool"
-                            };
-                            append_ledger_block(&mut output, tool_label, &formatted, NAME_WIDTH);
-                            output.push('\n');
-                        }
-                        ContentBlock::Thinking { thinking, .. }
-                            if options.show_thinking && !thinking.is_empty() =>
-                        {
-                            let rendered =
-                                crate::markdown::render_markdown_plain(thinking, content_width);
-                            let rendered = rendered.trim_end();
-                            append_ledger_block(&mut output, "Thinking", rendered, NAME_WIDTH);
-                            output.push('\n');
-                        }
-                        _ => {}
                     }
                 }
             }
-            LogEntry::PiMetadata {
+            EntryKind::Note {
                 label,
                 text,
                 searchable: true,
-                ..
             } => {
-                append_ledger_block(&mut output, &label, &text, NAME_WIDTH);
+                append_ledger_block(&mut output, label, text, NAME_WIDTH);
                 output.push('\n');
             }
             _ => {}
         }
     }
 
-    Ok(output)
+    output
 }
 
 /// Append a ledger-formatted block to the output
@@ -621,20 +601,11 @@ fn subagent_prefix(parent_tool_use_id: &Option<String>) -> String {
 }
 
 /// Extract text from a user message, handling command messages
-fn extract_user_text(message: &UserMessage) -> Option<String> {
-    match &message.content {
-        UserContent::String(s) => process_command_text(s),
-        UserContent::Blocks(blocks) => {
-            for block in blocks {
-                if let ContentBlock::Text { text } = block
-                    && let Some(processed) = process_command_text(text)
-                {
-                    return Some(processed);
-                }
-            }
-            None
-        }
-    }
+fn extract_user_text(parts: &[Part]) -> Option<String> {
+    parts.iter().find_map(|part| match part {
+        Part::Text(text) => process_command_text(text),
+        _ => None,
+    })
 }
 
 /// Process command message text, extracting content from XML tags
@@ -916,15 +887,22 @@ mod tests {
         );
     }
 
+    use std::path::Path;
+
+    fn decode(path: &Path) -> Transcript {
+        crate::history::sources::decode_path(path, None, false).unwrap()
+    }
+
     #[test]
     fn pi_exports_use_pi_assistant_label() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pi/v3-branched.jsonl");
         let options = ExportOptions::default();
 
-        let plain = generate_plain(&path, options).unwrap();
-        let markdown = generate_markdown(&path, options).unwrap();
-        let ledger = generate_ledger(&path, options).unwrap();
+        let transcript = decode(&path);
+        let plain = generate_plain(&transcript, options);
+        let markdown = generate_markdown(&transcript, options);
+        let ledger = generate_ledger(&transcript, options);
 
         assert!(plain.contains("Pi: root answer"));
         assert!(markdown.contains("## Pi\n\nroot answer"));
@@ -968,13 +946,12 @@ mod tests {
         std::fs::write(&tmppath, format!("{}\n", entry)).unwrap();
 
         let result = generate_ledger(
-            &tmppath,
+            &decode(&tmppath),
             ExportOptions {
                 show_tools: false,
                 show_thinking: false,
             },
-        )
-        .unwrap();
+        );
 
         std::fs::remove_file(&tmppath).ok();
 

@@ -242,7 +242,7 @@ mod tests {
 
     fn test_conversation(path: &str, semantic_turns: Vec<String>) -> Conversation {
         Conversation {
-            source: crate::history::Source::Claude,
+            source: crate::history::model::SourceKind::Claude,
             session_id: String::new(),
             path: PathBuf::from(path),
             index: 0,

@@ -21,15 +21,6 @@ pub fn process_conversation_file(
     Ok(index_transcript(&transcript, debug_level))
 }
 
-pub fn process_omp_conversation_file(
-    path: PathBuf,
-    modified: Option<SystemTime>,
-    debug_level: Option<DebugLevel>,
-) -> Result<Option<Conversation>> {
-    let transcript = super::sources::decode_path(&path, modified, true)?;
-    Ok(index_transcript(&transcript, debug_level))
-}
-
 /// Process a Claude conversation from any BufRead source (for testability)
 #[cfg(test)]
 pub fn process_conversation_reader<R: std::io::BufRead>(
@@ -40,7 +31,7 @@ pub fn process_conversation_reader<R: std::io::BufRead>(
 ) -> Result<Option<Conversation>> {
     let key = super::model::ConversationKey {
         instance: super::model::SourceInstance {
-            kind: super::Source::Claude,
+            kind: super::model::SourceKind::Claude,
             root: PathBuf::new(),
         },
         native_id: path.to_string_lossy().into_owned(),
@@ -77,7 +68,7 @@ pub(crate) fn index_transcript(
     }
     match super::index::index(transcript) {
         Ok(mut conversation) => {
-            if conversation.source == super::Source::Claude {
+            if conversation.source == super::model::SourceKind::Claude {
                 conversation.project_name = None;
                 conversation.project_path = None;
             }
@@ -1559,35 +1550,6 @@ mod tests {
         assert_eq!(
             conversation.semantic_turn_ranges,
             vec![MessageRange::single(1), MessageRange::single(2),]
-        );
-    }
-
-    #[test]
-    fn empty_searchable_metadata_occupies_an_ordinal() {
-        let content = [
-            r#"{"type":"pi-metadata","label":"Hook","text":"","searchable":true}"#.to_string(),
-            user_msg("question", None),
-            assistant_msg("answer"),
-        ]
-        .join("\n");
-
-        let conversation = parse_jsonl(&content).unwrap().unwrap();
-        assert_eq!(conversation.message_count, 3);
-        assert_eq!(
-            conversation.semantic_turn_ranges,
-            vec![MessageRange::single(2), MessageRange::single(3),]
-        );
-
-        let transcript =
-            AgentTranscript::from_reader(PathBuf::from("test.jsonl"), Cursor::new(content))
-                .unwrap();
-        assert_eq!(
-            transcript
-                .messages
-                .iter()
-                .map(|message| message.ordinal)
-                .collect::<Vec<_>>(),
-            vec![1, 2, 3]
         );
     }
 

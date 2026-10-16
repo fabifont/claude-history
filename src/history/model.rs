@@ -30,6 +30,16 @@ impl SourceKind {
         }
     }
 
+    /// The name the source's assistant goes by in a conversation.
+    pub fn assistant_name(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::Pi => "Pi",
+            Self::Omp => "OMP",
+            Self::Codex => "Codex",
+        }
+    }
+
     pub fn list_label(self) -> &'static str {
         match self {
             Self::Claude => "CC",

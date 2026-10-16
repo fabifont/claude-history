@@ -31,7 +31,8 @@ use super::lexindex::{self, LexIndex};
 use super::segments::IndexSet;
 use super::semantic::{self, SemanticDoc};
 use super::text::{self, TextSegments};
-use crate::history::{Conversation, Source};
+use crate::history::Conversation;
+use crate::history::model::SourceKind;
 use crate::text_match::normalize_for_search;
 use chrono::{Local, TimeZone};
 use std::borrow::Cow;
@@ -321,7 +322,7 @@ impl Generation {
         let preview_last: Arc<str> = self.str(row.preview_last).into();
         let empty: Arc<str> = Arc::from("");
         Conversation {
-            source: source_from_u8(row.source).unwrap_or(Source::Claude),
+            source: source_from_u8(row.source).unwrap_or(SourceKind::Claude),
             session_id: self.str(row.session_id).to_owned(),
             path: PathBuf::from(self.str(row.path)),
             index: index as usize,
@@ -420,7 +421,7 @@ fn workspace_key(
     conversation: &Conversation,
     canonical: &mut HashMap<PathBuf, String>,
 ) -> (String, bool) {
-    if conversation.source == Source::Claude {
+    if conversation.source == SourceKind::Claude {
         let dir = conversation
             .path
             .parent()

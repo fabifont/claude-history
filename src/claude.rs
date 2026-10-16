@@ -1,4 +1,3 @@
-use crate::agent::transcript::bounded_tool_result_text;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -90,23 +89,8 @@ pub enum LogEntry {
         #[serde(flatten)]
         extra: serde_json::Value,
     },
-    #[serde(rename = "pi-metadata")]
-    PiMetadata {
-        label: String,
-        text: String,
-        #[serde(default)]
-        timestamp: Option<String>,
-        #[serde(default = "default_true")]
-        searchable: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        usage: Option<TokenUsage>,
-    },
     #[serde(other)]
     Unknown,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -179,37 +163,6 @@ pub enum ContentBlock {
     Other,
 }
 
-/// Extract Text blocks plus ToolResult content (for search indexing)
-pub fn extract_search_text_from_blocks(blocks: &[ContentBlock]) -> String {
-    let mut parts = Vec::new();
-
-    for block in blocks {
-        match block {
-            ContentBlock::Text { text } => {
-                parts.push(text.clone());
-            }
-            ContentBlock::ToolResult {
-                content: Some(content),
-                ..
-            } => {
-                if let Some(text) = bounded_tool_result_text(content) {
-                    parts.push(text);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    parts.join(" ")
-}
-
-pub fn extract_search_text_from_user(message: &UserMessage) -> String {
-    match &message.content {
-        UserContent::String(text) => text.clone(),
-        UserContent::Blocks(blocks) => extract_search_text_from_blocks(blocks),
-    }
-}
-
 /// Agent progress data from subagent conversations
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AgentProgressData {
@@ -267,69 +220,8 @@ pub fn parse_agent_progress(data: &serde_json::Value) -> Option<AgentProgressDat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::transcript::bounded_tool_result_text;
     use serde_json::json;
-
-    #[test]
-    fn extract_search_text_includes_tool_result_string() {
-        let blocks = vec![
-            ContentBlock::Text {
-                text: "hello".into(),
-            },
-            ContentBlock::ToolResult {
-                tool_use_id: "id".into(),
-                content: Some(json!("tool output here")),
-            },
-        ];
-        let result = extract_search_text_from_blocks(&blocks);
-        assert!(result.contains("hello"));
-        assert!(result.contains("tool output here"));
-    }
-
-    #[test]
-    fn extract_search_text_includes_tool_result_array() {
-        let blocks = vec![ContentBlock::ToolResult {
-            tool_use_id: "id".into(),
-            content: Some(json!([
-                {"type": "text", "text": "line one"},
-                {"type": "text", "text": "line two"}
-            ])),
-        }];
-        let result = extract_search_text_from_blocks(&blocks);
-        assert!(result.contains("line one"));
-        assert!(result.contains("line two"));
-    }
-
-    #[test]
-    fn extract_search_text_ignores_non_text_blocks_in_array() {
-        let blocks = vec![ContentBlock::ToolResult {
-            tool_use_id: "id".into(),
-            content: Some(json!([
-                {"type": "text", "text": "visible"},
-                {"type": "image", "source": {"data": "base64..."}}
-            ])),
-        }];
-        let result = extract_search_text_from_blocks(&blocks);
-        assert!(result.contains("visible"));
-        assert!(!result.contains("base64"));
-    }
-
-    #[test]
-    fn extract_search_text_handles_none_content() {
-        let blocks = vec![ContentBlock::ToolResult {
-            tool_use_id: "id".into(),
-            content: None,
-        }];
-        assert_eq!(extract_search_text_from_blocks(&blocks), "");
-    }
-
-    #[test]
-    fn extract_search_text_handles_empty_string_content() {
-        let blocks = vec![ContentBlock::ToolResult {
-            tool_use_id: "id".into(),
-            content: Some(json!("")),
-        }];
-        assert_eq!(extract_search_text_from_blocks(&blocks), "");
-    }
 
     #[test]
     fn bounded_tool_result_text_array_with_plain_strings() {

@@ -3,18 +3,14 @@
 //! This module handles loading conversations from Claude project directories,
 //! both synchronously and via streaming for the TUI.
 
-use super::parser::process_conversation_file;
-use super::path::{
-    decode_project_dir_name, decode_project_dir_name_to_path, format_short_name_from_path,
-};
-use super::{Conversation, Project};
-use crate::claude::{LogEntry, extract_search_text_from_user, parse_agent_progress};
-use crate::cli::DebugLevel;
-use crate::debug;
+use super::Project;
+use super::messages::parts_count_as_message;
+use super::model::{EventKind, Part, Role, SourceKind};
+use super::path::decode_project_dir_name;
+use crate::agent::transcript::bounded_tool_result_text;
 use crate::error::{AppError, Result};
 use rayon::prelude::*;
-use std::fs::{File, read_dir};
-use std::io::{BufRead, BufReader};
+use std::fs::read_dir;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -40,129 +36,6 @@ pub struct DeleteEmptySummary {
     pub deleted: usize,
 }
 
-/// Load conversations from ALL projects globally
-#[allow(dead_code)]
-pub fn load_all_conversations(
-    show_last: bool,
-    debug_level: Option<DebugLevel>,
-) -> Result<Vec<Conversation>> {
-    let pi_root = super::pi_loader::session_root().ok();
-    let pi_available = pi_root.as_ref().is_some_and(|root| root.path.exists());
-    let (mut pi_conversations, pi_error) =
-        match super::pi_loader::load_pi_conversations(show_last, debug_level) {
-            Ok(conversations) => (conversations, None),
-            Err(error) => (Vec::new(), Some(error)),
-        };
-    let omp_root = super::omp_loader::session_root().ok();
-    let omp_available = omp_root.as_ref().is_some_and(|root| root.path.exists());
-    let (mut omp_conversations, omp_error) =
-        match super::omp_loader::load_omp_conversations(show_last, debug_level) {
-            Ok(conversations) => (conversations, None),
-            Err(error) => (Vec::new(), Some(error)),
-        };
-    let auxiliary_usable =
-        (pi_available && pi_error.is_none()) || (omp_available && omp_error.is_none());
-    let root = match super::get_claude_projects_root() {
-        Ok(root) => root,
-        Err(error) => {
-            if auxiliary_usable {
-                pi_conversations.append(&mut omp_conversations);
-                finalize_conversations(&mut pi_conversations);
-                return Ok(pi_conversations);
-            }
-            return Err(pi_error.or(omp_error).unwrap_or(error));
-        }
-    };
-    if !root.exists() {
-        if auxiliary_usable {
-            pi_conversations.append(&mut omp_conversations);
-            return Ok(pi_conversations);
-        }
-        if let Some(error) = pi_error.or(omp_error) {
-            return Err(error);
-        }
-        return Err(AppError::ProjectsDirNotFound(root.display().to_string()));
-    }
-    if let Some(error) = pi_error {
-        debug::warn(debug_level, &format!("Failed to load Pi history: {error}"));
-    }
-    if let Some(error) = omp_error {
-        debug::warn(debug_level, &format!("Failed to load OMP history: {error}"));
-    }
-    let projects = list_projects(&root)?;
-
-    debug::info(
-        debug_level,
-        &format!("Loading global history from {} projects", projects.len()),
-    );
-
-    // Load conversations from all projects in parallel
-    let mut all_conversations: Vec<Conversation> = projects
-        .par_iter()
-        .flat_map(|project| {
-            let project_dir = root.join(&project.name);
-            match load_conversations(&project_dir, show_last, debug_level) {
-                Ok(mut convs) => {
-                    // Fallback path for old JSONL files without cwd field
-                    let fallback_path = decode_project_dir_name_to_path(&project.name);
-
-                    // Inject project info into each conversation
-                    for conv in &mut convs {
-                        // Prefer the cwd extracted from the JSONL file (accurate), fall back to decoded path
-                        let project_path =
-                            conv.cwd.clone().unwrap_or_else(|| fallback_path.clone());
-                        conv.project_name = Some(format_short_name_from_path(&project_path));
-                        conv.project_path = Some(project_path);
-                    }
-                    convs
-                }
-                Err(e) => {
-                    debug::warn(
-                        debug_level,
-                        &format!("Failed to load project {}: {}", project.display_name, e),
-                    );
-                    Vec::new()
-                }
-            }
-        })
-        .collect();
-
-    all_conversations.append(&mut pi_conversations);
-    all_conversations.append(&mut omp_conversations);
-    finalize_conversations(&mut all_conversations);
-
-    debug::info(
-        debug_level,
-        &format!(
-            "Total global conversations loaded: {}",
-            all_conversations.len()
-        ),
-    );
-
-    Ok(all_conversations)
-}
-
-fn finalize_conversations(conversations: &mut Vec<Conversation>) {
-    deduplicate_conversations(conversations);
-    conversations.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
-    for (index, conversation) in conversations.iter_mut().enumerate() {
-        conversation.index = index;
-    }
-}
-
-fn deduplicate_conversations(conversations: &mut Vec<Conversation>) {
-    let mut paths = std::collections::HashSet::new();
-    conversations.retain(|conversation| {
-        let path = conversation
-            .path
-            .canonicalize()
-            .unwrap_or_else(|_| conversation.path.clone());
-        paths.insert(path)
-    });
-}
-
-/// Find a session JSONL file by UUID across all projects.
-/// Returns the path to the `.jsonl` file if found.
 pub fn find_jsonl_by_uuid(uuid: &str) -> Result<Option<PathBuf>> {
     let matches = find_all_jsonl_by_uuid(uuid)?;
     Ok(matches.into_iter().next())
@@ -304,39 +177,41 @@ fn find_empty_transcripts(scope: DeleteEmptyScope) -> Result<Vec<EmptyTranscript
     Ok(candidates)
 }
 
-fn blocks_count_as_message(blocks: &[crate::claude::ContentBlock]) -> bool {
-    use crate::claude::ContentBlock;
-    blocks.iter().any(|block| match block {
-        ContentBlock::Text { text } => !text.trim().is_empty(),
-        ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => true,
-        ContentBlock::Thinking { thinking, .. } => !thinking.trim().is_empty(),
-        ContentBlock::Image { .. } | ContentBlock::Other => false,
-    })
+/// The text a user message is found by: its text and the bounded text of
+/// its tool results.
+fn user_search_text(parts: &[Part]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Text(text) => Some(text.clone()),
+            Part::ToolResult {
+                output: Some(output),
+                ..
+            } => bounded_tool_result_text(output),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn empty_transcript_from_path(path: &Path, project_name: &str) -> Result<Option<EmptyTranscript>> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut line_count = 0;
+    let transcript = super::sources::decode_path(path, None, false)?;
+    if transcript.source != SourceKind::Claude {
+        return Ok(None);
+    }
+    let line_count = transcript.records + transcript.diagnostics.len();
     let mut user_messages = 0;
     let mut assistant_messages = 0;
     let mut preview = None;
 
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        line_count += 1;
-
-        let entry = match serde_json::from_str::<LogEntry>(&line) {
-            Ok(entry) => entry,
-            Err(_) => continue,
+    for event in &transcript.events {
+        let message = match &event.kind {
+            EventKind::Message(message) | EventKind::Subagent { message, .. } => message,
+            _ => continue,
         };
-
-        match entry {
-            LogEntry::User { message, .. } => {
-                let text = extract_search_text_from_user(&message);
+        match (&event.kind, message.role) {
+            (EventKind::Message(_), Role::User) => {
+                let text = user_search_text(&message.parts);
                 if !text.trim().is_empty() {
                     user_messages += 1;
                     if preview.is_none() {
@@ -344,21 +219,8 @@ fn empty_transcript_from_path(path: &Path, project_name: &str) -> Result<Option<
                     }
                 }
             }
-            LogEntry::Assistant { message, .. } => {
-                if blocks_count_as_message(&message.content) {
-                    assistant_messages += 1;
-                }
-            }
-            LogEntry::Progress { data, .. } => {
-                if let Some(progress) = parse_agent_progress(&data)
-                    && progress.message.message_type == "assistant"
-                {
-                    let crate::claude::AgentContent::Blocks(blocks) =
-                        progress.message.message.content;
-                    if blocks_count_as_message(&blocks) {
-                        assistant_messages += 1;
-                    }
-                }
+            (_, Role::Assistant) if parts_count_as_message(&message.parts) => {
+                assistant_messages += 1;
             }
             _ => {}
         }
@@ -441,106 +303,57 @@ pub fn list_projects(root: &Path) -> Result<Vec<Project>> {
     Ok(projects)
 }
 
-/// Find and process all conversation files of a project directory.
-pub fn load_conversations(
-    projects_dir: &Path,
-    show_last: bool,
-    debug_level: Option<DebugLevel>,
-) -> Result<Vec<Conversation>> {
-    let mut files = Vec::new();
-    let mut skipped_agent_files = 0;
-
-    for entry in read_dir(projects_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-            if let Some(filename) = path.file_name().and_then(|f| f.to_str())
-                && filename.starts_with("agent-")
-            {
-                skipped_agent_files += 1;
-                debug::debug(debug_level, &format!("Skipping agent file: {}", filename));
-                continue;
-            }
-
-            let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
-            files.push((path, modified));
-        }
-    }
-
-    debug::info(
-        debug_level,
-        &format!(
-            "Found {} conversation files ({} agent files skipped)",
-            files.len(),
-            skipped_agent_files
-        ),
-    );
-
-    let mut conversations: Vec<Conversation> = files
-        .into_par_iter()
-        .filter_map(|(path, modified)| {
-            let filename = path
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or("unknown")
-                .to_owned();
-
-            match process_conversation_file(path, modified, debug_level) {
-                Ok(Some(mut conversation)) => {
-                    conversation.preview = if show_last {
-                        conversation.preview_last.clone()
-                    } else {
-                        conversation.preview_first.clone()
-                    };
-                    debug::debug(
-                        debug_level,
-                        &format!("Parsed {}: {}", filename, conversation.preview),
-                    );
-                    Some(conversation)
-                }
-                Ok(None) => None,
-                Err(e) => {
-                    debug::warn(
-                        debug_level,
-                        &format!("Error processing {}: {}", filename, e),
-                    );
-                    None
-                }
-            }
-        })
-        .collect();
-
-    // Ensure deterministic ordering after parallel processing
-    conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-
-    // Inject project info into each conversation
-    let fallback_path = projects_dir
-        .file_name()
-        .map(|n| decode_project_dir_name_to_path(&n.to_string_lossy()))
-        .unwrap_or_default();
-
-    for (idx, conv) in conversations.iter_mut().enumerate() {
-        conv.index = idx;
-
-        // Prefer the cwd extracted from the JSONL file, fall back to decoded path
-        let project_path = conv.cwd.clone().unwrap_or_else(|| fallback_path.clone());
-        conv.project_name = Some(format_short_name_from_path(&project_path));
-        conv.project_path = Some(project_path);
-    }
-
-    debug::info(
-        debug_level,
-        &format!("Total conversations loaded: {}", conversations.len()),
-    );
-
-    Ok(conversations)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::io::Write;
+
+    fn result(output: Option<serde_json::Value>) -> Part {
+        Part::ToolResult {
+            call_id: "id".into(),
+            output,
+        }
+    }
+
+    #[test]
+    fn user_search_text_includes_tool_result_string() {
+        let parts = [
+            Part::Text("hello".into()),
+            result(Some(json!("tool output here"))),
+        ];
+        let text = user_search_text(&parts);
+        assert!(text.contains("hello"));
+        assert!(text.contains("tool output here"));
+    }
+
+    #[test]
+    fn user_search_text_includes_tool_result_array() {
+        let parts = [result(Some(json!([
+            {"type": "text", "text": "line one"},
+            {"type": "text", "text": "line two"}
+        ])))];
+        let text = user_search_text(&parts);
+        assert!(text.contains("line one"));
+        assert!(text.contains("line two"));
+    }
+
+    #[test]
+    fn user_search_text_ignores_non_text_blocks_in_array() {
+        let parts = [result(Some(json!([
+            {"type": "text", "text": "visible"},
+            {"type": "image", "source": {"data": "base64..."}}
+        ])))];
+        let text = user_search_text(&parts);
+        assert!(text.contains("visible"));
+        assert!(!text.contains("base64"));
+    }
+
+    #[test]
+    fn user_search_text_handles_missing_and_empty_results() {
+        assert_eq!(user_search_text(&[result(None)]), "");
+        assert_eq!(user_search_text(&[result(Some(json!("")))]), "");
+    }
 
     fn write_transcript(lines: &[&str]) -> tempfile::NamedTempFile {
         let mut file = tempfile::Builder::new()

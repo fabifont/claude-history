@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
-use crate::claude::{ContentBlock, LogEntry, UserContent};
+use crate::history::model::{Message, Part, Role};
+use crate::history::view::{Entry, EntryKind};
 
 use super::RenderedLine;
 
@@ -17,43 +18,34 @@ use super::tools::{
 };
 use super::*;
 
-/// Classify a log entry and dispatch to the matching focused render
+/// Classify an entry and dispatch to the matching focused render
 /// function. This is the only entry point used by the rest of the
 /// viewer; per-kind rendering lives in `render_user_message`,
 /// `render_assistant_message`, and `render_agent_progress_message`.
 pub(super) fn render_entry(
     lines: &mut Vec<RenderedLine>,
     entry_index: usize,
-    entry: &LogEntry,
+    entry: &Entry<'_>,
     options: &RenderOptions,
 ) {
-    match entry {
-        LogEntry::Summary { .. }
-        | LogEntry::FileHistorySnapshot { .. }
-        | LogEntry::System { .. }
-        | LogEntry::CustomTitle { .. }
-        | LogEntry::AiTitle { .. }
-        | LogEntry::AgentName { .. }
-        | LogEntry::PermissionMode { .. }
-        | LogEntry::PiMetadata {
+    match entry.kind {
+        EntryKind::Hidden
+        | EntryKind::Note {
             searchable: false, ..
-        }
-        | LogEntry::Unknown => {}
-        LogEntry::PiMetadata {
+        } => {}
+        EntryKind::Note {
             label,
             text,
-            timestamp,
             searchable: true,
-            ..
         } => {
-            let content = UserContent::String(text.clone());
+            let content = [Part::Text(text.to_owned())];
             let ctx = EntryCtx {
                 style: MessageStyle::for_pi_metadata(label),
                 parent_id: None,
                 entry_index,
                 options,
             };
-            let ts = entry_timestamp(options, timestamp.as_deref());
+            let ts = entry_timestamp(options, entry.timestamp);
             render_user_message(
                 lines,
                 &ctx,
@@ -61,65 +53,43 @@ pub(super) fn render_entry(
                 &content,
             );
         }
-        LogEntry::Progress { data, .. } => {
-            if options.show_thinking
-                && let Some(agent_progress) = crate::claude::parse_agent_progress(data)
-            {
-                render_agent_progress_message(lines, entry_index, &agent_progress, options);
+        EntryKind::Subagent { agent_id, message } => {
+            if options.show_thinking {
+                render_agent_progress_message(lines, entry_index, agent_id, message, options);
             }
         }
-        LogEntry::User {
-            message,
-            timestamp,
-            parent_tool_use_id,
-            ..
-        } => {
-            if parent_tool_use_id.is_some() && !options.show_thinking {
+        EntryKind::Message { message, speaker } => {
+            if message.parent_tool_use_id.is_some() && !options.show_thinking {
                 return;
             }
-            let parent_id = parent_tool_use_id.as_deref();
-            let style = MessageStyle::for_user(parent_id, &message.content);
+            let parent_id = message.parent_tool_use_id.as_deref();
+            let style = match message.role {
+                Role::User => MessageStyle::for_user(parent_id, &message.parts),
+                Role::Assistant => MessageStyle::for_assistant(parent_id, speaker),
+            };
             let ctx = EntryCtx {
                 style,
                 parent_id,
                 entry_index,
                 options,
             };
-            let ts = entry_timestamp(options, timestamp.as_deref());
+            let ts = entry_timestamp(options, entry.timestamp);
             let timing = RowTiming::new(options.show_timing, ts.as_deref());
-            render_user_message(lines, &ctx, timing, &message.content);
-        }
-        LogEntry::Assistant {
-            message,
-            agent,
-            timestamp,
-            parent_tool_use_id,
-            ..
-        } => {
-            if parent_tool_use_id.is_some() && !options.show_thinking {
-                return;
+            match message.role {
+                Role::User => render_user_message(lines, &ctx, timing, &message.parts),
+                Role::Assistant => render_assistant_message(lines, &ctx, timing, &message.parts),
             }
-            let parent_id = parent_tool_use_id.as_deref();
-            let style = MessageStyle::for_assistant(parent_id, agent.as_deref());
-            let ctx = EntryCtx {
-                style,
-                parent_id,
-                entry_index,
-                options,
-            };
-            let ts = entry_timestamp(options, timestamp.as_deref());
-            let timing = RowTiming::new(options.show_timing, ts.as_deref());
-            render_assistant_message(lines, &ctx, timing, &message.content);
         }
     }
 }
 
-fn entry_timestamp(options: &RenderOptions, raw: Option<&str>) -> Option<String> {
-    if options.show_timing {
-        raw.and_then(format_timestamp)
-    } else {
-        None
-    }
+fn entry_timestamp(
+    options: &RenderOptions,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<String> {
+    timestamp
+        .filter(|_| options.show_timing)
+        .map(format_timestamp)
 }
 
 /// Captures the visual style and label for a single message render pass.
@@ -143,7 +113,7 @@ struct MessageStyle<'a> {
 }
 
 impl<'a> MessageStyle<'a> {
-    fn for_user(parent_id: Option<&'a str>, content: &UserContent) -> Self {
+    fn for_user(parent_id: Option<&'a str>, parts: &[Part]) -> Self {
         if let Some(p) = parent_id {
             return Self {
                 label: Cow::Owned(subagent_label(p)),
@@ -153,13 +123,10 @@ impl<'a> MessageStyle<'a> {
                 is_subagent: true,
             };
         }
-        let is_skill = match content {
-            UserContent::String(s) => s.trim().starts_with("Base directory for this skill:"),
-            UserContent::Blocks(blocks) => blocks.iter().any(|block| {
-                matches!(block, ContentBlock::Text { text }
-                    if text.trim().starts_with("Base directory for this skill:"))
-            }),
-        };
+        let is_skill = parts.iter().any(|part| {
+            matches!(part, Part::Text(text)
+                if text.trim().starts_with("Base directory for this skill:"))
+        });
         Self {
             label: Cow::Borrowed("You"),
             label_color: th().text_primary,
@@ -169,7 +136,7 @@ impl<'a> MessageStyle<'a> {
         }
     }
 
-    fn for_assistant(parent_id: Option<&'a str>, agent: Option<&'a str>) -> Self {
+    fn for_assistant(parent_id: Option<&'a str>, speaker: &'a str) -> Self {
         match parent_id {
             Some(p) => Self {
                 label: Cow::Owned(subagent_label(p)),
@@ -179,7 +146,7 @@ impl<'a> MessageStyle<'a> {
                 is_subagent: true,
             },
             None => Self {
-                label: Cow::Borrowed(agent.unwrap_or("Claude")),
+                label: Cow::Borrowed(speaker),
                 label_color: th().accent,
                 dimmed: false,
                 bold: true,
@@ -246,13 +213,11 @@ fn render_user_message(
     lines: &mut Vec<RenderedLine>,
     ctx: &EntryCtx<'_>,
     mut timing: RowTiming<'_>,
-    content: &UserContent,
+    parts: &[Part],
 ) {
-    let mut printed = step_user_text(lines, ctx, &mut timing, content);
-    if ctx.options.tool_display.shows_details()
-        && let UserContent::Blocks(blocks) = content
-    {
-        printed |= step_user_tool_results(lines, ctx, &mut timing, blocks);
+    let mut printed = step_user_text(lines, ctx, &mut timing, parts);
+    if ctx.options.tool_display.shows_details() {
+        printed |= step_user_tool_results(lines, ctx, &mut timing, parts);
     }
     if printed {
         lines.push(RenderedLine::new(vec![]));
@@ -266,7 +231,7 @@ fn render_assistant_message(
     lines: &mut Vec<RenderedLine>,
     ctx: &EntryCtx<'_>,
     mut timing: RowTiming<'_>,
-    blocks: &[ContentBlock],
+    blocks: &[Part],
 ) {
     let mut printed = step_assistant_text(lines, ctx, &mut timing, blocks);
     printed |= step_tool_summary(lines, ctx, &mut timing, blocks);
@@ -284,7 +249,7 @@ fn render_agent_progress_user_message(
     lines: &mut Vec<RenderedLine>,
     ctx: &EntryCtx<'_>,
     mut timing: RowTiming<'_>,
-    blocks: &[ContentBlock],
+    blocks: &[Part],
 ) {
     let mut printed = step_aggregated_text(lines, ctx, &mut timing, blocks);
     if ctx.options.tool_display.shows_details() {
@@ -302,7 +267,7 @@ fn render_agent_progress_assistant_message(
     lines: &mut Vec<RenderedLine>,
     ctx: &EntryCtx<'_>,
     mut timing: RowTiming<'_>,
-    blocks: &[ContentBlock],
+    blocks: &[Part],
 ) {
     let mut printed = step_aggregated_text(lines, ctx, &mut timing, blocks);
     printed |= step_tool_summary(lines, ctx, &mut timing, blocks);
@@ -320,28 +285,16 @@ fn step_user_text(
     lines: &mut Vec<RenderedLine>,
     ctx: &EntryCtx<'_>,
     timing: &mut RowTiming<'_>,
-    content: &UserContent,
+    parts: &[Part],
 ) -> bool {
-    let text = match content {
-        UserContent::String(s) => process_command_message(s),
-        UserContent::Blocks(blocks) => {
-            let texts: Vec<String> = blocks
-                .iter()
-                .filter_map(|block| {
-                    if let ContentBlock::Text { text } = block {
-                        process_command_message(text)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if texts.is_empty() {
-                None
-            } else {
-                Some(texts.join("\n\n"))
-            }
-        }
-    };
+    let texts: Vec<String> = parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Text(text) => process_command_message(text),
+            _ => None,
+        })
+        .collect();
+    let text = (!texts.is_empty()).then(|| texts.join("\n\n"));
     let Some(text) = text else { return false };
     let md_lines = render_markdown_to_lines(&text, ctx.options.content_width);
     if ctx.style.dimmed {
@@ -371,11 +324,11 @@ fn step_assistant_text(
     lines: &mut Vec<RenderedLine>,
     ctx: &EntryCtx<'_>,
     timing: &mut RowTiming<'_>,
-    blocks: &[ContentBlock],
+    blocks: &[Part],
 ) -> bool {
     let mut printed = false;
     for block in blocks {
-        let ContentBlock::Text { text } = block else {
+        let Part::Text(text) = block else {
             continue;
         };
         if text.trim().is_empty() {
@@ -412,16 +365,13 @@ fn step_aggregated_text(
     lines: &mut Vec<RenderedLine>,
     ctx: &EntryCtx<'_>,
     timing: &mut RowTiming<'_>,
-    blocks: &[ContentBlock],
+    blocks: &[Part],
 ) -> bool {
     let texts: Vec<&str> = blocks
         .iter()
-        .filter_map(|b| {
-            if let ContentBlock::Text { text } = b {
-                Some(text.as_str())
-            } else {
-                None
-            }
+        .filter_map(|b| match b {
+            Part::Text(text) => Some(text.as_str()),
+            _ => None,
         })
         .collect();
     if texts.is_empty() {
@@ -444,7 +394,7 @@ fn step_tool_summary(
     lines: &mut Vec<RenderedLine>,
     ctx: &EntryCtx<'_>,
     timing: &mut RowTiming<'_>,
-    blocks: &[ContentBlock],
+    blocks: &[Part],
 ) -> bool {
     if !ctx.options.tool_display.is_summary() {
         return false;
@@ -469,11 +419,11 @@ fn step_tool_calls(
     lines: &mut Vec<RenderedLine>,
     ctx: &EntryCtx<'_>,
     timing: &mut RowTiming<'_>,
-    blocks: &[ContentBlock],
+    blocks: &[Part],
 ) -> bool {
     let mut printed = false;
     for (block_idx, block) in blocks.iter().enumerate() {
-        let ContentBlock::ToolUse { id, name, input } = block else {
+        let Part::ToolCall { id, name, input } = block else {
             continue;
         };
         let output_id = make_tool_output_id(
@@ -513,14 +463,14 @@ fn step_thinking(
     lines: &mut Vec<RenderedLine>,
     ctx: &EntryCtx<'_>,
     timing: &mut RowTiming<'_>,
-    blocks: &[ContentBlock],
+    blocks: &[Part],
 ) -> bool {
     if !ctx.options.show_thinking || ctx.style.is_subagent {
         return false;
     }
     let mut printed = false;
     for block in blocks {
-        let ContentBlock::Thinking { thinking, .. } = block else {
+        let Part::Thinking(thinking) = block else {
             continue;
         };
         if thinking.is_empty() {
@@ -545,7 +495,7 @@ fn step_user_tool_results(
     lines: &mut Vec<RenderedLine>,
     ctx: &EntryCtx<'_>,
     timing: &mut RowTiming<'_>,
-    blocks: &[ContentBlock],
+    blocks: &[Part],
 ) -> bool {
     let mut printed = false;
     let tool_results = collect_tool_result_rows(
@@ -580,7 +530,7 @@ fn step_user_tool_results(
 fn step_agent_tool_results(
     lines: &mut Vec<RenderedLine>,
     ctx: &EntryCtx<'_>,
-    blocks: &[ContentBlock],
+    blocks: &[Part],
 ) -> bool {
     let mut printed = false;
     let tool_results = collect_tool_result_rows(ctx, blocks, format_tool_result_content);
@@ -600,15 +550,14 @@ struct ToolResultRenderRow {
 
 fn collect_tool_result_rows(
     ctx: &EntryCtx<'_>,
-    blocks: &[ContentBlock],
+    blocks: &[Part],
     mut content_text: impl FnMut(Option<&serde_json::Value>) -> String,
 ) -> Vec<ToolResultRenderRow> {
     let mut rows = Vec::new();
     for (block_idx, block) in blocks.iter().enumerate() {
-        let ContentBlock::ToolResult {
-            content,
-            tool_use_id,
-            ..
+        let Part::ToolResult {
+            output: content,
+            call_id: tool_use_id,
         } = block
         else {
             continue;
@@ -678,40 +627,26 @@ fn short_agent_id(agent_id: &str) -> &str {
 fn render_agent_progress_message(
     lines: &mut Vec<RenderedLine>,
     entry_index: usize,
-    agent_progress: &crate::claude::AgentProgressData,
+    agent_id: &str,
+    message: &Message,
     options: &RenderOptions,
 ) {
-    use crate::claude::AgentContent;
-
-    let agent_id = &agent_progress.agent_id;
     let short_id = short_agent_id(agent_id);
-    let msg = &agent_progress.message;
-
-    match msg.message_type.as_str() {
-        "user" => {
-            let AgentContent::Blocks(blocks) = &msg.message.content;
-            let style = MessageStyle::for_agent_user(short_id);
-            let ctx = EntryCtx {
-                style,
-                parent_id: Some(agent_id),
-                entry_index,
-                options,
-            };
-            let timing = RowTiming::column_only(options.show_timing);
-            render_agent_progress_user_message(lines, &ctx, timing, blocks);
+    let style = match message.role {
+        Role::User => MessageStyle::for_agent_user(short_id),
+        Role::Assistant => MessageStyle::for_agent_assistant(short_id),
+    };
+    let ctx = EntryCtx {
+        style,
+        parent_id: Some(agent_id),
+        entry_index,
+        options,
+    };
+    let timing = RowTiming::column_only(options.show_timing);
+    match message.role {
+        Role::User => render_agent_progress_user_message(lines, &ctx, timing, &message.parts),
+        Role::Assistant => {
+            render_agent_progress_assistant_message(lines, &ctx, timing, &message.parts)
         }
-        "assistant" => {
-            let AgentContent::Blocks(blocks) = &msg.message.content;
-            let style = MessageStyle::for_agent_assistant(short_id);
-            let ctx = EntryCtx {
-                style,
-                parent_id: Some(agent_id),
-                entry_index,
-                options,
-            };
-            let timing = RowTiming::column_only(options.show_timing);
-            render_agent_progress_assistant_message(lines, &ctx, timing, blocks);
-        }
-        _ => {}
     }
 }

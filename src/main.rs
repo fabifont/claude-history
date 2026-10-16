@@ -248,8 +248,7 @@ fn run() -> Result<()> {
 
     // Handle --debug-search flag: debug search result scoring
     if let Some(ref query) = args.debug_search {
-        let mut conversations =
-            store::load_conversations(show_last, args.debug, store::Contents::Full)?;
+        let mut conversations = store::load_conversations(show_last, store::Contents::Full)?;
         conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
@@ -268,7 +267,7 @@ fn run() -> Result<()> {
         let debug_search = search::debug_search(&conversations, &searchable, query, now, |index| {
             if let Some(ref proj) = current_project_dir_name {
                 let conv = &conversations[index];
-                if conv.source != history::Source::Claude {
+                if conv.source != history::model::SourceKind::Claude {
                     let Ok(current) = std::env::current_dir() else {
                         return false;
                     };
@@ -342,8 +341,7 @@ fn run() -> Result<()> {
     }
 
     if let Some(ref query) = args.debug_semantic_search {
-        let mut conversations =
-            store::load_conversations(show_last, args.debug, store::Contents::Full)?;
+        let mut conversations = store::load_conversations(show_last, store::Contents::Full)?;
         conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         return semantic_cli::debug_search(query, &conversations, args.local);
@@ -357,8 +355,7 @@ fn run() -> Result<()> {
                 "--generate-semantic-cache cannot be combined with a time filter".to_string(),
             ));
         }
-        let mut conversations =
-            store::load_conversations(show_last, args.debug, store::Contents::Full)?;
+        let mut conversations = store::load_conversations(show_last, store::Contents::Full)?;
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         return semantic_cli::generate_cache(&conversations, args.local);
     }
@@ -369,8 +366,7 @@ fn run() -> Result<()> {
 
     // Handle --semantic-search flag
     if let Some(ref query) = args.semantic_search {
-        let mut conversations =
-            store::load_conversations(show_last, args.debug, store::Contents::Full)?;
+        let mut conversations = store::load_conversations(show_last, store::Contents::Full)?;
         conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         return semantic_cli::run(query, &conversations, args.semantic_top, args.local);
@@ -454,7 +450,6 @@ fn run() -> Result<()> {
 
     let (conversation, selected_path) = match tui::run_with_loader(
         show_last,
-        args.debug,
         time_filter,
         tool_display,
         show_thinking,
@@ -576,7 +571,7 @@ fn resume_with_agent(
     resume_config: &config::ResumeConfig,
     fork_session: bool,
 ) -> Result<()> {
-    let source = conversation.map_or(history::Source::Claude, |c| c.source);
+    let source = conversation.map_or(history::model::SourceKind::Claude, |c| c.source);
     let provenance = conversation.map(|c| c.provenance).unwrap_or_default();
     let capabilities = history::actions::capabilities_of(source, provenance);
     if !(if fork_session {
@@ -589,7 +584,7 @@ fn resume_with_agent(
             source, provenance, doing,
         )));
     }
-    let adapter = history::sources::Registry::from_env().for_source(source);
+    let adapter = history::sources::Registry::from_env().for_path(source, selected_path);
     let target = history::actions::Target {
         path: selected_path,
         project: conversation.and_then(|c| c.project_path.as_deref()),
@@ -993,7 +988,7 @@ mod agent_command_tests {
 
     fn stubbed_conversation(path: PathBuf, message_count: usize) -> history::Conversation {
         history::Conversation {
-            source: history::Source::Claude,
+            source: history::model::SourceKind::Claude,
             session_id: path
                 .file_stem()
                 .and_then(|name| name.to_str())
@@ -1577,7 +1572,7 @@ mod agent_command_tests {
             reference: key.conversation_ref(),
         };
         let conversation = history::Conversation {
-            source: history::Source::Claude,
+            source: history::model::SourceKind::Claude,
             session_id: key.session_id.clone(),
             path: key.path.clone(),
             index: 0,

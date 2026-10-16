@@ -190,7 +190,9 @@ mod tests {
     }
 
     fn event(entry: LogEntry) -> Event {
-        crate::history::sources::claude::Records::default().push(entry, Origin::default())
+        crate::history::sources::claude::Records::default()
+            .push(entry, Origin::default())
+            .expect("a conversation record")
     }
 
     fn user(text: &str) -> LogEntry {
@@ -209,11 +211,13 @@ mod tests {
     }
 
     fn placements(entries: &[LogEntry]) -> Vec<Placement> {
+        let events: Vec<Event> = entries.iter().map(|entry| event(entry.clone())).collect();
+        placements_of(&events)
+    }
+
+    fn placements_of(events: &[Event]) -> Vec<Placement> {
         let mut ordinals = MessageOrdinals::new();
-        entries
-            .iter()
-            .map(|entry| ordinals.place(&event(entry.clone())))
-            .collect()
+        events.iter().map(|event| ordinals.place(event)).collect()
     }
 
     #[test]
@@ -304,13 +308,26 @@ mod tests {
 
     #[test]
     fn searchable_empty_metadata_counts_without_opening_assistant_gate() {
-        let searchable = entry(json!({
-            "type":"pi-metadata","label":"Hook","text":"","searchable":true
-        }));
-        let early_assistant = assistant(None, "early");
-        let user = user("question");
+        let searchable = Event {
+            origin: Origin::default(),
+            timestamp: None,
+            visibility: crate::history::model::Visibility::Dialogue,
+            kind: EventKind::Note {
+                label: "Hook".to_owned(),
+                text: String::new(),
+                searchable: true,
+                usage: None,
+            },
+        };
+        let early_assistant = event(assistant(None, "early"));
+        let user = event(user("question"));
         assert_eq!(
-            placements(&[searchable, early_assistant, user, assistant(None, "answer")]),
+            placements_of(&[
+                searchable,
+                early_assistant,
+                user,
+                event(assistant(None, "answer"))
+            ]),
             vec![
                 Placement::Message(1),
                 Placement::Control,

@@ -4,9 +4,11 @@
 //! in the TUI viewer. It produces styled spans that ratatui can render directly,
 //! without using ANSI escape codes.
 
-use crate::claude::LogEntry;
+use crate::history::model::Transcript;
+use crate::history::view::{self, Entry, EntryKind};
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::tui::theme::{self, Theme};
 
@@ -120,33 +122,37 @@ pub struct RenderedConversation {
     pub messages: Vec<MessageRange>,
 }
 
-/// Format an ISO 8601 timestamp to Mon DD HH:MM in local time
-fn format_timestamp(iso_timestamp: &str) -> Option<String> {
-    use chrono::{DateTime, Local};
-    // Parse RFC 3339 timestamp (handles timezone offsets) and convert to local time
-    DateTime::parse_from_rfc3339(iso_timestamp)
-        .ok()
-        .map(|dt| dt.with_timezone(&Local).format("%b %d %H:%M").to_string())
+/// Format a timestamp as Mon DD HH:MM in local time
+fn format_timestamp(timestamp: chrono::DateTime<chrono::Utc>) -> String {
+    timestamp
+        .with_timezone(&chrono::Local)
+        .format("%b %d %H:%M")
+        .to_string()
 }
 
+/// An entry of the conversation shown, with its position among the
+/// transcript's entries: the identity tool outputs and message ranges
+/// refer to.
 #[derive(Debug)]
-pub struct RenderableEntry {
+pub struct RenderableEntry<'a> {
     pub entry_index: usize,
-    entry: LogEntry,
+    entry: Entry<'a>,
 }
 
-pub fn parse_conversation_file(file_path: &Path) -> std::io::Result<Vec<RenderableEntry>> {
-    let normalized = crate::history::normalized_log_entries(file_path)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    Ok(normalized
+/// The conversation whose session file is `path`.
+pub fn open_conversation(path: &Path) -> std::io::Result<Arc<Transcript>> {
+    crate::history::service::shared()
+        .open_path(path)
+        .map(|(_, transcript)| transcript)
+        .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+pub fn renderable_entries(transcript: &Transcript) -> Vec<RenderableEntry<'_>> {
+    view::entries(transcript)
         .into_iter()
-        .map(|(_, entry)| entry)
         .enumerate()
-        .filter_map(|(entry_index, entry)| {
-            (!matches!(entry, LogEntry::FileHistorySnapshot { .. }))
-                .then_some(RenderableEntry { entry_index, entry })
-        })
-        .collect())
+        .map(|(entry_index, entry)| RenderableEntry { entry_index, entry })
+        .collect()
 }
 
 pub fn render_parsed_conversation(
@@ -211,11 +217,11 @@ fn try_extend_or_start_pending_summary(
     let entry_index = parsed.entry_index;
     let entry = &parsed.entry;
 
-    if let Some((parent_id, agent, timestamp, summary)) =
+    if let Some((parent_id, speaker, timestamp, summary)) =
         tool_only_assistant_summary(entry, options)
     {
         match pending {
-            Some(p) if p.parent_id.as_deref() == parent_id && p.agent.as_deref() == agent => {
+            Some(p) if p.parent_id.as_deref() == parent_id && p.speaker == speaker => {
                 p.last_parsed_idx = parsed_idx;
                 p.summary.merge(summary);
             }
@@ -227,8 +233,8 @@ fn try_extend_or_start_pending_summary(
                     first_parsed_idx: parsed_idx,
                     last_parsed_idx: parsed_idx,
                     parent_id: parent_id.map(str::to_string),
-                    agent: agent.map(str::to_string),
-                    timestamp: timestamp.map(str::to_string),
+                    speaker: speaker.to_owned(),
+                    timestamp,
                     summary,
                 });
             }
@@ -256,9 +262,11 @@ fn render_entry_with_range(
 ) {
     let entry_index = parsed.entry_index;
     let entry = &parsed.entry;
-    let is_message = matches!(entry, LogEntry::User { .. } | LogEntry::Assistant { .. })
-        || matches!(entry, LogEntry::Progress { data, .. }
-            if options.show_thinking && crate::claude::parse_agent_progress(data).is_some());
+    let is_message = match entry.kind {
+        EntryKind::Message { .. } => true,
+        EntryKind::Subagent { .. } => options.show_thinking,
+        EntryKind::Note { .. } | EntryKind::Hidden => false,
+    };
 
     let start_line = lines.len();
     render_entry(lines, entry_index, entry, options);
@@ -366,13 +374,12 @@ fn postprocess_blank_lines(lines: &mut Vec<RenderedLine>, messages: &mut Vec<Mes
     messages.retain(|m| m.start_line < m.end_line);
 }
 
-/// Render a conversation file to lines for display in the TUI viewer
+/// Render a conversation to lines for display in the TUI viewer
 pub fn render_conversation(
-    file_path: &Path,
+    transcript: &Transcript,
     options: &RenderOptions,
-) -> std::io::Result<RenderedConversation> {
-    let entries = parse_conversation_file(file_path)?;
-    Ok(render_parsed_conversation(&entries, options))
+) -> RenderedConversation {
+    render_parsed_conversation(&renderable_entries(transcript), options)
 }
 
 #[cfg(test)]

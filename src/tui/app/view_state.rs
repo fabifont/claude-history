@@ -3,11 +3,10 @@ use crate::tui::ui;
 use crate::tui::viewer::{MessageRange, RenderOptions, RenderedLine, ToolOutputId};
 use ratatui::prelude::*;
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 impl App {
     pub fn enter_view_mode(&mut self, content_width: usize) {
-        use crate::tui::viewer::{parse_conversation_file, render_parsed_conversation};
+        use crate::tui::viewer::{open_conversation, render_conversation};
 
         let Some(selected) = self.selected else {
             return;
@@ -25,10 +24,9 @@ impl App {
             expanded_tool_outputs: BTreeSet::new(),
         };
 
-        match parse_conversation_file(&path) {
-            Ok(entries) => {
-                let entries = Arc::new(entries);
-                let rendered = render_parsed_conversation(&entries, &options);
+        match open_conversation(&path) {
+            Ok(transcript) => {
+                let rendered = render_conversation(&transcript, &options);
                 let total_lines = rendered.lines.len();
                 let first_msg = if rendered.messages.is_empty() {
                     None
@@ -37,7 +35,7 @@ impl App {
                 };
                 self.app_mode = AppMode::View(ViewState {
                     conversation_path: path,
-                    parsed_entries: Some(entries),
+                    transcript: Some(transcript),
                     scroll_offset: 0,
                     rendered_lines: rendered.lines,
                     total_lines,
@@ -217,7 +215,7 @@ impl App {
     }
 
     pub(super) fn re_render_view(&mut self, viewport_height: usize) {
-        use crate::tui::viewer::{parse_conversation_file, render_parsed_conversation};
+        use crate::tui::viewer::{open_conversation, render_conversation};
 
         if let AppMode::View(ref mut state) = self.app_mode {
             let options = RenderOptions {
@@ -236,18 +234,17 @@ impl App {
             );
             let old_scroll = state.scroll_offset;
 
-            let entries = match state.parsed_entries.clone() {
-                Some(entries) => entries,
-                None => match parse_conversation_file(&state.conversation_path) {
-                    Ok(entries) => {
-                        let entries = Arc::new(entries);
-                        state.parsed_entries = Some(entries.clone());
-                        entries
+            let transcript = match state.transcript.clone() {
+                Some(transcript) => transcript,
+                None => match open_conversation(&state.conversation_path) {
+                    Ok(transcript) => {
+                        state.transcript = Some(transcript.clone());
+                        transcript
                     }
                     Err(_) => return,
                 },
             };
-            let rendered = render_parsed_conversation(&entries, &options);
+            let rendered = render_conversation(&transcript, &options);
             state.total_lines = rendered.lines.len();
             state.rendered_lines = rendered.lines;
             state.message_ranges = rendered.messages;
@@ -509,10 +506,12 @@ impl App {
             Self::sync_focus_to_scroll(state, viewport_height);
         }
 
-        let (path, entry_index) = if let AppMode::View(ref state) = self.app_mode {
-            if let Some(idx) = state.focused_message {
+        let (transcript, entry_index) = if let AppMode::View(ref state) = self.app_mode {
+            if let Some(idx) = state.focused_message
+                && let Some(transcript) = state.transcript.clone()
+            {
                 if let Some(msg) = state.message_ranges.get(idx) {
-                    (state.conversation_path.clone(), msg.entry_index)
+                    (transcript, msg.entry_index)
                 } else {
                     return;
                 }
@@ -532,7 +531,7 @@ impl App {
             return;
         };
 
-        match crate::tui::export::extract_message_text(&path, entry_index, options) {
+        match crate::tui::export::extract_message_text(&transcript, entry_index, options) {
             Ok(text) if text.is_empty() => {
                 self.status_message = Some((
                     "No text content in this message".to_string(),

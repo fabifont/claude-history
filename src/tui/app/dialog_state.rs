@@ -208,7 +208,7 @@ impl App {
         let path = self.conversations[idx].path.clone();
 
         let source = self.conversations[idx].source;
-        let adapter = crate::history::sources::Registry::from_env().for_source(source);
+        let adapter = crate::history::sources::Registry::from_env().for_path(source, &path);
         if !adapter.capabilities().rename {
             self.dialog_mode = DialogMode::None;
             self.status_message = Some((
@@ -277,10 +277,14 @@ impl App {
             None => return,
         };
 
-        let result = if to_clipboard {
-            crate::tui::export::export_to_clipboard(&path, format, options)
-        } else {
-            crate::tui::export::export_to_file(&path, format, options)
+        let result = match crate::tui::viewer::open_conversation(&path) {
+            Ok(transcript) if to_clipboard => {
+                crate::tui::export::export_to_clipboard(&transcript, format, options)
+            }
+            Ok(transcript) => crate::tui::export::export_to_file(&transcript, format, options),
+            Err(e) => crate::tui::export::ExportResult {
+                message: format!("Failed to read: {}", e),
+            },
         };
 
         self.status_message = Some((result.message, std::time::Instant::now()));

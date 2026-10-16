@@ -1,6 +1,5 @@
 use super::app::{Action, App, AppMode, DialogMode, ListSearchMode, TuiSearchOptions};
 use super::ui;
-use crate::cli::DebugLevel;
 use crate::config::KeyBindings;
 use crate::debug_log;
 use crate::error::{AppError, Result};
@@ -419,12 +418,8 @@ pub fn reconcile() -> Result<()> {
 
 /// Loads every conversation inside `time_filter` with the full loader, for
 /// runs without a store.
-fn load_in_memory(
-    show_last: bool,
-    debug_level: Option<DebugLevel>,
-    time_filter: TimeFilter,
-) -> Result<Vec<Conversation>> {
-    let mut conversations = crate::history::load_all_conversations(show_last, debug_level)?;
+fn load_in_memory(show_last: bool, time_filter: TimeFilter) -> Result<Vec<Conversation>> {
+    let mut conversations = crate::store::load_in_memory(show_last)?;
     if time_filter.is_active() {
         conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
     }
@@ -436,7 +431,6 @@ fn load_in_memory(
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_loader(
     show_last: bool,
-    debug_level: Option<DebugLevel>,
     time_filter: TimeFilter,
     tool_display: ToolDisplayMode,
     show_thinking: bool,
@@ -468,7 +462,7 @@ pub fn run_with_loader(
             }
         }
         None => {
-            let conversations = load_in_memory(show_last, debug_level, time_filter)?;
+            let conversations = load_in_memory(show_last, time_filter)?;
             if conversations.is_empty() {
                 return Err(no_history());
             }
@@ -569,8 +563,9 @@ pub fn run_with_loader(
                 Action::Delete(ref path) => {
                     let source = app
                         .get_selected_source()
-                        .unwrap_or(crate::history::Source::Claude);
-                    let adapter = crate::history::sources::Registry::from_env().for_source(source);
+                        .unwrap_or(crate::history::model::SourceKind::Claude);
+                    let adapter =
+                        crate::history::sources::Registry::from_env().for_path(source, path);
                     if !adapter.capabilities().delete {
                         app.set_status_message(format!(
                             "Deleting {} sessions is not supported",
@@ -591,6 +586,7 @@ pub fn run_with_loader(
                                 path.display(),
                                 e
                             ));
+                            app.set_status_message(format!("Failed to delete: {e}"));
                             EventLoopResult::Continue
                         }
                     }
@@ -612,7 +608,7 @@ pub fn run_with_loader(
                 }
                 None => {
                     let old_count = app.conversations().len();
-                    match load_in_memory(show_last, debug_level, time_filter) {
+                    match load_in_memory(show_last, time_filter) {
                         Ok(conversations) => {
                             let new_count = conversations.len();
                             app.show_conversations(conversations);

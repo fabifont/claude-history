@@ -1615,7 +1615,7 @@ mod tests {
 
     fn real_corpus() -> Corpus {
         let started = std::time::Instant::now();
-        let conversations = crate::history::load_all_conversations(false, None).unwrap();
+        let conversations = crate::store::load_in_memory(false).unwrap();
         eprintln!(
             "loaded {} conversations in {:.2?}",
             conversations.len(),
@@ -1675,7 +1675,7 @@ mod tests {
     #[test]
     #[ignore = "reads the real history; run with --ignored"]
     fn real_corpus_generation_oracle() {
-        let mut conversations = crate::history::load_all_conversations(false, None).unwrap();
+        let mut conversations = crate::store::load_in_memory(false).unwrap();
         conversations.sort_by_key(|conversation| std::cmp::Reverse(conversation.timestamp));
         let now = Local::now();
         let root = tempfile::tempdir().unwrap();

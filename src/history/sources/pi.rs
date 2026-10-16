@@ -6,11 +6,11 @@ use crate::history::ParseError;
 use crate::history::actions::{Capabilities, Resume, Target};
 use crate::history::adapter::{Adapter, Completeness, Discovery, Located};
 use crate::history::model::{
-    ConversationKey, Event, ExecutionMode, HeadStatus, Origin, Relationship, Revision, Segment,
-    SessionMeta, SourceInstance, SourceKind, Transcript,
+    ConversationKey, Event, EventKind, ExecutionMode, HeadStatus, Relationship, Revision, Role,
+    Segment, SessionMeta, SourceInstance, SourceKind, Transcript,
 };
 use crate::history::omp_loader::{self, OmpSessionRoot};
-use crate::history::pi::PiProjection;
+use crate::history::pi::PiSession;
 use crate::history::pi_loader::{self, PiSessionRoot};
 use chrono::{DateTime, Utc};
 use std::path::Path;
@@ -147,28 +147,47 @@ pub(crate) fn omp_owned(root: &Path) -> bool {
         .any(|component| matches!(component.as_os_str().to_str(), Some(".omp" | "omp")))
 }
 
-/// The transcript of a Pi or OMP session: the records of its active branch,
-/// projected into Claude's format. An event's origin is its position in the
-/// projected branch.
+/// The transcript of a Pi or OMP session: the events of its active branch,
+/// each at the line of the record it was decoded from, passed to `events`.
+/// The model is the first assistant model unless a model change names one,
+/// the title is the last one set, and the session was last active at its
+/// latest message.
 pub(super) fn transcript_of(
     key: ConversationKey,
     path: &Path,
-    projection: PiProjection,
+    session: PiSession,
     bytes: u64,
     modified: Option<SystemTime>,
     events: &mut dyn FnMut(Event),
 ) -> Transcript {
-    let source = projection.source;
-    let mut records = super::claude::Records::default();
-    for (position, (_, entry)) in projection.entries.into_iter().enumerate() {
-        let line = u32::try_from(position + 1).unwrap_or(u32::MAX);
-        events(records.push(entry, Origin { segment: 0, line }));
+    let source = session.source;
+    let records = session.events.len();
+    let mut model = None;
+    let mut custom_title = None;
+    let mut latest_activity: Option<DateTime<Utc>> = None;
+    for event in session.events {
+        match &event.kind {
+            EventKind::Message(message) => {
+                if model.is_none() && message.role == Role::Assistant {
+                    model.clone_from(&message.model);
+                }
+                latest_activity = latest_activity.max(event.timestamp);
+            }
+            EventKind::Note { label, text, .. } if label == "Model" && !text.is_empty() => {
+                model = Some(text.clone());
+            }
+            EventKind::Title { text, .. } => {
+                let trimmed = text.trim();
+                custom_title = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+            }
+            _ => {}
+        }
+        events(event);
     }
-    let updated_at = records
-        .latest_activity
-        .or_else(|| super::claude::parse_timestamp(&projection.header.timestamp))
+    let updated_at = latest_activity
+        .or_else(|| super::claude::parse_timestamp(&session.header.timestamp))
         .or_else(|| modified.map(DateTime::<Utc>::from));
-    let diagnostics = projection
+    let diagnostics = session
         .malformed_lines
         .into_iter()
         .map(|line_number| ParseError {
@@ -185,7 +204,7 @@ pub(super) fn transcript_of(
         end: bytes,
         inherited: false,
     }];
-    let cwd = projection.header.cwd;
+    let cwd = session.header.cwd;
     Transcript {
         revision: Revision::of(source, &segments, &[super::claude::mtime_ns(modified)]),
         key,
@@ -194,17 +213,17 @@ pub(super) fn transcript_of(
         mode: ExecutionMode::Unknown,
         relationship: Relationship::Root,
         meta: SessionMeta {
-            session_id: projection.header.id,
+            session_id: session.header.id,
             cwd: Some(cwd.clone()),
             project: Some(cwd),
-            model: records.model,
-            summary: records.summary,
-            custom_title: records.custom_title,
+            model,
+            summary: None,
+            custom_title,
             updated_at,
         },
         segments,
         // The session header is a record too.
-        records: records.count + 1,
+        records: records + 1,
         events: Vec::new(),
         diagnostics,
     }

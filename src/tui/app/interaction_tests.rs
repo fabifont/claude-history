@@ -9,7 +9,7 @@ fn test_conversation(path: PathBuf, custom_title: Option<String>) -> Conversatio
         full_text = format!("{} {}", title, full_text);
     }
     Conversation {
-        source: crate::history::Source::Claude,
+        source: crate::history::model::SourceKind::Claude,
         session_id: path
             .file_stem()
             .and_then(|name| name.to_str())
@@ -522,7 +522,7 @@ fn orphaned_conversations_refuse_every_action() {
     let path = dir.path().join("abc123.jsonl");
     write_conversation(&path, None);
     let mut conversation = test_conversation(path, None);
-    conversation.source = crate::history::Source::Codex;
+    conversation.source = crate::history::model::SourceKind::Codex;
     conversation.provenance.orphaned = true;
     let mut app = App::new(
         vec![conversation],
@@ -551,7 +551,7 @@ fn codex_conversations_resume_but_do_not_rename() {
     let path = dir.path().join("abc123.jsonl");
     write_conversation(&path, None);
     let mut conversation = test_conversation(path.clone(), None);
-    conversation.source = crate::history::Source::Codex;
+    conversation.source = crate::history::model::SourceKind::Codex;
     let mut app = App::new(
         vec![conversation],
         ToolDisplayMode::Hidden,

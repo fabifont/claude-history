@@ -167,10 +167,10 @@ fn without_a_generation_rows_wait() {
 fn snapshot_pi_rows_match_workspace_by_canonical_project_path() {
     let current = std::env::current_dir().unwrap();
     let mut here = conversation("/pi/sessions/here.jsonl", HOUR_MS);
-    here.source = crate::history::Source::Pi;
+    here.source = crate::history::model::SourceKind::Pi;
     here.project_path = Some(current.clone());
     let mut elsewhere = conversation("/pi/sessions/elsewhere.jsonl", 2 * HOUR_MS);
-    elsewhere.source = crate::history::Source::Pi;
+    elsewhere.source = crate::history::model::SourceKind::Pi;
     elsewhere.project_path = Some(PathBuf::from("/tmp/elsewhere-project"));
     let root = publish(&[here, elsewhere]);
 

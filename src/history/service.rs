@@ -1,6 +1,7 @@
 //! Opens conversations by key: resolves the history the key selects
 //! through its instance's adapter and decodes it, reusing the transcript
-//! decoded last while the history's artifacts are unchanged.
+//! decoded last while the history's artifacts are unchanged. The
+//! transcripts of the conversations opened most recently are kept.
 
 use super::adapter::{Located, Stamp};
 use super::model::{ConversationKey, Revision, Transcript};
@@ -9,12 +10,24 @@ use crate::error::{AppError, Result};
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
+
+/// How many decoded transcripts a service keeps.
+const KEPT: usize = 8;
+
+type Opened = HashMap<ConversationKey, (u64, Stamp, Arc<Transcript>)>;
 
 pub struct HistoryService {
     registry: Registry,
-    opened: Mutex<HashMap<ConversationKey, (Stamp, Arc<Transcript>)>>,
+    opened: Mutex<(u64, Opened)>,
+}
+
+/// The service over the instances the environment configures, shared by
+/// the whole process.
+pub fn shared() -> &'static HistoryService {
+    static SHARED: OnceLock<HistoryService> = OnceLock::new();
+    SHARED.get_or_init(HistoryService::default)
 }
 
 /// The instances the environment configures.
@@ -53,8 +66,19 @@ impl HistoryService {
         };
         let transcript = Arc::new(transcript);
         if located.stamp.is_known() {
-            self.lock()
-                .insert(key.clone(), (located.stamp, transcript.clone()));
+            let mut opened = self.lock();
+            let (clock, kept) = &mut *opened;
+            *clock += 1;
+            if kept.len() >= KEPT && !kept.contains_key(key) {
+                let oldest = kept
+                    .iter()
+                    .min_by_key(|(_, (used, ..))| *used)
+                    .map(|(key, _)| key.clone());
+                if let Some(oldest) = oldest {
+                    kept.remove(&oldest);
+                }
+            }
+            kept.insert(key.clone(), (*clock, located.stamp, transcript.clone()));
         }
         Ok((transcript.revision, transcript))
     }
@@ -72,14 +96,18 @@ impl HistoryService {
     }
 
     fn reusable(&self, key: &ConversationKey, located: &Located) -> Option<Arc<Transcript>> {
-        let opened = self.lock();
-        let (stamp, transcript) = opened.get(key)?;
-        (located.stamp.is_known() && *stamp == located.stamp).then(|| transcript.clone())
+        let mut opened = self.lock();
+        let (clock, kept) = &mut *opened;
+        let (used, stamp, transcript) = kept.get_mut(key)?;
+        if !located.stamp.is_known() || *stamp != located.stamp {
+            return None;
+        }
+        *clock += 1;
+        *used = *clock;
+        Some(transcript.clone())
     }
 
-    fn lock(
-        &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<ConversationKey, (Stamp, Arc<Transcript>)>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, (u64, Opened)> {
         self.opened
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -120,7 +148,7 @@ mod tests {
         let service = HistoryService::new(Registry::with_roots(Some(root.clone()), None, None));
         let key = ConversationKey {
             instance: SourceInstance {
-                kind: crate::history::Source::Claude,
+                kind: crate::history::model::SourceKind::Claude,
                 root,
             },
             native_id: "-p/s.jsonl".to_owned(),

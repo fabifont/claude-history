@@ -2,8 +2,9 @@
 //! plans it: resume or fork it in that tool, delete it, rename it.
 
 use crate::error::{AppError, Result};
+use crate::history::Provenance;
+use crate::history::model::SourceKind;
 use crate::history::sources::Registry;
-use crate::history::{Provenance, Source};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -34,7 +35,7 @@ impl Capabilities {
 
 /// The actions the adapter of `source` supports for a conversation of
 /// `provenance`: none for an orphaned one, which its tool no longer has.
-pub fn capabilities_of(source: Source, provenance: Provenance) -> Capabilities {
+pub fn capabilities_of(source: SourceKind, provenance: Provenance) -> Capabilities {
     if provenance.orphaned {
         return Capabilities::NONE;
     }
@@ -46,7 +47,7 @@ pub fn capabilities_of(source: Source, provenance: Provenance) -> Capabilities {
 
 /// Why `doing` ("Deleting", ...) is unavailable for a conversation of
 /// `source` and `provenance`.
-pub fn refusal(source: Source, provenance: Provenance, doing: &str) -> String {
+pub fn refusal(source: SourceKind, provenance: Provenance, doing: &str) -> String {
     if provenance.orphaned {
         format!(
             "{doing} is unavailable: {} no longer has this conversation's current history",
@@ -146,11 +147,16 @@ mod tests {
     #[test]
     fn every_source_has_an_acting_adapter() {
         let registry = Registry::with_roots(None, None, None);
-        for source in [Source::Claude, Source::Pi, Source::Omp, Source::Codex] {
+        for source in [
+            SourceKind::Claude,
+            SourceKind::Pi,
+            SourceKind::Omp,
+            SourceKind::Codex,
+        ] {
             let adapter = registry.for_source(source);
             assert_eq!(adapter.instance().kind, source);
             let capabilities = adapter.capabilities();
-            assert_eq!(capabilities.rename, source != Source::Codex);
+            assert_eq!(capabilities.rename, source != SourceKind::Codex);
             assert!(capabilities.resume && capabilities.fork && capabilities.delete);
         }
     }

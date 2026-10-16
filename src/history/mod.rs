@@ -25,8 +25,8 @@ pub mod pi;
 pub mod pi_loader;
 mod rename;
 pub mod service;
-mod session_loader;
 pub mod sources;
+pub mod view;
 
 pub(crate) use messages::{MessageOrdinals, Placement};
 
@@ -39,42 +39,11 @@ use std::time::SystemTime;
 // Re-export public API
 pub use loader::{
     DeleteEmptyScope, delete_empty_transcripts, delete_session_by_uuid, find_jsonl_by_uuid,
-    load_all_conversations,
 };
 pub(crate) use messages::{extract_skill_preview, retained_user_text};
 pub(crate) use parser::process_conversation_file;
 pub use path::{convert_path_to_project_dir_name, format_short_name_from_path, is_same_project};
 pub use rename::append_session_rename;
-
-/// The tool that wrote a conversation.
-pub use model::SourceKind as Source;
-
-pub use pi::detect_source;
-
-pub fn normalized_log_entries(
-    path: &std::path::Path,
-) -> Result<Vec<(usize, crate::claude::LogEntry)>> {
-    if let Some(entries) = sources::codex::view::log_entries(path)? {
-        return Ok(entries);
-    }
-    if let Some(projection) = pi::parse_file(path)? {
-        return Ok(projection.entries);
-    }
-    let file = std::fs::File::open(path)?;
-    let reader = std::io::BufReader::new(file);
-    use std::io::BufRead;
-    let mut entries = Vec::new();
-    for (line_index, line) in reader.lines().enumerate() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(entry) = serde_json::from_str(&line) {
-            entries.push((line_index + 1, entry));
-        }
-    }
-    Ok(entries)
-}
 
 /// Represents a JSONL parsing error with context for debugging
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -90,7 +59,7 @@ pub struct ParseError {
 
 #[derive(Clone)]
 pub struct Conversation {
-    pub source: Source,
+    pub source: model::SourceKind,
     pub session_id: String,
     pub path: PathBuf,
     pub index: usize,

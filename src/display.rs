@@ -1,8 +1,9 @@
-use crate::claude::{AssistantMessage, ContentBlock, LogEntry, UserContent};
 use crate::cli::DebugLevel;
 use crate::debug;
 use crate::debug_log;
 use crate::error::Result;
+use crate::history::model::{Message, Part, Role};
+use crate::history::view::{self, Entry, EntryKind};
 use crate::markdown::render_markdown;
 use crate::pager;
 use crate::tool_format;
@@ -11,7 +12,7 @@ use crate::tui::viewer::process_command_message;
 use colored::{ColoredString, Colorize, CustomColor};
 use crossterm::terminal;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::path::Path;
 
 /// Configuration options for displaying conversations
@@ -486,139 +487,77 @@ fn process_log_entries<F: OutputFormatter>(
     options: &DisplayOptions,
     formatter: &mut F,
 ) -> Result<()> {
-    if let Some(entries) = crate::history::sources::codex::view::log_entries(file_path)? {
-        for (_, entry) in entries {
-            process_entry(formatter, &entry, options.no_tools, options.show_thinking);
-        }
-        return Ok(());
-    }
-    if crate::history::detect_source(file_path)?.is_some()
-        && let Some(projection) = crate::history::pi::parse_file(file_path)?
-    {
+    let (_, transcript) = crate::history::service::shared().open_path(file_path)?;
+    for diagnostic in &transcript.diagnostics {
+        debug::error(
+            options.debug_level,
+            &format!(
+                "Failed to parse line {}: {}",
+                diagnostic.line_number, diagnostic.error_message
+            ),
+        );
         if options.debug_level.is_some() {
-            process_raw_log_entries::<F>(file_path, options, None)?;
-        }
-        for (_, entry) in projection.entries {
-            process_entry(formatter, &entry, options.no_tools, options.show_thinking);
-        }
-        return Ok(());
-    }
-
-    process_raw_log_entries(file_path, options, Some(formatter))
-}
-
-fn process_raw_log_entries<F: OutputFormatter>(
-    file_path: &Path,
-    options: &DisplayOptions,
-    mut formatter: Option<&mut F>,
-) -> Result<()> {
-    let reader = BufReader::new(File::open(file_path)?);
-    for (line_number, line_result) in reader.lines().enumerate() {
-        let line = line_result?;
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        match serde_json::from_str::<LogEntry>(&line) {
-            Ok(entry) => {
-                if let Some(formatter) = formatter.as_deref_mut() {
-                    process_entry(formatter, &entry, options.no_tools, options.show_thinking);
-                }
-            }
-            Err(e) => {
-                debug::error(
-                    options.debug_level,
-                    &format!("Failed to parse line {}: {}", line_number + 1, e),
-                );
-                if options.debug_level.is_some() {
-                    let _ = debug_log::log_display_error(
-                        file_path,
-                        line_number + 1,
-                        &e.to_string(),
-                        &line,
-                    );
-                }
-            }
+            let _ = debug_log::log_display_error(
+                file_path,
+                diagnostic.line_number,
+                &diagnostic.error_message,
+                &diagnostic.line_content,
+            );
         }
     }
-
+    for entry in view::entries(&transcript) {
+        process_entry(formatter, &entry, options.no_tools, options.show_thinking);
+    }
     Ok(())
 }
 
 /// Process a log entry using the provided formatter
 fn process_entry<F: OutputFormatter>(
     formatter: &mut F,
-    entry: &LogEntry,
+    entry: &Entry<'_>,
     no_tools: bool,
     show_thinking: bool,
 ) {
-    match entry {
-        LogEntry::Summary { .. }
-        | LogEntry::FileHistorySnapshot { .. }
-        | LogEntry::System { .. }
-        | LogEntry::CustomTitle { .. }
-        | LogEntry::AiTitle { .. }
-        | LogEntry::AgentName { .. }
-        | LogEntry::PermissionMode { .. }
-        | LogEntry::PiMetadata {
+    match entry.kind {
+        EntryKind::Hidden
+        | EntryKind::Note {
             searchable: false, ..
-        }
-        | LogEntry::Unknown => {
+        } => {
             // Skip metadata entries
         }
-        LogEntry::PiMetadata {
+        EntryKind::Note {
             label,
             text,
             searchable: true,
-            ..
         } => {
             let content = if text.is_empty() {
                 format!("[{label}]")
             } else {
                 format!("[{label}] {text}")
             };
-            process_user_message(
-                formatter,
-                &crate::claude::UserMessage {
-                    role: "user".to_owned(),
-                    content: UserContent::String(content),
-                },
-                no_tools,
-                None,
-            );
+            process_user_message(formatter, &[Part::Text(content)], no_tools, None);
         }
-        LogEntry::Progress { data, .. } => {
-            // Handle agent_progress entries (only when show_thinking is enabled)
-            if show_thinking && let Some(agent_progress) = crate::claude::parse_agent_progress(data)
-            {
-                process_agent_message(formatter, &agent_progress, no_tools);
+        EntryKind::Subagent { agent_id, message } => {
+            // Subagent progress is shown only when show_thinking is enabled
+            if show_thinking {
+                process_agent_message(formatter, agent_id, message, no_tools);
             }
         }
-        LogEntry::User {
-            message,
-            parent_tool_use_id,
-            ..
-        } => {
-            if parent_tool_use_id.is_some() && !show_thinking {
+        EntryKind::Message { message, .. } => {
+            let parent_id = message.parent_tool_use_id.as_deref();
+            if parent_id.is_some() && !show_thinking {
                 return;
             }
-            process_user_message(formatter, message, no_tools, parent_tool_use_id.as_deref());
-        }
-        LogEntry::Assistant {
-            message,
-            parent_tool_use_id,
-            ..
-        } => {
-            if parent_tool_use_id.is_some() && !show_thinking {
-                return;
+            match message.role {
+                Role::User => process_user_message(formatter, &message.parts, no_tools, parent_id),
+                Role::Assistant => process_assistant_message(
+                    formatter,
+                    &message.parts,
+                    no_tools,
+                    show_thinking,
+                    parent_id,
+                ),
             }
-            process_assistant_message(
-                formatter,
-                message,
-                no_tools,
-                show_thinking,
-                parent_tool_use_id.as_deref(),
-            );
         }
     }
 }
@@ -626,54 +565,40 @@ fn process_entry<F: OutputFormatter>(
 /// Process a user message using the provided formatter
 fn process_user_message<F: OutputFormatter>(
     formatter: &mut F,
-    message: &crate::claude::UserMessage,
+    parts: &[Part],
     no_tools: bool,
     parent_id: Option<&str>,
 ) {
     let agent_id = parent_id.map(subagent_display_id);
 
-    match &message.content {
-        UserContent::String(text) => {
-            if let Some(processed) = process_command_message(text) {
-                if let Some(ref id) = agent_id {
-                    formatter.format_agent_user_text(id, &processed);
-                } else {
-                    formatter.format_user_text(&processed);
-                }
-                formatter.end_message();
-            }
-        }
-        UserContent::Blocks(blocks) => {
-            let mut printed_content = false;
-            for block in blocks {
-                match block {
-                    ContentBlock::Text { text } => {
-                        if let Some(processed) = process_command_message(text) {
-                            if let Some(ref id) = agent_id {
-                                formatter.format_agent_user_text(id, &processed);
-                            } else {
-                                formatter.format_user_text(&processed);
-                            }
-                            printed_content = true;
-                        }
+    let mut printed_content = false;
+    for part in parts {
+        match part {
+            Part::Text(text) => {
+                if let Some(processed) = process_command_message(text) {
+                    if let Some(ref id) = agent_id {
+                        formatter.format_agent_user_text(id, &processed);
+                    } else {
+                        formatter.format_user_text(&processed);
                     }
-                    ContentBlock::ToolResult { content, .. } => {
-                        if !no_tools {
-                            if let Some(ref id) = agent_id {
-                                formatter.format_agent_tool_result(id, content.as_ref());
-                            } else {
-                                formatter.format_tool_result(content.as_ref());
-                            }
-                            printed_content = true;
-                        }
-                    }
-                    _ => {}
+                    printed_content = true;
                 }
             }
-            if printed_content {
-                formatter.end_message();
+            Part::ToolResult { output, .. } => {
+                if !no_tools {
+                    if let Some(ref id) = agent_id {
+                        formatter.format_agent_tool_result(id, output.as_ref());
+                    } else {
+                        formatter.format_tool_result(output.as_ref());
+                    }
+                    printed_content = true;
+                }
             }
+            _ => {}
         }
+    }
+    if printed_content {
+        formatter.end_message();
     }
 }
 
@@ -684,19 +609,17 @@ struct FormattedMessage<'a> {
     thinking_steps: Vec<&'a str>,
 }
 
-impl<'a> From<&'a AssistantMessage> for FormattedMessage<'a> {
-    fn from(msg: &'a AssistantMessage) -> Self {
+impl<'a> From<&'a [Part]> for FormattedMessage<'a> {
+    fn from(parts: &'a [Part]) -> Self {
         let mut text_blocks = Vec::new();
         let mut tool_calls = Vec::new();
         let mut thinking_steps = Vec::new();
 
-        for block in &msg.content {
-            match block {
-                ContentBlock::Text { text } => text_blocks.push(text.as_str()),
-                ContentBlock::ToolUse { name, input, .. } => {
-                    tool_calls.push((name.as_str(), input))
-                }
-                ContentBlock::Thinking { thinking, .. } => thinking_steps.push(thinking.as_str()),
+        for part in parts {
+            match part {
+                Part::Text(text) => text_blocks.push(text.as_str()),
+                Part::ToolCall { name, input, .. } => tool_calls.push((name.as_str(), input)),
+                Part::Thinking(thinking) => thinking_steps.push(thinking.as_str()),
                 _ => {}
             }
         }
@@ -712,12 +635,12 @@ impl<'a> From<&'a AssistantMessage> for FormattedMessage<'a> {
 /// Process an assistant message using the provided formatter
 fn process_assistant_message<F: OutputFormatter>(
     formatter: &mut F,
-    message: &AssistantMessage,
+    parts: &[Part],
     no_tools: bool,
     show_thinking: bool,
     parent_id: Option<&str>,
 ) {
-    let formatted = FormattedMessage::from(message);
+    let formatted = FormattedMessage::from(parts);
     let mut printed_content = false;
     let agent_id = parent_id.map(subagent_display_id);
 
@@ -768,15 +691,12 @@ fn short_agent_id(agent_id: &str) -> &str {
     &agent_id[..agent_id.len().min(7)]
 }
 
-/// Aggregate text content blocks and render them with the caller-specific formatter.
-fn render_agent_text_blocks(
-    blocks: &[crate::claude::ContentBlock],
-    mut format_text: impl FnMut(&str),
-) -> bool {
-    let texts: Vec<&str> = blocks
+/// Aggregate text parts and render them with the caller-specific formatter.
+fn render_agent_text_blocks(parts: &[Part], mut format_text: impl FnMut(&str)) -> bool {
+    let texts: Vec<&str> = parts
         .iter()
-        .filter_map(|block| match block {
-            crate::claude::ContentBlock::Text { text } => Some(text.as_str()),
+        .filter_map(|part| match part {
+            Part::Text(text) => Some(text.as_str()),
             _ => None,
         })
         .collect();
@@ -793,61 +713,47 @@ fn render_agent_text_blocks(
 /// Process an agent progress message using the provided formatter
 fn process_agent_message<F: OutputFormatter>(
     formatter: &mut F,
-    agent_progress: &crate::claude::AgentProgressData,
+    agent_id: &str,
+    message: &Message,
     no_tools: bool,
 ) {
-    use crate::claude::{AgentContent, ContentBlock};
-
-    let agent_id = &agent_progress.agent_id;
-    let msg = &agent_progress.message;
-
-    match msg.message_type.as_str() {
-        "user" => {
+    let parts = &message.parts;
+    let mut printed = false;
+    match message.role {
+        Role::User => {
             // User messages in agent context are typically tool results or the initial prompt
-            let AgentContent::Blocks(blocks) = &msg.message.content;
-            let mut printed = false;
-
-            printed |= render_agent_text_blocks(blocks, |text| {
+            printed |= render_agent_text_blocks(parts, |text| {
                 formatter.format_agent_user_text(agent_id, text);
             });
 
             // Tool results
-            for block in blocks {
-                if let ContentBlock::ToolResult { content, .. } = block
+            for part in parts {
+                if let Part::ToolResult { output, .. } = part
                     && !no_tools
                 {
-                    formatter.format_agent_tool_result(agent_id, content.as_ref());
+                    formatter.format_agent_tool_result(agent_id, output.as_ref());
                     printed = true;
                 }
             }
-
-            if printed {
-                formatter.end_message();
-            }
         }
-        "assistant" => {
-            let AgentContent::Blocks(blocks) = &msg.message.content;
-            let mut printed = false;
-
-            printed |= render_agent_text_blocks(blocks, |text| {
+        Role::Assistant => {
+            printed |= render_agent_text_blocks(parts, |text| {
                 formatter.format_agent_assistant_text(agent_id, text);
             });
 
             // Tool calls
-            for block in blocks {
-                if let ContentBlock::ToolUse { name, input, .. } = block
+            for part in parts {
+                if let Part::ToolCall { name, input, .. } = part
                     && !no_tools
                 {
                     formatter.format_agent_tool_call(agent_id, name, input);
                     printed = true;
                 }
             }
-
-            if printed {
-                formatter.end_message();
-            }
         }
-        _ => {}
+    }
+    if printed {
+        formatter.end_message();
     }
 }
 
@@ -855,6 +761,8 @@ fn process_agent_message<F: OutputFormatter>(
 pub fn render_to_terminal(file_path: &Path, options: &DisplayOptions) -> Result<()> {
     use crate::tui::{RenderOptions, render_conversation};
     use std::collections::BTreeSet;
+
+    let (_, transcript) = crate::history::service::shared().open_path(file_path)?;
 
     let terminal_width = get_terminal_width();
     let content_width = terminal_width.saturating_sub(NAME_WIDTH + SEPARATOR_WIDTH);
@@ -871,7 +779,7 @@ pub fn render_to_terminal(file_path: &Path, options: &DisplayOptions) -> Result<
         expanded_tool_outputs: BTreeSet::new(),
     };
 
-    let rendered = render_conversation(file_path, &render_options)?;
+    let rendered = render_conversation(&transcript, &render_options);
     let rendered_lines = rendered.lines;
 
     // Spawn pager if requested

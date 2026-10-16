@@ -98,7 +98,6 @@ pub enum Contents {
 /// session files are parsed instead.
 pub fn load_conversations(
     show_last: bool,
-    debug_level: Option<crate::cli::DebugLevel>,
     contents: Contents,
 ) -> crate::error::Result<Vec<Conversation>> {
     if let Some(conversations) =
@@ -106,7 +105,35 @@ pub fn load_conversations(
     {
         return Ok(conversations);
     }
-    crate::history::load_all_conversations(show_last, debug_level)
+    load_in_memory(show_last)
+}
+
+/// Every conversation the environment's instances hold, parsed in memory
+/// and newest first: the corpus of a run without a store. Fails when no
+/// instance has a history to read.
+pub fn load_in_memory(show_last: bool) -> crate::error::Result<Vec<Conversation>> {
+    let sources = crate::history::sources::Registry::from_env();
+    if !sources
+        .adapters()
+        .iter()
+        .any(|adapter| adapter.instance().root.exists())
+    {
+        let root = crate::history::get_claude_projects_root()?;
+        return Err(crate::error::AppError::ProjectsDirNotFound(
+            root.display().to_string(),
+        ));
+    }
+    let mut conversations = reconcile::parse_everything(&sources);
+    conversations.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+    for (index, conversation) in conversations.iter_mut().enumerate() {
+        conversation.index = index;
+        conversation.preview = if show_last {
+            conversation.preview_last.clone()
+        } else {
+            conversation.preview_first.clone()
+        };
+    }
+    Ok(conversations)
 }
 
 fn load_from_store(root: &Path, show_last: bool, contents: Contents) -> Option<Vec<Conversation>> {
@@ -499,7 +526,8 @@ mod tests {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use crate::history::{Conversation, Source};
+    use crate::history::Conversation;
+    use crate::history::model::SourceKind;
     use chrono::{Local, TimeZone};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -520,7 +548,7 @@ pub(crate) mod test_support {
             .map(str::to_owned);
         let empty: Arc<str> = Arc::from("");
         Conversation {
-            source: Source::Claude,
+            source: SourceKind::Claude,
             session_id,
             path,
             index: 0,

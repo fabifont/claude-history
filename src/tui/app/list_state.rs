@@ -112,7 +112,7 @@ impl App {
             .map(|&idx| self.conversations[idx].path.clone())
     }
 
-    pub(crate) fn get_selected_source(&self) -> Option<crate::history::Source> {
+    pub(crate) fn get_selected_source(&self) -> Option<crate::history::model::SourceKind> {
         self.get_selected_conversation_index()
             .map(|index| self.conversations[index].source)
     }
@@ -230,7 +230,7 @@ where
             else {
                 return true;
             };
-            if conversations[idx].borrow().source != crate::history::Source::Claude {
+            if conversations[idx].borrow().source != crate::history::model::SourceKind::Claude {
                 let Ok(current) = std::env::current_dir() else {
                     return false;
                 };

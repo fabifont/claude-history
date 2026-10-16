@@ -507,7 +507,7 @@ mod tests {
 
     fn conversation(preview: &str, full_text: &str) -> Conversation {
         Conversation {
-            source: crate::history::Source::Claude,
+            source: crate::history::model::SourceKind::Claude,
             session_id: "session".to_owned(),
             path: PathBuf::from("/tmp/session.jsonl"),
             index: 0,

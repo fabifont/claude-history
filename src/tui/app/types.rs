@@ -1,8 +1,7 @@
+use crate::history::model::Transcript;
 use crate::search::query::ParsedQuery;
 use crate::semantic::types::{SemanticExplanation, SemanticScoreBreakdown};
-use crate::tui::viewer::{
-    MessageRange, RenderableEntry, RenderedLine, ToolDisplayMode, ToolOutputId,
-};
+use crate::tui::viewer::{MessageRange, RenderedLine, ToolDisplayMode, ToolOutputId};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,8 +50,8 @@ pub enum AppMode {
 pub struct ViewState {
     /// Path to the conversation file (stable identity)
     pub conversation_path: PathBuf,
-    /// Parsed renderable entries for the currently open view.
-    pub parsed_entries: Option<Arc<Vec<RenderableEntry>>>,
+    /// The conversation open in the view, once decoded.
+    pub transcript: Option<Arc<Transcript>>,
     /// Current scroll position (line offset)
     pub scroll_offset: usize,
     /// Pre-rendered conversation lines
@@ -128,7 +127,7 @@ impl ViewState {
     ) -> Self {
         Self {
             conversation_path,
-            parsed_entries: None,
+            transcript: None,
             scroll_offset: 0,
             rendered_lines: Vec::new(),
             total_lines: 0,

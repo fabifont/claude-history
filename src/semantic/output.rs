@@ -80,7 +80,7 @@ mod tests {
 
     fn conversation() -> Conversation {
         Conversation {
-            source: crate::history::Source::Claude,
+            source: crate::history::model::SourceKind::Claude,
             session_id: "session-1".to_owned(),
             path: PathBuf::from("/projects/project-a/session-1.jsonl"),
             index: 0,

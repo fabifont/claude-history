@@ -17,10 +17,11 @@ use super::generation::{
     self, Doc, Generation, MergePolicy, Publish, PublishLock, Update, Written,
 };
 use super::legacy;
+use crate::history::Conversation;
 use crate::history::adapter::{Completeness, FileId, Located};
 use crate::history::index::Indexer;
+use crate::history::model::SourceKind;
 use crate::history::sources::Registry;
-use crate::history::{Conversation, Source};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -146,12 +147,12 @@ fn open_base(root: &Path) -> Option<Generation> {
 struct Found {
     located: Located,
     /// Other sources whose root holds this same file.
-    also: Vec<Source>,
+    also: Vec<SourceKind>,
     fingerprint: Fingerprint,
 }
 
 impl Found {
-    fn source(&self) -> Source {
+    fn source(&self) -> SourceKind {
         self.located.key.instance.kind
     }
 }
@@ -160,12 +161,12 @@ impl Found {
 struct Scan {
     files: Vec<Found>,
     /// How much of each instance the scan saw.
-    completeness: Vec<(Source, Completeness)>,
+    completeness: Vec<(SourceKind, Completeness)>,
 }
 
 impl Scan {
     /// Whether the scan may have missed `path` of `source`.
-    fn misses(&self, path: &Path, source: Source) -> bool {
+    fn misses(&self, path: &Path, source: SourceKind) -> bool {
         self.completeness
             .iter()
             .any(|(kind, completeness)| *kind == source && completeness.may_miss(path))
@@ -209,6 +210,17 @@ fn scan(sources: &Registry) -> Scan {
         }
     }
     scan
+}
+
+/// Every conversation of every instance of `sources`, parsed in memory.
+pub fn parse_everything(sources: &Registry) -> Vec<Conversation> {
+    parse_all(scan(sources).files, sources)
+        .into_iter()
+        .filter_map(|(_, parsed)| match parsed {
+            Parsed::Conversation(conversation) => Some(*conversation),
+            Parsed::Ignored | Parsed::Gone | Parsed::Failed => None,
+        })
+        .collect()
 }
 
 /// The scan compared with the base generation.
@@ -278,9 +290,14 @@ fn diff(base: Option<&Generation>, scan: &Scan) -> Plan {
     }
     for (path, fingerprint) in &ignored {
         if !seen_ignored.contains(path.as_str())
-            && [Source::Claude, Source::Pi, Source::Omp, Source::Codex]
-                .into_iter()
-                .any(|source| scan.misses(Path::new(path), source))
+            && [
+                SourceKind::Claude,
+                SourceKind::Pi,
+                SourceKind::Omp,
+                SourceKind::Codex,
+            ]
+            .into_iter()
+            .any(|source| scan.misses(Path::new(path), source))
         {
             plan.ignored.push((path.clone(), *fingerprint));
         }
@@ -345,7 +362,7 @@ fn parse(found: &Found, sources: &Registry) -> Parsed {
         Err(_) => return Parsed::Failed,
     };
     let source = found.source();
-    if source != Source::Claude
+    if source != SourceKind::Claude
         && transcript.source != source
         && !found.also.contains(&transcript.source)
     {
@@ -551,7 +568,7 @@ mod tests {
         let generation = fixture.current();
         let sources: Vec<_> = generation.rows().iter().map(|row| row.source).collect();
         assert_eq!(generation.rows().len(), 3, "{:?}", fixture.paths());
-        for source in [Source::Claude, Source::Pi, Source::Omp] {
+        for source in [SourceKind::Claude, SourceKind::Pi, SourceKind::Omp] {
             assert!(sources.contains(&crate::store::card::source_to_u8(source)));
         }
         assert!(!fixture.paths().iter().any(|path| path.contains("agent-1")));
@@ -594,7 +611,7 @@ mod tests {
         };
         assert_eq!(
             source_of(&omp),
-            Some(crate::store::card::source_to_u8(Source::Omp))
+            Some(crate::store::card::source_to_u8(SourceKind::Omp))
         );
         assert_eq!(generation.rows().len(), 2, "{:?}", fixture.paths());
         let unchanged = fixture.run();
@@ -729,7 +746,7 @@ mod tests {
 
         let generation = fixture.current();
         let codex_rows: Vec<usize> = (0..generation.rows().len())
-            .filter(|&row| generation.rows()[row].source == card::source_to_u8(Source::Codex))
+            .filter(|&row| generation.rows()[row].source == card::source_to_u8(SourceKind::Codex))
             .collect();
         assert_eq!(codex_rows.len(), 9);
         let flags_of = |thread: &str| {

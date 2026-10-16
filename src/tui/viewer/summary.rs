@@ -1,4 +1,6 @@
-use crate::claude::{ContentBlock, LogEntry, UserContent};
+use crate::history::model::{Part, Role};
+use crate::history::view::{Entry, EntryKind};
+use chrono::{DateTime, Utc};
 
 use super::ledger::{LedgerRow, NameCol, push_row};
 use super::style::assistant_label;
@@ -15,8 +17,8 @@ pub(super) struct PendingToolSummary {
     pub(super) first_parsed_idx: usize,
     pub(super) last_parsed_idx: usize,
     pub(super) parent_id: Option<String>,
-    pub(super) agent: Option<String>,
-    pub(super) timestamp: Option<String>,
+    pub(super) speaker: String,
+    pub(super) timestamp: Option<DateTime<Utc>>,
     pub(super) summary: ToolActivitySummary,
 }
 
@@ -158,82 +160,74 @@ pub(super) fn render_tool_activity_summary(
     );
 }
 
-pub(super) fn summarize_tool_calls(blocks: &[ContentBlock]) -> ToolActivitySummary {
+pub(super) fn summarize_tool_calls(parts: &[Part]) -> ToolActivitySummary {
     let mut summary = ToolActivitySummary::default();
-    for block in blocks {
-        if let ContentBlock::ToolUse { name, .. } = block {
+    for part in parts {
+        if let Part::ToolCall { name, .. } = part {
             summary.add_call(name);
         }
     }
     summary
 }
 
-fn assistant_blocks_are_tool_only(blocks: &[ContentBlock], show_thinking: bool) -> bool {
-    blocks.iter().all(|block| {
-        matches!(block, ContentBlock::ToolUse { .. })
-            || (!show_thinking && matches!(block, ContentBlock::Thinking { .. }))
+fn assistant_parts_are_tool_only(parts: &[Part], show_thinking: bool) -> bool {
+    parts.iter().all(|part| {
+        matches!(part, Part::ToolCall { .. })
+            || (!show_thinking && matches!(part, Part::Thinking(_)))
     })
 }
 
 pub(super) fn tool_only_assistant_summary<'a>(
-    entry: &'a LogEntry,
+    entry: &Entry<'a>,
     options: &RenderOptions,
 ) -> Option<(
     Option<&'a str>,
-    Option<&'a str>,
-    Option<&'a str>,
+    &'a str,
+    Option<DateTime<Utc>>,
     ToolActivitySummary,
 )> {
-    let LogEntry::Assistant {
-        message,
-        agent,
-        timestamp,
-        parent_tool_use_id,
-        ..
-    } = entry
-    else {
+    let EntryKind::Message { message, speaker } = entry.kind else {
         return None;
     };
-
-    if parent_tool_use_id.is_some() && !options.show_thinking {
+    if message.role != Role::Assistant {
         return None;
     }
-    if message.content.is_empty()
-        || !assistant_blocks_are_tool_only(&message.content, options.show_thinking)
+
+    if message.parent_tool_use_id.is_some() && !options.show_thinking {
+        return None;
+    }
+    if message.parts.is_empty()
+        || !assistant_parts_are_tool_only(&message.parts, options.show_thinking)
     {
         return None;
     }
 
-    let summary = summarize_tool_calls(&message.content);
+    let summary = summarize_tool_calls(&message.parts);
     (!summary.is_empty()).then_some((
-        parent_tool_use_id.as_deref(),
-        agent.as_deref(),
-        timestamp.as_deref(),
+        message.parent_tool_use_id.as_deref(),
+        speaker,
+        entry.timestamp,
         summary,
     ))
 }
 
-pub(super) fn user_entry_is_only_tool_results(entry: &LogEntry, options: &RenderOptions) -> bool {
-    let LogEntry::User {
-        message,
-        parent_tool_use_id,
-        ..
-    } = entry
-    else {
+pub(super) fn user_entry_is_only_tool_results(entry: &Entry<'_>, options: &RenderOptions) -> bool {
+    let EntryKind::Message { message, .. } = entry.kind else {
         return false;
     };
-
-    if parent_tool_use_id.is_some() && !options.show_thinking {
+    if message.role != Role::User {
         return false;
     }
 
-    let UserContent::Blocks(blocks) = &message.content else {
+    if message.parent_tool_use_id.is_some() && !options.show_thinking {
         return false;
-    };
-    !blocks.is_empty()
-        && blocks
+    }
+
+    !message.parts.is_empty()
+        && message
+            .parts
             .iter()
-            .all(|block| matches!(block, ContentBlock::ToolResult { .. }))
+            .all(|part| matches!(part, Part::ToolResult { .. }))
 }
 
 fn render_summary_group_details(
@@ -245,16 +239,19 @@ fn render_summary_group_details(
     let first_line = lines.len();
     let mut rendered_any = false;
     let pad_timing = TimingSlot::from_show_timing(options.show_timing);
-    let label = assistant_label(pending.parent_id.as_deref(), pending.agent.as_deref());
+    let label = assistant_label(pending.parent_id.as_deref(), &pending.speaker);
     for parsed in &entries[pending.first_parsed_idx..=pending.last_parsed_idx] {
-        match &parsed.entry {
-            LogEntry::Assistant {
-                message,
-                parent_tool_use_id,
-                ..
-            } if parent_tool_use_id.as_deref() == pending.parent_id.as_deref() => {
-                for (block_idx, block) in message.content.iter().enumerate() {
-                    if let ContentBlock::ToolUse { id, name, input } = block {
+        let EntryKind::Message { message, .. } = parsed.entry.kind else {
+            continue;
+        };
+        let parent_tool_use_id = &message.parent_tool_use_id;
+        if parent_tool_use_id.as_deref() != pending.parent_id.as_deref() {
+            continue;
+        }
+        match message.role {
+            Role::Assistant => {
+                for (block_idx, block) in message.parts.iter().enumerate() {
+                    if let Part::ToolCall { id, name, input } = block {
                         if rendered_any {
                             lines.push(RenderedLine::new(vec![]));
                         }
@@ -285,19 +282,11 @@ fn render_summary_group_details(
                     }
                 }
             }
-            LogEntry::User {
-                message,
-                parent_tool_use_id,
-                ..
-            } if parent_tool_use_id.as_deref() == pending.parent_id.as_deref() => {
-                let UserContent::Blocks(blocks) = &message.content else {
-                    continue;
-                };
-                for (block_idx, block) in blocks.iter().enumerate() {
-                    if let ContentBlock::ToolResult {
-                        content,
-                        tool_use_id,
-                        ..
+            Role::User => {
+                for (block_idx, block) in message.parts.iter().enumerate() {
+                    if let Part::ToolResult {
+                        output: content,
+                        call_id: tool_use_id,
                     } = block
                     {
                         if rendered_any {
@@ -327,7 +316,6 @@ fn render_summary_group_details(
                     }
                 }
             }
-            _ => {}
         }
     }
     if let Some(line) = lines.get_mut(first_line) {
@@ -348,9 +336,9 @@ pub(super) fn flush_tool_summary(
     };
 
     let start_line = lines.len();
-    let label = assistant_label(pending.parent_id.as_deref(), pending.agent.as_deref());
+    let label = assistant_label(pending.parent_id.as_deref(), &pending.speaker);
     let ts = if options.show_timing {
-        pending.timestamp.as_deref().and_then(format_timestamp)
+        pending.timestamp.map(format_timestamp)
     } else {
         None
     };

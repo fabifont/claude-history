@@ -1,9 +1,12 @@
+//! Pi and OMP session files: a session header, then records linked into a
+//! tree by `parentId`, whose active branch ends at the last record. OMP
+//! files may start with a fixed-size title slot.
+
 use crate::agent::transcript::bounded_tool_result_text;
-use crate::claude::{
-    AssistantMessage, ContentBlock, LogEntry, TokenUsage, UserContent, UserMessage,
-};
 use crate::error::{AppError, Result};
-use crate::history::Source;
+use crate::history::model::{
+    Event, EventKind, Message, Origin, Part, Role, SourceKind, TitleKind, Usage, Visibility,
+};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
@@ -22,12 +25,17 @@ pub struct PiHeader {
     pub cwd: PathBuf,
 }
 
+/// A decoded Pi or OMP session.
 #[derive(Clone, Debug)]
-pub struct PiProjection {
-    pub source: Source,
+pub struct PiSession {
+    pub source: SourceKind,
     pub header: PiHeader,
+    /// The title of an OMP title slot, else of the header.
     pub title: Option<String>,
-    pub entries: Vec<(usize, LogEntry)>,
+    /// The events of the active branch, in order, each at the line of the
+    /// record it was decoded from. The title, when there is one, comes
+    /// first.
+    pub events: Vec<Event>,
     pub leaf_id: Option<String>,
     pub malformed_lines: Vec<usize>,
 }
@@ -40,7 +48,7 @@ struct RawEntry {
     value: Value,
 }
 
-pub fn parse_file(path: &Path) -> Result<Option<PiProjection>> {
+pub fn parse_file(path: &Path) -> Result<Option<PiSession>> {
     let file = File::open(path)?;
     parse_reader(BufReader::new(file), None)
 }
@@ -50,31 +58,50 @@ pub fn parse_file(path: &Path) -> Result<Option<PiProjection>> {
 /// This reads only the first one or two non-empty, valid JSON records needed
 /// to apply the same source recognition rules as `parse_reader`, while
 /// skipping malformed records in the leading prefix.
-pub fn detect_source(path: &Path) -> Result<Option<Source>> {
-    let file = File::open(path)?;
-    detect_source_reader(BufReader::new(file))
+pub fn detect_source(path: &Path) -> Result<Option<SourceKind>> {
+    detect_source_reader(BufReader::new(File::open(path)?))
 }
 
-pub fn parse_omp_file(path: &Path) -> Result<Option<PiProjection>> {
+fn detect_source_reader(reader: impl BufRead) -> Result<Option<SourceKind>> {
+    let parsed = leading_records(reader)?;
+    Ok(detect_source_in_values(&parsed, None).map(|(_, source)| source))
+}
+
+/// The source and header of the session at `path`, read from its leading
+/// records only: `None` when `parse_reader` would not decode it as a session
+/// (of `expected`, when given).
+pub fn read_header(
+    path: &Path,
+    expected: Option<SourceKind>,
+) -> Result<Option<(SourceKind, PiHeader)>> {
     let file = File::open(path)?;
-    parse_reader(BufReader::new(file), Some(Source::Omp))
+    let parsed = leading_records(BufReader::new(file))?;
+    Ok(session_header(&parsed, expected).map(|(_, source, header)| (source, header)))
+}
+
+pub fn parse_omp_file(path: &Path) -> Result<Option<PiSession>> {
+    let file = File::open(path)?;
+    parse_reader(BufReader::new(file), Some(SourceKind::Omp))
 }
 
 pub fn is_pi_file(path: &Path) -> bool {
-    parse_file(path)
+    read_header(path, None)
         .ok()
         .flatten()
-        .is_some_and(|projection| projection.source == Source::Pi)
+        .is_some_and(|(source, _)| source == SourceKind::Pi)
 }
 
 pub fn is_omp_file(path: &Path) -> bool {
-    parse_omp_file(path).ok().flatten().is_some()
+    read_header(path, Some(SourceKind::Omp))
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 pub(crate) fn parse_reader(
     reader: impl BufRead,
-    expected_source: Option<Source>,
-) -> Result<Option<PiProjection>> {
+    expected_source: Option<SourceKind>,
+) -> Result<Option<PiSession>> {
     let mut parsed = Vec::new();
     let mut malformed_lines = Vec::new();
     for (index, line) in reader.lines().enumerate() {
@@ -88,51 +115,27 @@ pub(crate) fn parse_reader(
         }
     }
 
-    let Some((header_index, source)) = detect_source_in_values(&parsed, expected_source) else {
-        return Ok(None);
-    };
-    let Some((_, header_value)) = parsed.get(header_index) else {
-        return Ok(None);
-    };
-    let Some(header_object) = header_value.as_object() else {
+    let Some((header_index, source, header)) = session_header(&parsed, expected_source) else {
         return Ok(None);
     };
     let title_slot = leading_title_slot(&parsed);
-    let title = title_slot
+    let slot_title = title_slot
         .and_then(|slot| slot.get("title"))
         .and_then(Value::as_str)
-        .filter(|title| !title.is_empty())
-        .or_else(|| header_object.get("title").and_then(Value::as_str))
-        .filter(|title| !title.is_empty())
-        .map(str::to_owned);
-    let Some(id) = header_object
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-    else {
-        return Ok(None);
+        .filter(|title| !title.is_empty());
+    let (title_line, title) = match slot_title {
+        Some(title) => (parsed[0].0, Some(title)),
+        None => (
+            parsed[header_index].0,
+            parsed[header_index]
+                .1
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|title| !title.is_empty()),
+        ),
     };
-    let Some(timestamp) = header_object
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-    else {
-        return Ok(None);
-    };
-    let Some(cwd) = header_object
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-    else {
-        return Ok(None);
-    };
-    let version = header_object
-        .get("version")
-        .and_then(Value::as_u64)
-        .unwrap_or(1);
-    if !(1..=MAX_SUPPORTED_VERSION).contains(&version) {
-        return Ok(None);
-    }
+    let title = title.map(str::to_owned);
+    let version = header.version;
 
     let mut raw_entries = Vec::new();
     let mut previous_id: Option<String> = None;
@@ -192,44 +195,56 @@ pub(crate) fn parse_reader(
     }
     active_indices.reverse();
 
-    let mut entries = Vec::new();
+    let mut events = Vec::new();
     if let Some(title) = title.as_ref() {
-        entries.push((
-            1,
-            LogEntry::CustomTitle {
-                custom_title: title.clone(),
+        events.push(event(
+            title_line,
+            None,
+            EventKind::Title {
+                kind: TitleKind::Custom,
+                text: title.clone(),
             },
         ));
     }
-    entries.extend(active_indices.into_iter().filter_map(|index| {
+    events.extend(active_indices.into_iter().filter_map(|index| {
         let raw = &raw_entries[index];
-        normalize_entry(&raw.value, source).map(|entry| (raw.line, entry))
+        let (timestamp, kind) = decode_entry(&raw.value)?;
+        Some(event(raw.line, timestamp, kind))
     }));
 
-    Ok(Some(PiProjection {
+    Ok(Some(PiSession {
         source,
-        header: PiHeader {
-            version,
-            id,
-            timestamp,
-            cwd: PathBuf::from(cwd),
-        },
+        header,
         title,
-        entries,
+        events,
         leaf_id,
         malformed_lines,
     }))
 }
 
-fn detect_source_reader(reader: impl BufRead) -> Result<Option<Source>> {
+fn event(line: usize, timestamp: Option<DateTime<Utc>>, kind: EventKind) -> Event {
+    Event {
+        origin: Origin {
+            segment: 0,
+            line: u32::try_from(line).unwrap_or(u32::MAX),
+        },
+        timestamp,
+        visibility: Visibility::Dialogue,
+        kind,
+    }
+}
+
+/// The first one or two non-empty, valid JSON records of `reader`: enough
+/// to recognize the session's source and read its header.
+fn leading_records(reader: impl BufRead) -> Result<Vec<(usize, Value)>> {
     let mut parsed = Vec::with_capacity(2);
-    for line in reader.lines() {
+    for (index, line) in reader.lines().enumerate() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         if let Ok(value) = serde_json::from_str::<Value>(&line) {
-            parsed.push((0, value));
+            parsed.push((index + 1, value));
             if parsed.len() == 1 && leading_title_slot(&parsed).is_none() {
                 break;
             }
@@ -238,7 +253,38 @@ fn detect_source_reader(reader: impl BufRead) -> Result<Option<Source>> {
             }
         }
     }
-    Ok(detect_source_in_values(&parsed, None).map(|(_, source)| source))
+    Ok(parsed)
+}
+
+/// The position, source and header of the session `parsed` starts, when its
+/// header is valid.
+fn session_header(
+    parsed: &[(usize, Value)],
+    expected_source: Option<SourceKind>,
+) -> Option<(usize, SourceKind, PiHeader)> {
+    let (header_index, source) = detect_source_in_values(parsed, expected_source)?;
+    let header_object = parsed.get(header_index)?.1.as_object()?;
+    let string = |key: &str| header_object.get(key).and_then(Value::as_str);
+    let id = string("id")?.to_owned();
+    let timestamp = string("timestamp")?.to_owned();
+    let cwd = PathBuf::from(string("cwd")?);
+    let version = header_object
+        .get("version")
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
+    if !(1..=MAX_SUPPORTED_VERSION).contains(&version) {
+        return None;
+    }
+    Some((
+        header_index,
+        source,
+        PiHeader {
+            version,
+            id,
+            timestamp,
+            cwd,
+        },
+    ))
 }
 
 fn leading_title_slot(parsed: &[(usize, Value)]) -> Option<&Map<String, Value>> {
@@ -251,8 +297,8 @@ fn leading_title_slot(parsed: &[(usize, Value)]) -> Option<&Map<String, Value>> 
 
 fn detect_source_in_values(
     parsed: &[(usize, Value)],
-    expected_source: Option<Source>,
-) -> Option<(usize, Source)> {
+    expected_source: Option<SourceKind>,
+) -> Option<(usize, SourceKind)> {
     let title_slot = leading_title_slot(parsed);
     let header_index = usize::from(title_slot.is_some());
     let header_object = parsed.get(header_index)?.1.as_object()?;
@@ -260,44 +306,43 @@ fn detect_source_in_values(
         return None;
     }
     let source = if title_slot.is_some() {
-        Source::Omp
+        SourceKind::Omp
     } else {
-        expected_source.unwrap_or(Source::Pi)
+        expected_source.unwrap_or(SourceKind::Pi)
     };
-    if expected_source == Some(Source::Omp) && source != Source::Omp {
+    if expected_source == Some(SourceKind::Omp) && source != SourceKind::Omp {
         return None;
     }
     Some((header_index, source))
 }
 
-fn normalize_entry(value: &Value, source: Source) -> Option<LogEntry> {
+/// The event a record of the active branch decodes into, with its time.
+/// `None` for records that are not part of the conversation.
+fn decode_entry(value: &Value) -> Option<(Option<DateTime<Utc>>, EventKind)> {
     let object = value.as_object()?;
     let entry_type = object
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    let timestamp = object
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    match entry_type {
-        "message" => normalize_message(object.get("message")?, timestamp, source),
-        "compaction" => metadata_with_usage(
+    let timestamp = object.get("timestamp").and_then(Value::as_str);
+    let at = timestamp.and_then(parse_timestamp);
+    let kind = match entry_type {
+        "message" => return decode_message(object.get("message")?, timestamp),
+        "compaction" => note(
             "Compaction",
             object.get("summary").and_then(Value::as_str).unwrap_or(""),
-            timestamp,
             false,
             object.get("usage").and_then(pi_usage),
         ),
-        "branch_summary" => metadata_with_usage(
+        "branch_summary" => note(
             "Branch summary",
             object.get("summary").and_then(Value::as_str).unwrap_or(""),
-            timestamp,
             false,
             object.get("usage").and_then(pi_usage),
         ),
-        "session_info" | "title_change" => Some(LogEntry::CustomTitle {
-            custom_title: object
+        "session_info" | "title_change" => EventKind::Title {
+            kind: TitleKind::Custom,
+            text: object
                 .get(if entry_type == "title_change" {
                     "title"
                 } else {
@@ -306,7 +351,7 @@ fn normalize_entry(value: &Value, source: Source) -> Option<LogEntry> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned(),
-        }),
+        },
         "model_change" => {
             let model = object
                 .get("model")
@@ -325,161 +370,144 @@ fn normalize_entry(value: &Value, source: Source) -> Option<LogEntry> {
                             .unwrap_or("unknown")
                     )
                 });
-            metadata("Model", &model, timestamp, false)
+            note("Model", &model, false, None)
         }
-        "thinking_level_change" | "label" | "custom" => None,
         "custom_message" => {
             if object.get("display").and_then(Value::as_bool) == Some(false) {
                 return None;
             }
             let text = content_text(object.get("content"));
-            metadata(
+            note(
                 object
                     .get("customType")
                     .and_then(Value::as_str)
                     .unwrap_or("Custom"),
                 &text,
-                timestamp,
                 true,
+                None,
             )
         }
-        _ => None,
-    }
+        _ => return None,
+    };
+    Some((at, kind))
 }
 
-fn normalize_message(
+fn decode_message(
     message: &Value,
-    timestamp: Option<String>,
-    source: Source,
-) -> Option<LogEntry> {
+    timestamp: Option<&str>,
+) -> Option<(Option<DateTime<Utc>>, EventKind)> {
     let object = message.as_object()?;
     let role = object.get("role").and_then(Value::as_str)?;
-    let timestamp = timestamp.or_else(|| millis_timestamp(object.get("timestamp")));
-    match role {
-        "user" => Some(LogEntry::User {
-            message: UserMessage {
-                role: "user".to_owned(),
-                content: user_content(object.get("content")),
-            },
-            timestamp,
-            uuid: None,
-            cwd: None,
-            parent_tool_use_id: None,
-            usage: None,
-        }),
-        "assistant" => Some(LogEntry::Assistant {
-            agent: Some(
-                match source {
-                    Source::Omp => "OMP",
-                    _ => "Pi",
-                }
-                .to_owned(),
-            ),
-            message: AssistantMessage {
-                role: "assistant".to_owned(),
-                content: assistant_content(object.get("content")),
-                model: object
+    let at = match timestamp {
+        Some(timestamp) => parse_timestamp(timestamp),
+        None => millis_timestamp(object.get("timestamp")),
+    };
+    let usage = || object.get("usage").and_then(pi_usage);
+    Some(match role {
+        "user" => (
+            at,
+            message_kind(Role::User, user_parts(object.get("content")), None, None),
+        ),
+        "assistant" => (
+            at,
+            message_kind(
+                Role::Assistant,
+                content_parts(object.get("content"), true),
+                object
                     .get("model")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
-                usage: object.get("usage").and_then(pi_usage),
-                id: None,
-            },
-            timestamp,
-            uuid: None,
-            parent_tool_use_id: None,
-        }),
-        "toolResult" => Some(LogEntry::User {
-            message: UserMessage {
-                role: "user".to_owned(),
-                content: UserContent::Blocks(vec![ContentBlock::ToolResult {
-                    tool_use_id: object
+                usage(),
+            ),
+        ),
+        "toolResult" => (
+            None,
+            message_kind(
+                Role::User,
+                vec![Part::ToolResult {
+                    call_id: object
                         .get("toolCallId")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown")
                         .to_owned(),
-                    content: Some(tool_result_content(object)),
-                }]),
-            },
-            timestamp: None,
-            uuid: None,
-            cwd: None,
-            parent_tool_use_id: None,
-            usage: object.get("usage").and_then(pi_usage),
-        }),
-        "bashExecution" => Some(LogEntry::User {
-            message: UserMessage {
-                role: "user".to_owned(),
-                content: UserContent::Blocks(vec![ContentBlock::ToolResult {
-                    tool_use_id: "bashExecution".to_owned(),
-                    content: Some(json!(bash_text(object))),
-                }]),
-            },
-            timestamp: None,
-            uuid: None,
-            cwd: None,
-            parent_tool_use_id: None,
-            usage: None,
-        }),
+                    output: Some(tool_result_content(object)),
+                }],
+                None,
+                usage(),
+            ),
+        ),
+        "bashExecution" => (
+            None,
+            message_kind(
+                Role::User,
+                vec![Part::ToolResult {
+                    call_id: "bashExecution".to_owned(),
+                    output: Some(json!(bash_text(object))),
+                }],
+                None,
+                None,
+            ),
+        ),
         "custom" | "hookMessage" => {
             if object.get("display").and_then(Value::as_bool) == Some(false) {
-                None
-            } else {
-                let label = object
-                    .get("customType")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Custom");
-                let text = content_text(object.get("content"));
-                metadata(label, &text, timestamp, true)
+                return None;
             }
+            let label = object
+                .get("customType")
+                .and_then(Value::as_str)
+                .unwrap_or("Custom");
+            let text = content_text(object.get("content"));
+            (at, note(label, &text, true, None))
         }
-        _ => None,
-    }
-}
-
-fn metadata(
-    label: &str,
-    text: &str,
-    timestamp: Option<String>,
-    searchable: bool,
-) -> Option<LogEntry> {
-    metadata_with_usage(label, text, timestamp, searchable, None)
-}
-
-fn metadata_with_usage(
-    label: &str,
-    text: &str,
-    timestamp: Option<String>,
-    searchable: bool,
-    usage: Option<TokenUsage>,
-) -> Option<LogEntry> {
-    Some(LogEntry::PiMetadata {
-        label: label.to_owned(),
-        text: text.to_owned(),
-        timestamp,
-        searchable,
-        usage,
+        _ => return None,
     })
 }
 
-fn millis_timestamp(value: Option<&Value>) -> Option<String> {
-    let millis = value?.as_i64()?;
-    DateTime::<Utc>::from_timestamp_millis(millis)
-        .map(|time| time.to_rfc3339_opts(SecondsFormat::Millis, true))
+fn message_kind(
+    role: Role,
+    parts: Vec<Part>,
+    model: Option<String>,
+    usage: Option<Usage>,
+) -> EventKind {
+    EventKind::Message(Message {
+        role,
+        id: None,
+        parts,
+        model,
+        usage,
+        parent_tool_use_id: None,
+    })
 }
 
-fn user_content(value: Option<&Value>) -> UserContent {
-    if let Some(text) = value.and_then(Value::as_str) {
-        return UserContent::String(text.to_owned());
+fn note(label: &str, text: &str, searchable: bool, usage: Option<Usage>) -> EventKind {
+    EventKind::Note {
+        label: label.to_owned(),
+        text: text.to_owned(),
+        searchable,
+        usage,
     }
-    UserContent::Blocks(content_blocks(value, false))
 }
 
-fn assistant_content(value: Option<&Value>) -> Vec<ContentBlock> {
-    content_blocks(value, true)
+fn parse_timestamp(text: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
-fn content_blocks(value: Option<&Value>, include_thinking: bool) -> Vec<ContentBlock> {
+fn millis_timestamp(value: Option<&Value>) -> Option<DateTime<Utc>> {
+    DateTime::<Utc>::from_timestamp_millis(value?.as_i64()?)
+}
+
+fn user_parts(value: Option<&Value>) -> Vec<Part> {
+    if let Some(text) = value.and_then(Value::as_str) {
+        return vec![Part::Text(text.to_owned())];
+    }
+    content_parts(value, false)
+}
+
+/// The parts of a content array: text, images as a text placeholder, and
+/// for assistant messages (`assistant`) thinking and tool calls.
+fn content_parts(value: Option<&Value>, assistant: bool) -> Vec<Part> {
     let Some(values) = value.and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -487,57 +515,36 @@ fn content_blocks(value: Option<&Value>, include_thinking: bool) -> Vec<ContentB
         .iter()
         .filter_map(|block| {
             let object = block.as_object()?;
-            match object
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-            {
-                "text" => Some(ContentBlock::Text {
-                    text: object
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_owned(),
-                }),
-                "thinking" if include_thinking => Some(ContentBlock::Thinking {
-                    thinking: object
-                        .get("thinking")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_owned(),
-                    signature: object
-                        .get("thinkingSignature")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_owned(),
-                }),
-                "toolCall" if include_thinking => Some(ContentBlock::ToolUse {
-                    id: object
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_owned(),
-                    name: object
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_owned(),
+            let string = |key: &str| object.get(key).and_then(Value::as_str);
+            match string("type").unwrap_or("unknown") {
+                "text" => Some(Part::Text(string("text").unwrap_or("").to_owned())),
+                "thinking" if assistant => {
+                    Some(Part::Thinking(string("thinking").unwrap_or("").to_owned()))
+                }
+                "toolCall" if assistant => Some(Part::ToolCall {
+                    id: string("id").unwrap_or("unknown").to_owned(),
+                    name: string("name").unwrap_or("unknown").to_owned(),
                     input: object
                         .get("arguments")
                         .cloned()
                         .unwrap_or_else(|| json!({})),
                 }),
-                "image" => Some(ContentBlock::Text {
-                    text: format!(
-                        "[Image: {}]",
-                        object
-                            .get("mimeType")
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown type")
-                    ),
-                }),
+                "image" => Some(Part::Text(format!(
+                    "[Image: {}]",
+                    string("mimeType").unwrap_or("unknown type")
+                ))),
                 _ => None,
             }
+        })
+        .collect()
+}
+
+fn text_parts(value: Option<&Value>) -> Vec<String> {
+    content_parts(value, false)
+        .into_iter()
+        .filter_map(|part| match part {
+            Part::Text(text) => Some(text),
+            _ => None,
         })
         .collect()
 }
@@ -546,23 +553,13 @@ fn content_text(value: Option<&Value>) -> String {
     if let Some(text) = value.and_then(Value::as_str) {
         return text.to_owned();
     }
-    content_blocks(value, false)
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    text_parts(value).join("\n")
 }
 
 fn tool_result_content(object: &Map<String, Value>) -> Value {
-    let blocks = content_blocks(object.get("content"), false)
+    let blocks = text_parts(object.get("content"))
         .into_iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(json!({"type": "text", "text": text})),
-            _ => None,
-        })
+        .map(|text| json!({"type": "text", "text": text}))
         .collect::<Vec<_>>();
     let mut text = bounded_tool_result_text(&Value::Array(blocks)).unwrap_or_default();
     if object.get("isError").and_then(Value::as_bool) == Some(true) {
@@ -586,21 +583,19 @@ fn bash_text(object: &Map<String, Value>) -> String {
     bounded_tool_result_text(&json!(text)).unwrap_or_default()
 }
 
-fn pi_usage(value: &Value) -> Option<TokenUsage> {
+fn pi_usage(value: &Value) -> Option<Usage> {
     let object = value.as_object()?;
-    Some(TokenUsage {
-        input_tokens: object.get("input").and_then(Value::as_u64).unwrap_or(0),
-        output_tokens: object.get("output").and_then(Value::as_u64).unwrap_or(0),
-        cache_creation_input_tokens: object
-            .get("cacheWrite")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        cache_read_input_tokens: object.get("cacheRead").and_then(Value::as_u64).unwrap_or(0),
+    let count = |key: &str| object.get(key).and_then(Value::as_u64).unwrap_or(0);
+    Some(Usage {
+        input: count("input"),
+        output: count("output"),
+        cache_creation: count("cacheWrite"),
+        cache_read: count("cacheRead"),
     })
 }
 
 pub fn append_session_rename(path: &Path, title: &str) -> Result<()> {
-    let projection = parse_file(path)?.ok_or_else(|| {
+    let session = parse_file(path)?.ok_or_else(|| {
         AppError::ConfigError(format!("{} is not a valid Pi session", path.display()))
     })?;
     let mut ids = HashSet::new();
@@ -617,7 +612,7 @@ pub fn append_session_rename(path: &Path, title: &str) -> Result<()> {
         .map(|counter| {
             let seed = format!(
                 "{}:{}:{}",
-                projection.header.id,
+                session.header.id,
                 Utc::now().timestamp_nanos_opt().unwrap_or(0),
                 counter
             );
@@ -628,7 +623,7 @@ pub fn append_session_rename(path: &Path, title: &str) -> Result<()> {
     let entry = json!({
         "type": "session_info",
         "id": id,
-        "parentId": projection.leaf_id,
+        "parentId": session.leaf_id,
         "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         "name": title.replace(['\r', '\n'], " ").trim(),
     });
@@ -640,7 +635,7 @@ pub fn append_session_rename(path: &Path, title: &str) -> Result<()> {
 pub fn append_omp_session_rename(path: &Path, title: &str) -> Result<()> {
     const TITLE_SLOT_BYTES: usize = 256;
 
-    let projection = parse_omp_file(path)?.ok_or_else(|| {
+    let session = parse_omp_file(path)?.ok_or_else(|| {
         AppError::ConfigError(format!("{} is not a valid OMP session", path.display()))
     })?;
     let title = title.replace(['\r', '\n'], " ").trim().to_owned();
@@ -658,7 +653,7 @@ pub fn append_omp_session_rename(path: &Path, title: &str) -> Result<()> {
         .map(|counter| {
             let seed = format!(
                 "{}:{}:{}",
-                projection.header.id,
+                session.header.id,
                 Utc::now().timestamp_nanos_opt().unwrap_or(0),
                 counter
             );
@@ -669,10 +664,10 @@ pub fn append_omp_session_rename(path: &Path, title: &str) -> Result<()> {
     let entry = json!({
         "type": "title_change",
         "id": id,
-        "parentId": projection.leaf_id,
+        "parentId": session.leaf_id,
         "timestamp": timestamp,
         "title": title,
-        "previousTitle": projection.title,
+        "previousTitle": session.title,
         "source": "user",
     });
     let slot = omp_title_slot(&title, &timestamp, TITLE_SLOT_BYTES)?;
@@ -749,7 +744,8 @@ fn omp_title_slot(title: &str, timestamp: &str, bytes: usize) -> Result<String> 
 mod tests {
     use super::*;
     use crate::agent::transcript::AgentTranscript;
-    use crate::history::{Source, parser::process_conversation_file};
+    use crate::history::model::SourceKind;
+    use crate::history::parser::process_conversation_file;
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -767,7 +763,7 @@ mod tests {
         );
         assert_eq!(
             detect_source_reader(std::io::Cursor::new(pi)).unwrap(),
-            Some(Source::Pi)
+            Some(SourceKind::Pi)
         );
 
         let omp = concat!(
@@ -778,7 +774,7 @@ mod tests {
         );
         assert_eq!(
             detect_source_reader(std::io::Cursor::new(omp)).unwrap(),
-            Some(Source::Omp)
+            Some(SourceKind::Omp)
         );
     }
 
@@ -794,10 +790,10 @@ mod tests {
     #[test]
     fn detects_fixture_sources() {
         for name in ["v1.jsonl", "v2.jsonl", "v3-branched.jsonl"] {
-            assert_eq!(detect_source(&fixture(name)).unwrap(), Some(Source::Pi));
+            assert_eq!(detect_source(&fixture(name)).unwrap(), Some(SourceKind::Pi));
         }
         let omp = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/omp/v3.jsonl");
-        assert_eq!(detect_source(&omp).unwrap(), Some(Source::Omp));
+        assert_eq!(detect_source(&omp).unwrap(), Some(SourceKind::Omp));
     }
 
     #[test]
@@ -821,11 +817,11 @@ mod tests {
 
     #[test]
     fn projects_only_the_active_branch_and_sanitizes_images() {
-        let projection = parse_file(&fixture("v3-branched.jsonl")).unwrap().unwrap();
-        let json = projection
-            .entries
+        let session = parse_file(&fixture("v3-branched.jsonl")).unwrap().unwrap();
+        let json = session
+            .events
             .iter()
-            .map(|(_, entry)| serde_json::to_string(entry).unwrap())
+            .map(|event| format!("{:?}", event.kind))
             .collect::<Vec<_>>()
             .join(" ");
 
@@ -847,7 +843,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(conversation.source, Source::Pi);
+        assert_eq!(conversation.source, SourceKind::Pi);
         assert_eq!(
             conversation.session_id,
             "01912345-6789-7abc-8def-0123456789ab"
@@ -923,10 +919,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(projection.malformed_lines, vec![3]);
-        assert_eq!(projection.entries.len(), 1);
+        assert_eq!(projection.events.len(), 1);
         assert!(matches!(
-            &projection.entries[0].1,
-            LogEntry::PiMetadata { text, .. } if text == "leaf suffix"
+            &projection.events[0].kind,
+            EventKind::Note { text, .. } if text == "leaf suffix"
         ));
     }
 
@@ -979,7 +975,7 @@ mod tests {
 
         assert_eq!(projection.leaf_id.as_deref(), Some("root"));
         assert_eq!(projection.malformed_lines, vec![3]);
-        assert_eq!(projection.entries.len(), 1);
+        assert_eq!(projection.events.len(), 1);
     }
 
     #[test]
@@ -1004,8 +1000,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(matches!(
-            &projection.entries[1].1,
-            LogEntry::PiMetadata { label, .. } if label == "extension notice"
+            &projection.events[1].kind,
+            EventKind::Note { label, .. } if label == "extension notice"
         ));
     }
 
@@ -1033,13 +1029,13 @@ mod tests {
     fn parses_omp_title_slot_and_active_branch() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/omp/v3.jsonl");
         let projection = parse_file(&path).unwrap().unwrap();
-        assert_eq!(projection.source, Source::Omp);
+        assert_eq!(projection.source, SourceKind::Omp);
         assert_eq!(projection.header.id, "omp_session_custom_id");
         assert_eq!(projection.title.as_deref(), Some("OMP fixture title"));
         let conversation = process_conversation_file(path, None, None)
             .unwrap()
             .unwrap();
-        assert_eq!(conversation.source, Source::Omp);
+        assert_eq!(conversation.source, SourceKind::Omp);
         assert_eq!(
             conversation.custom_title.as_deref(),
             Some("Updated OMP title")
@@ -1072,5 +1068,39 @@ mod tests {
         assert_eq!(last["title"], "renamed OMP");
         let reparsed = parse_omp_file(&path).unwrap().unwrap();
         assert_eq!(reparsed.title.as_deref(), Some("renamed OMP"));
+    }
+
+    #[test]
+    fn events_originate_at_their_source_lines() {
+        let omp = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/omp/v3.jsonl");
+        for path in [fixture("v1.jsonl"), fixture("v3-branched.jsonl"), omp] {
+            let lines: Vec<String> = std::fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            let session = parse_file(&path).unwrap().unwrap();
+            let mut checked = 0;
+            for event in &session.events {
+                let EventKind::Message(message) = &event.kind else {
+                    continue;
+                };
+                let Some(text) = message.parts.iter().find_map(|part| match part {
+                    Part::Text(text) => Some(text),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                let line = &lines[event.origin.line as usize - 1];
+                assert!(
+                    line.contains(text.as_str()),
+                    "{}: line {} does not hold {text:?}",
+                    path.display(),
+                    event.origin.line
+                );
+                checked += 1;
+            }
+            assert!(checked >= 2, "{}", path.display());
+        }
     }
 }

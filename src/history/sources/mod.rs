@@ -111,6 +111,19 @@ impl Registry {
     }
 
     /// The adapter of `instance`.
+    /// The adapter acting on `path`, a session file of `source`: the
+    /// instance of that kind whose root holds it, else as `for_source`.
+    pub fn for_path(&self, source: SourceKind, path: &Path) -> Arc<dyn Adapter> {
+        self.adapters
+            .iter()
+            .find(|adapter| {
+                let instance = adapter.instance();
+                instance.kind == source && path.starts_with(&instance.root)
+            })
+            .cloned()
+            .unwrap_or_else(|| self.for_source(source))
+    }
+
     pub fn get(&self, instance: &SourceInstance) -> Option<&Arc<dyn Adapter>> {
         self.adapters
             .iter()
@@ -227,11 +240,11 @@ fn decode_file(
     if super::pi::detect_source(path)?.is_some() {
         let mut reader = Counted::new(BufReader::new(File::open(path)?));
         let expected = omp.then_some(SourceKind::Omp);
-        if let Some(projection) = super::pi::parse_reader(&mut reader, expected)? {
+        if let Some(session) = super::pi::parse_reader(&mut reader, expected)? {
             return Ok(Some(pi::transcript_of(
                 located.key.clone(),
                 path,
-                projection,
+                session,
                 reader.bytes,
                 located.modified,
                 events,

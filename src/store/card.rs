@@ -213,21 +213,21 @@ pub struct Header {
 pub const MAGIC: [u8; 8] = *b"CHGEN\0\0\0";
 pub const VERSION: u32 = 5;
 
-pub fn source_to_u8(source: crate::history::Source) -> u8 {
+pub fn source_to_u8(source: crate::history::model::SourceKind) -> u8 {
     match source {
-        crate::history::Source::Claude => 0,
-        crate::history::Source::Pi => 1,
-        crate::history::Source::Omp => 2,
-        crate::history::Source::Codex => 3,
+        crate::history::model::SourceKind::Claude => 0,
+        crate::history::model::SourceKind::Pi => 1,
+        crate::history::model::SourceKind::Omp => 2,
+        crate::history::model::SourceKind::Codex => 3,
     }
 }
 
-pub fn source_from_u8(value: u8) -> Option<crate::history::Source> {
+pub fn source_from_u8(value: u8) -> Option<crate::history::model::SourceKind> {
     match value {
-        0 => Some(crate::history::Source::Claude),
-        1 => Some(crate::history::Source::Pi),
-        2 => Some(crate::history::Source::Omp),
-        3 => Some(crate::history::Source::Codex),
+        0 => Some(crate::history::model::SourceKind::Claude),
+        1 => Some(crate::history::model::SourceKind::Pi),
+        2 => Some(crate::history::model::SourceKind::Omp),
+        3 => Some(crate::history::model::SourceKind::Codex),
         _ => None,
     }
 }

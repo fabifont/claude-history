@@ -172,7 +172,7 @@ impl AgentService {
         // a full corpus parse.
         let time = args.time.resolve()?;
         let mut conversations =
-            crate::store::load_conversations(false, None, crate::store::Contents::Full)?;
+            crate::store::load_conversations(false, crate::store::Contents::Full)?;
         conversations.retain(|conversation| {
             !conversation.provenance.hidden_by_default()
                 && !project_is_excluded(&conversation.path, &agent_config.exclude_projects)
@@ -534,15 +534,15 @@ fn discover_agent_keys(
             let Ok(Some(projection)) = history::pi::parse_file(&path) else {
                 continue;
             };
-            if projection.source != history::Source::Pi {
+            if projection.source != history::model::SourceKind::Pi {
                 continue;
             }
+            let header = projection.header;
             if let Some(filter) = project_filter {
-                let cwd = projection
-                    .header
+                let cwd = header
                     .cwd
                     .canonicalize()
-                    .unwrap_or_else(|_| projection.header.cwd.clone());
+                    .unwrap_or_else(|_| header.cwd.clone());
                 let current_matches_filter = current.as_ref().is_some_and(|current| {
                     history::is_same_project(
                         &history::convert_path_to_project_dir_name(current),
@@ -553,21 +553,20 @@ fn discover_agent_keys(
                     continue;
                 }
             }
-            let project_identity = projection
-                .header
+            let project_identity = header
                 .cwd
                 .canonicalize()
-                .unwrap_or(projection.header.cwd)
+                .unwrap_or(header.cwd)
                 .to_string_lossy()
                 .into_owned();
             let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
             keys.push(agent::refs::AgentConversationKey {
-                source: history::Source::Pi,
+                source: history::model::SourceKind::Pi,
                 project_dir_name: project_identity,
                 session_filename: filename.to_owned(),
-                session_id: projection.header.id,
+                session_id: header.id,
                 path,
             });
         }
@@ -582,12 +581,12 @@ fn discover_agent_keys(
             let Ok(Some(projection)) = history::pi::parse_omp_file(&path) else {
                 continue;
             };
+            let header = projection.header;
             if let Some(filter) = project_filter {
-                let cwd = projection
-                    .header
+                let cwd = header
                     .cwd
                     .canonicalize()
-                    .unwrap_or_else(|_| projection.header.cwd.clone());
+                    .unwrap_or_else(|_| header.cwd.clone());
                 let current_matches_filter = current.as_ref().is_some_and(|current| {
                     history::is_same_project(
                         &history::convert_path_to_project_dir_name(current),
@@ -598,21 +597,20 @@ fn discover_agent_keys(
                     continue;
                 }
             }
-            let project_identity = projection
-                .header
+            let project_identity = header
                 .cwd
                 .canonicalize()
-                .unwrap_or(projection.header.cwd)
+                .unwrap_or(header.cwd)
                 .to_string_lossy()
                 .into_owned();
             let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
             keys.push(agent::refs::AgentConversationKey {
-                source: history::Source::Omp,
+                source: history::model::SourceKind::Omp,
                 project_dir_name: project_identity,
                 session_filename: filename.to_owned(),
-                session_id: projection.header.id,
+                session_id: header.id,
                 path,
             });
         }
@@ -621,7 +619,7 @@ fn discover_agent_keys(
     let listed = match listed {
         Some(listed) => listed,
         None => {
-            loaded = crate::store::load_conversations(false, None, crate::store::Contents::Cards)?;
+            loaded = crate::store::load_conversations(false, crate::store::Contents::Cards)?;
             &loaded
         }
     };
@@ -629,7 +627,7 @@ fn discover_agent_keys(
         listed
             .iter()
             .filter(|conversation| {
-                conversation.source == history::Source::Codex
+                conversation.source == history::model::SourceKind::Codex
                     && !conversation.provenance.hidden_by_default()
             })
             .filter_map(|conversation| {
@@ -703,7 +701,7 @@ fn warnings_for_skipped_transcripts(
 
 fn conversation_from_agent_transcript(
     transcript: &agent::transcript::AgentTranscript,
-    source: history::Source,
+    source: history::model::SourceKind,
 ) -> history::Conversation {
     let message_text = transcript
         .messages
@@ -1532,8 +1530,7 @@ pub(crate) fn resolve_agent_read_args(
     let keys = if let Some(keys) = keys {
         keys
     } else {
-        let conversations =
-            crate::store::load_conversations(false, None, crate::store::Contents::Cards)?;
+        let conversations = crate::store::load_conversations(false, crate::store::Contents::Cards)?;
         loaded_keys = agent::refs::conversation_keys_from_conversations(&conversations)?;
         &loaded_keys
     };
@@ -1607,8 +1604,7 @@ pub(crate) fn resolve_agent_conversation_arg(
     let keys = if let Some(keys) = keys {
         keys
     } else {
-        let conversations =
-            crate::store::load_conversations(false, None, crate::store::Contents::Cards)?;
+        let conversations = crate::store::load_conversations(false, crate::store::Contents::Cards)?;
         loaded_keys = agent::refs::conversation_keys_from_conversations(&conversations)?;
         &loaded_keys
     };
