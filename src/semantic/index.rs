@@ -473,7 +473,7 @@ mod tests {
         cache.entries.insert(
             crate::semantic::cache::embedding_cache_key(&text),
             CachedChunk {
-                embedding,
+                embedding: embedding.into(),
                 last_used: 0,
                 protected: false,
             },

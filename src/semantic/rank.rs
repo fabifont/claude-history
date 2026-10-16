@@ -268,7 +268,7 @@ mod tests {
             chunk_index,
             text: text.to_string(),
             message_range: crate::agent::refs::MessageRange::single(chunk_index + 1),
-            embedding,
+            embedding: embedding.into(),
         }
     }
 
