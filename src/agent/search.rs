@@ -699,24 +699,17 @@ pub fn run_global_hybrid_search(
 pub fn scoped_conversation_inputs(
     conversations: &[Conversation],
     scope: AgentSearchScope,
-    current_project_dir_name: Option<&str>,
+    workspace: Option<&crate::history::Workspace>,
 ) -> Result<Vec<usize>> {
     let mut indices = Vec::new();
     for (index, conversation) in conversations.iter().enumerate() {
         if scope == AgentSearchScope::Local {
-            let Some(project) = current_project_dir_name else {
+            let Some(workspace) = workspace else {
                 return Err(AppError::ConfigError(
                     "local agent search requires a current project".to_string(),
                 ));
             };
-            let matches = conversation
-                .path
-                .parent()
-                .and_then(|p| p.file_name())
-                .is_some_and(|name| {
-                    crate::history::is_same_project(&name.to_string_lossy(), project)
-                });
-            if !matches {
+            if !workspace.contains(conversation) {
                 continue;
             }
         }
@@ -1459,6 +1452,7 @@ mod tests {
             project_name: Some("project-a".to_string()),
             project_path: None,
             cwd: None,
+            cwds: Vec::new(),
             message_count: 1,
             parse_errors: vec![],
             summary: None,

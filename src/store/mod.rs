@@ -19,7 +19,7 @@ pub mod text;
 
 pub use generation::{Generation, ProjectView};
 
-use crate::history::Conversation;
+use crate::history::{Conversation, Workspace};
 use crate::time_filter::TimeFilter;
 use chrono::{DateTime, Local};
 use rayon::prelude::*;
@@ -293,46 +293,62 @@ impl Snapshot {
     }
 
     /// Ids of the newest `n` listed cards inside the time filter whose
-    /// project passes `project_visible` and whose cwd starts with none of
-    /// `excluded_paths`. `all_kinds` lists automated and child
-    /// conversations too.
+    /// project passes `project_visible`, whose cwd starts with none of
+    /// `excluded_paths` and that belong to `workspace`, if given.
+    /// `all_kinds` lists automated and child conversations too.
     pub fn head(
         &self,
         n: usize,
         all_kinds: bool,
         excluded_paths: &[String],
+        workspace: Option<&Workspace>,
         project_visible: impl FnMut(&ProjectView) -> bool,
     ) -> Vec<u32> {
-        let visible = self.project_visibility(project_visible);
-        self.generation.head(n, |row| {
-            listed(row, all_kinds)
-                && visible[row.project_id as usize]
-                && in_time(&self.time, row)
-                && !self.cwd_excluded(row, excluded_paths)
-        })
+        let in_scope = self.in_scope(all_kinds, excluded_paths, workspace, project_visible);
+        self.generation.head(n, in_scope)
     }
 
-    /// For every card, whether it is listed, inside the time filter, its
-    /// project passes `project_visible` and its cwd starts with none of
-    /// `excluded_paths`. `all_kinds` lists automated and child
-    /// conversations too.
+    /// For every card, whether `head` would list it.
     pub fn scope(
         &self,
         all_kinds: bool,
         excluded_paths: &[String],
+        workspace: Option<&Workspace>,
         project_visible: impl FnMut(&ProjectView) -> bool,
     ) -> Vec<bool> {
+        let in_scope = self.in_scope(all_kinds, excluded_paths, workspace, project_visible);
+        self.generation.rows().iter().map(in_scope).collect()
+    }
+
+    /// The card test `head` and `scope` apply.
+    fn in_scope<'a>(
+        &'a self,
+        all_kinds: bool,
+        excluded_paths: &'a [String],
+        workspace: Option<&'a Workspace>,
+        project_visible: impl FnMut(&ProjectView) -> bool,
+    ) -> impl Fn(&card::CardRow) -> bool + 'a {
         let visible = self.project_visibility(project_visible);
-        self.generation
-            .rows()
-            .iter()
-            .map(|row| {
-                listed(row, all_kinds)
-                    && visible[row.project_id as usize]
-                    && in_time(&self.time, row)
-                    && !self.cwd_excluded(row, excluded_paths)
+        let in_workspace = workspace.map(|workspace| {
+            self.project_visibility(|project| {
+                workspace.contains_project_key(project.workspace_key, project.key_is_path)
             })
-            .collect()
+        });
+        move |row| {
+            listed(row, all_kinds)
+                && visible[row.project_id as usize]
+                && in_time(&self.time, row)
+                && !self.cwd_excluded(row, excluded_paths)
+                && workspace
+                    .zip(in_workspace.as_ref())
+                    .is_none_or(|(workspace, projects)| {
+                        projects[row.project_id as usize]
+                            || self
+                                .generation
+                                .cwds(row)
+                                .any(|cwd| workspace.contains_cwd(Path::new(cwd)))
+                    })
+        }
     }
 
     /// Whether the card records a cwd starting with one of `prefixes`.
@@ -672,6 +688,7 @@ pub(crate) mod test_support {
             project_name,
             project_path: None,
             cwd: None,
+            cwds: Vec::new(),
             message_count: 3,
             parse_errors: Vec::new(),
             summary: None,

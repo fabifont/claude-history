@@ -14,7 +14,7 @@ use crate::error::Result;
 use crate::history::ParseError;
 use crate::history::model::{
     ConversationKey, Event, EventKind, ExecutionMode, Message, Origin, Part, Relationship,
-    Revision, Role, Segment, SessionMeta, SourceKind, Transcript, Usage, Visibility,
+    Revision, Role, Segment, SessionMeta, SourceKind, Transcript, Usage, Visibility, push_cwd,
 };
 use crate::history::sources::LastActivity;
 use crate::history::sources::claude::{mtime_ns, parse_timestamp};
@@ -295,6 +295,8 @@ enum ContentItem {
 struct TurnContext {
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -319,6 +321,7 @@ pub fn decode(
         records: 0,
         usage: TokenUsage::default(),
         model: None,
+        cwds: Vec::new(),
         head_meta: None,
         last_timestamp: None,
         activity: LastActivity::default(),
@@ -337,6 +340,10 @@ pub fn decode(
     let Some(meta) = decoder.head_meta.take() else {
         return Ok(None);
     };
+    let mut cwds: Vec<PathBuf> = meta.cwd.iter().cloned().collect();
+    for cwd in std::mem::take(&mut decoder.cwds) {
+        push_cwd(&mut cwds, cwd);
+    }
     let head_link = thread.head_link();
     let updated_at = decoder
         .activity
@@ -364,6 +371,7 @@ pub fn decode(
         meta: SessionMeta {
             session_id: thread.id.clone(),
             cwd: meta.cwd.clone(),
+            cwds,
             project: meta.cwd.clone(),
             model: decoder.model,
             summary: None,
@@ -416,6 +424,8 @@ struct Decoder<'a> {
     /// Cumulative usage of the last `token_count`, across segments.
     usage: TokenUsage,
     model: Option<String>,
+    /// Distinct cwds of `turn_context` records.
+    cwds: Vec<PathBuf>,
     head_meta: Option<Meta>,
     /// Timestamp of the head rollout's last record.
     last_timestamp: Option<String>,
@@ -557,10 +567,13 @@ impl Decoder<'_> {
                 Err(_) => EventKind::Other,
             },
             "turn_context" => {
-                if self.model.is_none()
-                    && let Ok(context) = serde_json::from_str::<TurnContext>(payload)
-                {
-                    self.model = context.model;
+                if let Ok(context) = serde_json::from_str::<TurnContext>(payload) {
+                    if self.model.is_none() {
+                        self.model = context.model;
+                    }
+                    if let Some(cwd) = context.cwd {
+                        push_cwd(&mut self.cwds, cwd);
+                    }
                 }
                 EventKind::Other
             }

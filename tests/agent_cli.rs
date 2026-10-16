@@ -305,6 +305,81 @@ fn search_reports_partial_warnings_and_preserves_compact_success_output() {
 }
 
 #[test]
+fn local_search_includes_sessions_that_worked_in_the_workspace() {
+    let config = tempfile::tempdir().expect("config");
+    let group = config.path().join("work").join("group");
+    let repo = group.join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    // The process sees the resolved directory, as the recorded cwd does.
+    let group = group.canonicalize().expect("canonical group");
+    let repo = repo.canonicalize().expect("canonical repo");
+    let project = config.path().join("projects").join(
+        group
+            .to_string_lossy()
+            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-"),
+    );
+    std::fs::create_dir_all(&project).expect("create project");
+    let write = |name: &str, cwds: &[&Path]| {
+        let lines: Vec<String> = cwds
+            .iter()
+            .map(|cwd| {
+                serde_json::json!({
+                    "type": "user",
+                    "timestamp": "2026-07-20T00:00:00Z",
+                    "cwd": cwd,
+                    "message": {"role": "user", "content": "scoped cwd needle"}
+                })
+                .to_string()
+            })
+            .collect();
+        std::fs::write(project.join(name), lines.join("\n") + "\n").expect("write transcript");
+    };
+    write(
+        "12345678-1234-4234-9234-123456789abc.jsonl",
+        &[&group, &repo.join("src")],
+    );
+    write(
+        "87654321-1234-4234-9234-123456789abc.jsonl",
+        &[&group, &group.join("repo-other")],
+    );
+
+    let search = command(&config.path().join("home"))
+        .env("CLAUDE_CONFIG_DIR", config.path())
+        .env(
+            "PI_CODING_AGENT_SESSION_DIR",
+            config.path().join("empty-agent-sessions"),
+        )
+        .current_dir(&repo)
+        .args([
+            "agent",
+            "search",
+            "--local",
+            "--lexical",
+            "scoped cwd needle",
+        ])
+        .output()
+        .expect("run local search");
+    assert!(
+        search.status.success(),
+        "{}",
+        String::from_utf8_lossy(&search.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&search.stdout);
+    assert!(stdout.contains("uuid=12345678-"), "{stdout}");
+    assert!(!stdout.contains("uuid=87654321-"), "{stdout}");
+    let outline = run(
+        config.path(),
+        &["agent", "outline", &first_ref(&search.stdout)],
+    );
+    assert!(
+        outline.status.success(),
+        "{}",
+        String::from_utf8_lossy(&outline.stderr)
+    );
+    assert!(String::from_utf8_lossy(&outline.stdout).contains("12345678"));
+}
+
+#[test]
 fn ref_only_commands_parse_only_the_selected_transcript() {
     let config = tempfile::tempdir().expect("config");
     let project = project(config.path());

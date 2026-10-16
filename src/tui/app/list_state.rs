@@ -1,7 +1,7 @@
 use super::App;
-use crate::history::Conversation;
 use crate::history::actions::{self, Capabilities};
 use crate::history::path::project_is_excluded;
+use crate::history::{Conversation, Workspace};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,8 +17,7 @@ impl App {
             &self.excluded_projects,
             &self.excluded_paths,
             self.all_kinds,
-            self.workspace_filter,
-            self.current_project_dir_name.as_deref(),
+            self.scope_workspace(),
         )
     }
 
@@ -213,8 +212,7 @@ pub(super) fn filter_conversation_indices<I, C>(
     excluded_projects: &HashSet<String>,
     excluded_paths: &[String],
     all_kinds: bool,
-    workspace_filter: bool,
-    current_project_dir_name: Option<&str>,
+    workspace: Option<&Workspace>,
 ) -> Vec<usize>
 where
     I: IntoIterator<Item = usize>,
@@ -237,80 +235,18 @@ where
             )
         })
         .filter(|&idx| {
-            let Some(project_dir_name) = current_project_dir_name.filter(|_| workspace_filter)
-            else {
-                return true;
-            };
-            if conversations[idx].borrow().source != crate::history::model::SourceKind::Claude {
-                let Ok(current) = std::env::current_dir() else {
-                    return false;
-                };
-                let current = current.canonicalize().unwrap_or(current);
-                return conversations[idx]
-                    .borrow()
-                    .project_path
-                    .as_ref()
-                    .or(conversations[idx].borrow().cwd.as_ref())
-                    .is_some_and(|path| {
-                        crate::history::path::same_path(
-                            &path.canonicalize().unwrap_or_else(|_| path.clone()),
-                            &current,
-                        )
-                    });
-            }
-            conversations[idx]
-                .borrow()
-                .path
-                .parent()
-                .and_then(|p| p.file_name())
-                .is_some_and(|name| {
-                    crate::history::path::is_same_project(&name.to_string_lossy(), project_dir_name)
-                })
+            workspace.is_none_or(|workspace| workspace.contains(conversations[idx].borrow()))
         })
         .collect()
 }
 
-/// The workspace a card must belong to, resolved once per card walk.
-pub(super) struct WorkspaceScope<'a> {
-    project_dir_name: Option<&'a str>,
-    current_dir: Option<String>,
-}
-
-impl<'a> WorkspaceScope<'a> {
-    /// `project_dir_name` is `None` when the workspace filter is off.
-    pub(super) fn new(project_dir_name: Option<&'a str>) -> Self {
-        let current_dir = project_dir_name.and_then(|_| {
-            let current = std::env::current_dir().ok()?;
-            let current = current.canonicalize().unwrap_or(current);
-            Some(current.to_string_lossy().into_owned())
-        });
-        Self {
-            project_dir_name,
-            current_dir,
-        }
-    }
-}
-
-/// Card counterpart of `filter_conversation_indices`, decided per project.
+/// Card counterpart of the project filters of `filter_conversation_indices`:
+/// whether `exclude_projects` leaves `project` visible.
 pub(super) fn card_project_visible(
     project: &crate::store::ProjectView,
     excluded_projects: &HashSet<String>,
-    workspace: &WorkspaceScope,
 ) -> bool {
-    if project
+    project
         .name
-        .is_some_and(|name| project_is_excluded(name, excluded_projects))
-    {
-        return false;
-    }
-    let Some(project_dir_name) = workspace.project_dir_name else {
-        return true;
-    };
-    if project.key_is_path {
-        workspace.current_dir.as_deref().is_some_and(|current| {
-            crate::history::path::same_path_str(current, project.workspace_key)
-        })
-    } else {
-        crate::history::path::is_same_project(project.workspace_key, project_dir_name)
-    }
+        .is_none_or(|name| !project_is_excluded(name, excluded_projects))
 }

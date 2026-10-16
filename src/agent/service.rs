@@ -202,18 +202,13 @@ impl AgentService {
         let excluded_paths = excluded_paths.into_inner().unwrap();
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         let scope = configured_scope(args, &agent_config);
-        let current_project_dir_name = if scope == agent::search::AgentSearchScope::Local {
-            std::env::current_dir()
-                .ok()
-                .map(|dir| history::convert_path_to_project_dir_name(&dir))
+        let workspace = if scope == agent::search::AgentSearchScope::Local {
+            history::Workspace::current()
         } else {
             None
         };
-        let scoped = agent::search::scoped_conversation_inputs(
-            &conversations,
-            scope,
-            current_project_dir_name.as_deref(),
-        )?;
+        let scoped =
+            agent::search::scoped_conversation_inputs(&conversations, scope, workspace.as_ref())?;
         let mut request = agent::search::AgentSearchRequest {
             query: args.query.clone(),
             top: configured_usize(args.top, DEFAULT_SEARCH_TOP, agent_config.top),
@@ -256,11 +251,23 @@ impl AgentService {
         } else {
             &conversations
         };
-        let (mut keys, mut base_warnings) = discover_agent_keys(
-            current_project_dir_name.as_deref(),
-            Some(&conversations),
-            args.all_kinds,
-        )?;
+        let (mut keys, mut base_warnings) =
+            discover_agent_keys(workspace.as_ref(), Some(&conversations), args.all_kinds)?;
+        // The workspace also takes in sessions stored under other projects
+        // that recorded a cwd inside it; their references must resolve too.
+        let registry = history::sources::Registry::from_env();
+        let keyed: std::collections::HashSet<PathBuf> =
+            keys.iter().map(|key| key.path.clone()).collect();
+        for &index in &scoped {
+            let conversation = &conversations[index];
+            if !keyed.contains(&conversation.path)
+                && let Ok(key) =
+                    agent::refs::AgentConversationKey::from_conversation_in(conversation, &registry)
+            {
+                keys.push(key);
+            }
+        }
+        keys.sort_by(|left, right| left.path.cmp(&right.path));
         keys.retain(|key| {
             !excluded_paths.contains(&key.path)
                 && !project_is_excluded(&key.path, &agent_config.exclude_projects)
@@ -486,7 +493,7 @@ impl AgentService {
 /// thread's working directory, which only decoding reveals, so they come
 /// from the cards the store keeps.
 fn discover_agent_keys(
-    project_filter: Option<&str>,
+    workspace: Option<&history::Workspace>,
     listed: Option<&[history::Conversation]>,
     all_kinds: bool,
 ) -> Result<(Vec<agent::refs::AgentConversationKey>, Vec<AgentWarning>)> {
@@ -524,7 +531,7 @@ fn discover_agent_keys(
         let Some(project_name) = project_path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if project_filter.is_some_and(|filter| !history::is_same_project(project_name, filter)) {
+        if workspace.is_some_and(|workspace| !workspace.contains_project_key(project_name, false)) {
             continue;
         }
         let entries = match std::fs::read_dir(&project_path) {
@@ -578,40 +585,24 @@ fn discover_agent_keys(
     if let Ok(pi_root) = history::pi_loader::session_root()
         && let Ok(pi_files) = history::pi_loader::discover_files(&pi_root)
     {
-        let current = std::env::current_dir()
-            .ok()
-            .map(|path| path.canonicalize().unwrap_or(path));
         for path in pi_files {
             let Ok(Some((history::model::SourceKind::Pi, header))) =
                 history::pi::read_header(&path, None)
             else {
                 continue;
             };
-            if let Some(filter) = project_filter {
-                let cwd = header
-                    .cwd
-                    .canonicalize()
-                    .unwrap_or_else(|_| header.cwd.clone());
-                let current_matches_filter = current.as_ref().is_some_and(|current| {
-                    history::is_same_project(
-                        &history::convert_path_to_project_dir_name(current),
-                        filter,
-                    )
-                });
-                if !current_matches_filter
-                    || !current
-                        .as_ref()
-                        .is_some_and(|current| history::path::same_path(current, &cwd))
-                {
-                    continue;
-                }
-            }
             let project_identity = header
                 .cwd
                 .canonicalize()
-                .unwrap_or(header.cwd)
+                .unwrap_or_else(|_| header.cwd.clone())
                 .to_string_lossy()
                 .into_owned();
+            if workspace.is_some_and(|workspace| {
+                !workspace.contains_cwd(&header.cwd)
+                    && !workspace.contains_project_key(&project_identity, true)
+            }) {
+                continue;
+            }
             if path.file_name().and_then(|name| name.to_str()).is_none() {
                 continue;
             }
@@ -627,40 +618,24 @@ fn discover_agent_keys(
     if let Ok(omp_root) = history::omp_loader::session_root()
         && let Ok(omp_files) = history::omp_loader::discover_files(&omp_root)
     {
-        let current = std::env::current_dir()
-            .ok()
-            .map(|path| path.canonicalize().unwrap_or(path));
         for path in omp_files {
             let Ok(Some((_, header))) =
                 history::pi::read_header(&path, Some(history::model::SourceKind::Omp))
             else {
                 continue;
             };
-            if let Some(filter) = project_filter {
-                let cwd = header
-                    .cwd
-                    .canonicalize()
-                    .unwrap_or_else(|_| header.cwd.clone());
-                let current_matches_filter = current.as_ref().is_some_and(|current| {
-                    history::is_same_project(
-                        &history::convert_path_to_project_dir_name(current),
-                        filter,
-                    )
-                });
-                if !current_matches_filter
-                    || !current
-                        .as_ref()
-                        .is_some_and(|current| history::path::same_path(current, &cwd))
-                {
-                    continue;
-                }
-            }
             let project_identity = header
                 .cwd
                 .canonicalize()
-                .unwrap_or(header.cwd)
+                .unwrap_or_else(|_| header.cwd.clone())
                 .to_string_lossy()
                 .into_owned();
+            if workspace.is_some_and(|workspace| {
+                !workspace.contains_cwd(&header.cwd)
+                    && !workspace.contains_project_key(&project_identity, true)
+            }) {
+                continue;
+            }
             if path.file_name().and_then(|name| name.to_str()).is_none() {
                 continue;
             }
@@ -819,6 +794,7 @@ fn conversation_from_agent_transcript(
         project_name: None,
         project_path: None,
         cwd: None,
+        cwds: Vec::new(),
         message_count: transcript.messages.len(),
         parse_errors: Vec::new(),
         summary: transcript.summary.clone(),
@@ -1021,6 +997,7 @@ fn stripped_semantic_conversation(
         project_name: None,
         project_path: None,
         cwd: None,
+        cwds: Vec::new(),
         message_count: conversation.message_count,
         parse_errors: Vec::new(),
         summary: None,

@@ -259,6 +259,7 @@ mod tests {
             project_name: Some("project sentinel".to_string()),
             project_path: Some(PathBuf::from("/projects/project-a")),
             cwd: Some(PathBuf::from("/cwd/sentinel")),
+            cwds: vec![PathBuf::from("/cwd/sentinel")],
             message_count: 2,
             parse_errors: Vec::new(),
             summary: Some("summary sentinel".to_string()),

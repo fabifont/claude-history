@@ -1,5 +1,7 @@
 use crate::config::KeyBindings;
-use crate::history::{Conversation, format_short_name_from_path, process_conversation_file};
+use crate::history::{
+    Conversation, Workspace, format_short_name_from_path, process_conversation_file,
+};
 use crate::search;
 #[cfg(test)]
 use crate::semantic::types::{SemanticExplanation, SemanticScoreBreakdown};
@@ -119,8 +121,8 @@ pub struct App {
     all_kinds: bool,
     /// Whether lexical search matches only the text the person typed
     user_only: bool,
-    /// The encoded project directory name for the current workspace (for filtering)
-    current_project_dir_name: Option<String>,
+    /// The directory the project scope is anchored to
+    workspace: Option<Workspace>,
     /// Exact project names hidden from list-mode display
     excluded_projects: HashSet<String>,
     /// Working-directory prefixes hidden from list-mode display
@@ -157,7 +159,7 @@ struct AppParts {
     keys: KeyBindings,
     workspace_filter: bool,
     all_kinds: bool,
-    current_project_dir_name: Option<String>,
+    workspace: Option<Workspace>,
     excluded_projects: HashSet<String>,
     excluded_paths: Vec<String>,
     search_tx: mpsc::Sender<SearchCommand>,
@@ -202,7 +204,7 @@ impl App {
             workspace_filter: parts.workspace_filter,
             all_kinds: parts.all_kinds,
             user_only: false,
-            current_project_dir_name: parts.current_project_dir_name,
+            workspace: parts.workspace,
             excluded_projects: parts.excluded_projects,
             excluded_paths: parts.excluded_paths,
             search_tx: parts.search_tx,
@@ -266,7 +268,6 @@ impl App {
             &excluded_projects,
             &[],
             search_options.all_kinds,
-            false,
             None,
         );
         let selected = if filtered.is_empty() { None } else { Some(0) };
@@ -290,7 +291,7 @@ impl App {
             keys,
             workspace_filter: false,
             all_kinds: search_options.all_kinds,
-            current_project_dir_name: None,
+            workspace: None,
             excluded_projects,
             excluded_paths: Vec::new(),
             search_tx,
@@ -307,7 +308,7 @@ impl App {
         show_thinking: bool,
         keys: KeyBindings,
         workspace_filter: bool,
-        current_project_dir_name: Option<String>,
+        workspace: Option<Workspace>,
         exclude_projects: Vec<String>,
         exclude_paths: Vec<String>,
         search_options: TuiSearchOptions,
@@ -327,7 +328,7 @@ impl App {
             keys,
             workspace_filter,
             all_kinds: search_options.all_kinds,
-            current_project_dir_name,
+            workspace,
             excluded_projects: exclude_projects.into_iter().collect(),
             excluded_paths: exclude_paths,
             search_tx,
@@ -382,7 +383,7 @@ impl App {
             keys,
             workspace_filter: false,
             all_kinds: false,
-            current_project_dir_name: None,
+            workspace: None,
             excluded_projects: HashSet::new(),
             excluded_paths: Vec::new(),
             search_tx,
@@ -452,9 +453,11 @@ impl App {
 
     /// Whether no card of the generation shown is inside the time filter.
     pub fn generation_is_empty(&self) -> bool {
-        self.snapshot
-            .as_ref()
-            .is_none_or(|snapshot| snapshot.head(1, self.all_kinds, &[], |_| true).is_empty())
+        self.snapshot.as_ref().is_none_or(|snapshot| {
+            snapshot
+                .head(1, self.all_kinds, &[], None, |_| true)
+                .is_empty()
+        })
     }
 
     /// Makes `snapshot` the source of rows, dropping rows of the previous
@@ -473,10 +476,13 @@ impl App {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        let workspace = self.workspace_scope();
-        let docs = snapshot.head(limit, self.all_kinds, &self.excluded_paths, |project| {
-            list_state::card_project_visible(project, &self.excluded_projects, &workspace)
-        });
+        let docs = snapshot.head(
+            limit,
+            self.all_kinds,
+            &self.excluded_paths,
+            self.scope_workspace(),
+            |project| list_state::card_project_visible(project, &self.excluded_projects),
+        );
         let docs: Vec<u32> = docs
             .into_iter()
             .filter(|&doc| !self.is_removed(doc))
@@ -493,12 +499,9 @@ impl App {
                 .is_some_and(|snapshot| self.removed.contains(&snapshot.key_hash(doc)))
     }
 
-    fn workspace_scope(&self) -> list_state::WorkspaceScope<'_> {
-        list_state::WorkspaceScope::new(
-            self.current_project_dir_name
-                .as_deref()
-                .filter(|_| self.workspace_filter),
-        )
+    /// The workspace rows must belong to, while the project scope is on.
+    pub(super) fn scope_workspace(&self) -> Option<&Workspace> {
+        self.workspace.as_ref().filter(|_| self.workspace_filter)
     }
 
     /// Index in `conversations` of snapshot card `doc`, materializing it on
@@ -642,12 +645,12 @@ impl App {
         let Some(index) = &self.search_index else {
             return;
         };
-        let workspace = self.workspace_scope();
-        let mut docs = index
-            .cards()
-            .scope(self.all_kinds, &self.excluded_paths, |project| {
-                list_state::card_project_visible(project, &self.excluded_projects, &workspace)
-            });
+        let mut docs = index.cards().scope(
+            self.all_kinds,
+            &self.excluded_paths,
+            self.scope_workspace(),
+            |project| list_state::card_project_visible(project, &self.excluded_projects),
+        );
         if !self.removed.is_empty() {
             for (doc, in_scope) in docs.iter_mut().enumerate() {
                 *in_scope &= !self.is_removed(doc as u32);
@@ -867,7 +870,12 @@ impl App {
     }
 
     pub fn has_project_context(&self) -> bool {
-        self.current_project_dir_name.is_some()
+        self.workspace.is_some()
+    }
+
+    /// The directory the project scope is anchored to, when there is one.
+    pub fn workspace(&self) -> Option<&Workspace> {
+        self.workspace.as_ref()
     }
 
     #[cfg(test)]

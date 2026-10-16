@@ -424,6 +424,7 @@ mod tests {
             project_name: None,
             project_path: None,
             cwd: None,
+            cwds: Vec::new(),
             message_count: 1,
             parse_errors: Vec::new(),
             summary: None,

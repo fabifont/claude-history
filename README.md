@@ -681,7 +681,17 @@ by modification time (newest first). Each conversation shows its project path so
 you can identify which project it belongs to.
 
 Press `Tab` to toggle between all conversations and the current workspace only.
-Use `-L`/`--local` to start with the workspace filter active.
+Use `-L`/`--local` to start with the workspace filter active. While it is on,
+the search prompt shows the workspace folder, e.g. `~/code/repo ❯`.
+
+The workspace is the directory `claude-history` runs in. A conversation belongs
+to it when it was started there, or when any working directory it recorded is
+that directory or a folder below it. A session started in `~/code` that moved
+into `~/code/repo` therefore shows up in `~/code/repo`'s scope, and running from
+`~/code` includes sessions from every repo below it. Folders match whole path
+components: `~/code/repo` does not include `~/code/repo-old`. This applies to
+Claude Code, Pi, OMP and Codex sessions, to `Tab` and `-L`, and to
+`agent search --local`.
 
 For [workmux](https://github.com/raine/workmux) users, worktree paths are
 displayed in a compact format: `[project/worktree]` instead of just the worktree
@@ -868,6 +878,7 @@ Customize the keybindings for list actions. Values are key combinations like
   rows like `"repo/feature"`. Excluded conversations remain on disk and can
   still be opened by pasting their full UUID or by passing the JSONL file path
   directly.
+<<<<<<< HEAD
 - `exclude_paths` (array of strings): Hide sessions whose recorded working
   directory starts with any listed prefix, in both TUI browse/search lists and
   `agent search`. Defaults to empty. Matching is literal and case-sensitive
@@ -880,6 +891,31 @@ Customize the keybindings for list actions. Values are key combinations like
   directory stay visible. Exclusions apply in local and global scope.
   Transcripts remain on disk and can still be opened by full UUID or file path,
   or with `agent read`, `agent outline`, and `agent within`.
+||||||| parent of 1118cfc (include sessions by recorded cwd in workspace scope)
+- `exclude_paths` (array of strings): Hide sessions whose recorded working
+  directory starts with any listed prefix, in both TUI browse/search lists and
+  `agent search`. Defaults to empty. Matching is literal and case-sensitive:
+  `"/tmp/"` matches `"/tmp/eval-123"`, but not `"/tmp"` or `"/tmp-other"`;
+  `"/tmp"` matches all three. Paths are not resolved, so deleted directories
+  still match; list both `"/tmp/"` and `"/private/tmp/"` to cover both spellings.
+  No `~`, environment-variable, or glob expansion is performed. Empty entries
+  are ignored, and sessions without a recorded working directory stay visible.
+  Exclusions apply in local and global scope. Transcripts remain on disk and
+  can still be opened by full UUID or file path, or with `agent read`,
+  `agent outline`, and `agent within`.
+=======
+- `exclude_paths` (array of strings): Hide sessions whose first recorded
+  working directory starts with any listed prefix, in both TUI browse/search lists and
+  `agent search`. Defaults to empty. Matching is literal and case-sensitive:
+  `"/tmp/"` matches `"/tmp/eval-123"`, but not `"/tmp"` or `"/tmp-other"`;
+  `"/tmp"` matches all three. Paths are not resolved, so deleted directories
+  still match; list both `"/tmp/"` and `"/private/tmp/"` to cover both spellings.
+  No `~`, environment-variable, or glob expansion is performed. Empty entries
+  are ignored, and sessions without a recorded working directory stay visible.
+  Exclusions apply in local and global scope. Transcripts remain on disk and
+  can still be opened by full UUID or file path, or with `agent read`,
+  `agent outline`, and `agent within`.
+>>>>>>> 1118cfc (include sessions by recorded cwd in workspace scope)
 - `semantic_search` (boolean): Deprecated compatibility alias. When
   `[search].mode` is unset, `true` starts list search in semantic mode and
   `false` starts lexical mode. Press `Ctrl+T` in the TUI to switch modes.

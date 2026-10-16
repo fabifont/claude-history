@@ -220,6 +220,7 @@ impl Generation {
                     row.summary,
                     row.model,
                     row.cwd,
+                    row.cwds,
                     row.preview_first,
                     row.preview_last,
                 ]
@@ -334,6 +335,16 @@ impl Generation {
         }
     }
 
+    /// Every distinct cwd card `row` records, `cwd` first.
+    pub fn cwds<'a>(&'a self, row: &CardRow) -> impl Iterator<Item = &'a str> {
+        let first = (row.flags & card_flags::CWD != 0).then(|| self.str(row.cwd));
+        first.into_iter().chain(
+            self.str(row.cwds)
+                .split(CWD_SEPARATOR)
+                .filter(|cwd| !cwd.is_empty()),
+        )
+    }
+
     /// Indices of the first `n` rows accepted by `keep`, newest first.
     pub fn head(&self, n: usize, mut keep: impl FnMut(&CardRow) -> bool) -> Vec<u32> {
         self.rows()
@@ -382,6 +393,7 @@ impl Generation {
             project_path: (project.flags & project_flags::PATH != 0)
                 .then(|| PathBuf::from(self.str(project.path))),
             cwd: optional(card_flags::CWD, row.cwd).map(PathBuf::from),
+            cwds: self.cwds(row).map(PathBuf::from).collect(),
             message_count: row.message_count as usize,
             parse_errors: Vec::new(),
             summary: optional(card_flags::SUMMARY, row.summary),
@@ -484,6 +496,9 @@ fn workspace_key(
     (key, true)
 }
 
+/// Separates the paths of `CardRow::cwds`; no path contains it.
+const CWD_SEPARATOR: &str = "\0";
+
 fn path_str(path: &Path) -> std::borrow::Cow<'_, str> {
     path.to_string_lossy()
 }
@@ -510,6 +525,8 @@ pub struct CardData {
     summary: Option<String>,
     model: Option<String>,
     cwd: Option<String>,
+    /// `CardRow::cwds`.
+    cwds: String,
     preview_first: String,
     preview_last: String,
     message_count: u32,
@@ -552,6 +569,13 @@ impl CardData {
                 .cwd
                 .as_deref()
                 .map(|path| path_str(path).into_owned()),
+            cwds: conversation
+                .cwds
+                .iter()
+                .filter(|cwd| conversation.cwd.as_ref() != Some(*cwd))
+                .map(|cwd| path_str(cwd))
+                .collect::<Vec<_>>()
+                .join(CWD_SEPARATOR),
             preview_first: cap_preview(&conversation.preview_first).to_owned(),
             preview_last: cap_preview(&conversation.preview_last).to_owned(),
             message_count: u32::try_from(conversation.message_count).unwrap_or(u32::MAX),
@@ -589,6 +613,7 @@ impl CardData {
             summary: card(card_flags::SUMMARY, row.summary),
             model: card(card_flags::MODEL, row.model),
             cwd: card(card_flags::CWD, row.cwd),
+            cwds: str(row.cwds),
             preview_first: str(row.preview_first),
             preview_last: str(row.preview_last),
             message_count: row.message_count,
@@ -683,6 +708,7 @@ fn build_manifest(
             summary,
             model,
             cwd,
+            cwds: heap.push(&card.cwds),
             preview_first: heap.push(&card.preview_first),
             preview_last: heap.push(&card.preview_last),
             project_id: project_ids[&card.project],

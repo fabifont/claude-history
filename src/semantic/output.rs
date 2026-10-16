@@ -97,6 +97,7 @@ mod tests {
             project_name: Some("project-a".to_string()),
             project_path: None,
             cwd: None,
+            cwds: Vec::new(),
             message_count: 1,
             parse_errors: vec![],
             summary: None,

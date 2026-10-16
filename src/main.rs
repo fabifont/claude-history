@@ -258,40 +258,16 @@ fn run() -> Result<()> {
         let now = chrono::Local::now();
 
         // Optionally filter to local workspace
-        let current_project_dir_name = if args.local {
-            std::env::current_dir()
-                .ok()
-                .map(|d| history::convert_path_to_project_dir_name(&d))
+        let workspace = if args.local {
+            history::Workspace::current()
         } else {
             None
         };
 
         let debug_search = search::debug_search(&conversations, &searchable, query, now, |index| {
-            if let Some(ref proj) = current_project_dir_name {
-                let conv = &conversations[index];
-                if conv.source != history::model::SourceKind::Claude {
-                    let Ok(current) = std::env::current_dir() else {
-                        return false;
-                    };
-                    let current = current.canonicalize().unwrap_or(current);
-                    return conv
-                        .project_path
-                        .as_ref()
-                        .or(conv.cwd.as_ref())
-                        .is_some_and(|path| {
-                            history::path::same_path(
-                                &path.canonicalize().unwrap_or_else(|_| path.clone()),
-                                &current,
-                            )
-                        });
-                }
-                return conv
-                    .path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .is_some_and(|name| history::is_same_project(&name.to_string_lossy(), proj));
-            }
-            true
+            workspace
+                .as_ref()
+                .is_none_or(|workspace| workspace.contains(&conversations[index]))
         });
         let results = debug_search.results;
 
@@ -409,11 +385,9 @@ fn run() -> Result<()> {
 
     let use_local = args.local;
 
-    // Determine the current workspace's project directory name (for workspace filter)
+    // The directory the workspace filter is anchored to
     let current_dir = std::env::current_dir().ok();
-    let current_project_dir_name = current_dir
-        .as_ref()
-        .map(|d| history::convert_path_to_project_dir_name(d));
+    let workspace = current_dir.as_deref().map(history::Workspace::new);
 
     // Handle --show-dir flag (needs current_dir)
     if args.show_dir {
@@ -447,7 +421,7 @@ fn run() -> Result<()> {
             time_filter,
             keys,
             workspace_filter,
-            current_project_dir_name,
+            workspace,
             exclude_projects,
             exclude_paths,
             &query,
@@ -461,7 +435,7 @@ fn run() -> Result<()> {
         show_thinking,
         keys,
         workspace_filter,
-        current_project_dir_name,
+        workspace,
         exclude_projects,
         exclude_paths,
         tui::TuiSearchOptions {
@@ -1020,6 +994,7 @@ mod agent_command_tests {
             project_name: Some("project-a".to_string()),
             project_path: None,
             cwd: None,
+            cwds: Vec::new(),
             message_count,
             parse_errors: Vec::new(),
             summary: None,
@@ -1602,6 +1577,7 @@ mod agent_command_tests {
             project_name: Some("project-a".to_string()),
             project_path: None,
             cwd: None,
+            cwds: Vec::new(),
             message_count: 1,
             parse_errors: Vec::new(),
             summary: None,

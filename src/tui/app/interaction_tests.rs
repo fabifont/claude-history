@@ -30,6 +30,7 @@ fn test_conversation(path: PathBuf, custom_title: Option<String>) -> Conversatio
         project_name: Some("project".to_string()),
         project_path: None,
         cwd: None,
+        cwds: Vec::new(),
         message_count: 1,
         parse_errors: Vec::new(),
         summary: None,

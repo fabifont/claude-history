@@ -444,8 +444,7 @@ impl App {
                 &self.excluded_projects,
                 &self.excluded_paths,
                 self.all_kinds,
-                self.workspace_filter,
-                self.current_project_dir_name.as_deref(),
+                self.scope_workspace(),
             );
             return Arc::new(
                 indices
@@ -1040,7 +1039,7 @@ impl App {
     }
 
     pub(super) fn toggle_workspace_filter(&mut self) {
-        if self.current_project_dir_name.is_some() {
+        if self.workspace.is_some() {
             self.workspace_filter = !self.workspace_filter;
             self.semantic_sent_scope_signature = None;
             self.invalidate_search_generation();

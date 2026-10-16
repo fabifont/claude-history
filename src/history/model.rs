@@ -259,6 +259,16 @@ pub struct Event {
     pub kind: EventKind,
 }
 
+/// Most distinct working directories kept for one conversation.
+pub const MAX_CWDS: usize = 16;
+
+/// Adds `cwd` to `cwds` unless it is already there or `cwds` is full.
+pub fn push_cwd(cwds: &mut Vec<PathBuf>, cwd: PathBuf) {
+    if cwds.len() < MAX_CWDS && !cwds.contains(&cwd) {
+        cwds.push(cwd);
+    }
+}
+
 /// What the source records about the session as a whole, resolved by the
 /// adapter from its records under the source's own rules.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -267,6 +277,9 @@ pub struct SessionMeta {
     pub session_id: String,
     /// Working directory the session ran in.
     pub cwd: Option<PathBuf>,
+    /// Every distinct working directory the session recorded, in order of
+    /// first appearance and at most `MAX_CWDS`; the first is `cwd`.
+    pub cwds: Vec<PathBuf>,
     /// Project the conversation is listed under.
     pub project: Option<PathBuf>,
     pub model: Option<String>,

@@ -3,7 +3,7 @@ use super::*;
 use crate::history::Conversation;
 use chrono::{Local, TimeZone};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn conversation(project: Option<&str>, project_dir: &str, uuid: &str, text: &str) -> Conversation {
     Conversation {
@@ -24,6 +24,7 @@ fn conversation(project: Option<&str>, project_dir: &str, uuid: &str, text: &str
         project_name: project.map(str::to_string),
         project_path: None,
         cwd: None,
+        cwds: Vec::new(),
         message_count: 1,
         parse_errors: Vec::new(),
         summary: None,
@@ -47,9 +48,7 @@ fn mixed_sources_are_identified_and_pi_local_filter_uses_header_cwd() {
     let mut app = app(vec![claude, pi], vec![]);
     assert!(app.has_multiple_sources());
     app.workspace_filter = true;
-    app.current_project_dir_name = Some(crate::history::convert_path_to_project_dir_name(
-        &std::env::current_dir().unwrap(),
-    ));
+    app.workspace = crate::history::Workspace::current();
     let filtered = app.filter_indices(0..app.conversations.len());
     assert_eq!(filtered, vec![1]);
 }
@@ -260,7 +259,7 @@ fn exclude_projects_apply_before_workspace_filter() {
         vec!["Hidden"],
     );
     app.workspace_filter = true;
-    app.current_project_dir_name = Some("-tmp-project".to_string());
+    app.workspace = Some(crate::history::Workspace::new(Path::new("/tmp/project")));
     app.update_filter();
 
     assert_eq!(filtered_projects(&app), vec![Some("Visible")]);
@@ -1082,7 +1081,7 @@ fn semantic_scope_indices_apply_scope() {
             ..Default::default()
         },
     );
-    app.current_project_dir_name = Some("-tmp-visible".to_string());
+    app.workspace = Some(crate::history::Workspace::new(Path::new("/tmp/visible")));
     app.workspace_filter = true;
 
     let indices = app.semantic_scope_indices();
@@ -1561,7 +1560,7 @@ fn configured_ctrl_t_binding_takes_precedence_over_semantic_toggle() {
 fn workspace_toggle_dispatches_new_semantic_request() {
     let (mut app, request_rx, _response_tx) =
         app_with_single_visible_conversation_and_semantic_worker();
-    app.current_project_dir_name = Some("-tmp-visible".to_string());
+    app.workspace = Some(crate::history::Workspace::new(Path::new("/tmp/visible")));
     app.query = "needle".to_string();
 
     app.toggle_workspace_filter();

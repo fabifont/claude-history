@@ -308,6 +308,7 @@ impl Indexer {
             ),
             project_path: Some(project_path),
             cwd: meta.cwd.clone(),
+            cwds: meta.cwds.clone(),
             message_count: ordinals.count(),
             parse_errors: transcript.diagnostics.clone(),
             summary: meta.summary.as_deref().map(|s| nfc(s).into_owned()),

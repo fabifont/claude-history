@@ -1081,14 +1081,21 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     let prompt_style = Style::default().fg(rgb(th().accent));
     let (prompt_spans, prefix_width) = if app.workspace_filter() {
+        // The folder the project scope is anchored to, keeping its end when
+        // it would take more than a third of the bar.
+        let label = app.workspace().map_or_else(
+            || "Project".to_string(),
+            |workspace| truncate_start(workspace.display(), (area.width as usize / 3).max(8)),
+        );
+        let prefix_width = UnicodeWidthStr::width(label.as_str()) + 4;
         (
             vec![
                 Span::raw(" "),
-                Span::styled("Project", Style::default().fg(rgb(th().text_muted))),
+                Span::styled(label, Style::default().fg(rgb(th().text_muted))),
                 Span::raw(" "),
                 Span::styled("\u{276F} ", prompt_style),
             ],
-            11,
+            prefix_width,
         )
     } else {
         (
@@ -2734,6 +2741,7 @@ mod tests {
             project_name: Some("project sentinel".to_string()),
             project_path: None,
             cwd: Some(PathBuf::from("/cwd/sentinel")),
+            cwds: vec![PathBuf::from("/cwd/sentinel")],
             message_count: 1,
             parse_errors: Vec::new(),
             summary: Some("summary sentinel".to_string()),
@@ -2843,6 +2851,44 @@ mod tests {
         assert!(!line.contains("sem cache"), "{line:?}");
         assert!(line.contains("1/1"), "{line:?}");
         assert_cursor_inside(&mut terminal, width);
+    }
+
+    #[test]
+    fn project_scope_prompt_shows_anchor_folder() {
+        let workspace_app = |dir: &str| {
+            App::new_loading_with_options(
+                ToolDisplayMode::Truncated,
+                false,
+                KeyBindings::default(),
+                true,
+                Some(crate::history::Workspace::new(std::path::Path::new(dir))),
+                vec![],
+                vec![],
+                crate::tui::TuiSearchOptions::default(),
+            )
+        };
+        let render = |app: &App, width: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(width, 4)).unwrap();
+            terminal
+                .draw(|frame| render_search_bar(frame, app, frame.area()))
+                .unwrap();
+            assert_cursor_inside(&mut terminal, width);
+            row_text(&terminal, 0)
+        };
+
+        let mut app = workspace_app("/nonexistent/group/repo-a");
+        app.set_query_for_test("query");
+        let line = render(&app, 80);
+        assert!(
+            line.starts_with(" /nonexistent/group/repo-a \u{276F} query"),
+            "{line:?}"
+        );
+
+        let line = render(&app, 45);
+        assert!(
+            line.starts_with(" …t/group/repo-a \u{276F} query"),
+            "{line:?}"
+        );
     }
 
     #[test]

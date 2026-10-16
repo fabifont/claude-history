@@ -42,12 +42,6 @@ fn paths_eq(a: &Path, b: &Path, ignore_case: bool) -> bool {
     a.components().map(fold).eq(b.components().map(fold))
 }
 
-/// Whether two path strings name the same location, ignoring letter case
-/// where the platform's filesystems do.
-pub(crate) fn same_path_str(a: &str, b: &str) -> bool {
-    path_str_eq(a, b, PATHS_IGNORE_CASE)
-}
-
 /// Whether two paths name the same location, ignoring letter case where the
 /// platform's filesystems do. Neither path is resolved.
 pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
@@ -67,6 +61,39 @@ fn cwd_has_prefix(cwd: Option<&Path>, prefixes: &[String], ignore_case: bool) ->
             .iter()
             .any(|prefix| !prefix.is_empty() && path_str_starts_with(&cwd, prefix, ignore_case))
     })
+}
+
+/// Whether `path` is `dir` or a directory below it, ignoring letter case
+/// where the platform's filesystems do. Compares whole path components, so
+/// `/a/repo` is not within `/a/re`, and resolves nothing. Workspace scope
+/// compares recorded paths only through this.
+pub(crate) fn path_is_within(path: &Path, dir: &Path) -> bool {
+    path_within(path, dir, PATHS_IGNORE_CASE)
+}
+
+fn path_within(path: &Path, dir: &Path, ignore_case: bool) -> bool {
+    if !ignore_case {
+        return path.starts_with(dir);
+    }
+    let mut components = path.components();
+    dir.components().all(|component| {
+        components.next().is_some_and(|other| {
+            path_str_eq(
+                &component.as_os_str().to_string_lossy(),
+                &other.as_os_str().to_string_lossy(),
+                true,
+            )
+        })
+    })
+}
+
+/// `path` with the home directory written as `~`.
+pub fn tilde_path(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => Path::new("~").join(rest).display().to_string(),
+        None => path.display().to_string(),
+    }
 }
 
 /// Whether `[tui] exclude_projects` hides the project named `project_name`
@@ -514,6 +541,37 @@ mod tests {
             encoded_project_root("-Users-raine-code-project"),
             "-Users-raine-code-project"
         );
+    }
+
+    #[test]
+    fn path_within_ignores_case_only_when_asked() {
+        let dir = Path::new("/Users/Foo/MyProject");
+        let below = Path::new("/users/foo/myproject/src");
+        assert!(path_within(below, dir, true));
+        assert!(!path_within(below, dir, false));
+        assert!(!path_within(Path::new("/users/foo/myproject2"), dir, true));
+        assert!(!path_within(Path::new("/users/foo"), dir, true));
+    }
+
+    #[test]
+    fn path_is_within_matches_whole_components() {
+        let repo = Path::new("/a/repo");
+        assert!(path_is_within(Path::new("/a/repo"), repo));
+        assert!(path_is_within(Path::new("/a/repo/"), repo));
+        assert!(path_is_within(Path::new("/a/repo/src/x"), repo));
+        assert!(!path_is_within(Path::new("/a/repo-other"), repo));
+        assert!(!path_is_within(Path::new("/a"), repo));
+        assert!(!path_is_within(Path::new("/b/a/repo"), repo));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tilde_path_abbreviates_home() {
+        let home = Some(Path::new("/home/me"));
+        assert_eq!(tilde_path(Path::new("/home/me"), home), "~");
+        assert_eq!(tilde_path(Path::new("/home/me/code/x"), home), "~/code/x");
+        assert_eq!(tilde_path(Path::new("/home/meow"), home), "/home/meow");
+        assert_eq!(tilde_path(Path::new("/srv/x"), None), "/srv/x");
     }
 
     #[test]

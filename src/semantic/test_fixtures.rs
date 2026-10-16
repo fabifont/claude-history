@@ -107,6 +107,7 @@ impl SemanticConversationFixture {
             semantic_turns: self.semantic_turns.into(),
             project_name: Some(self.project_name),
             project_path: Some(self.project_path),
+            cwds: self.cwd.iter().cloned().collect(),
             cwd: self.cwd,
             message_count: 1,
             parse_errors: Vec::new(),

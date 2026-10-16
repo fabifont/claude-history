@@ -55,6 +55,9 @@ pub struct CardRow {
     pub summary: StrRef,
     pub model: StrRef,
     pub cwd: StrRef,
+    /// The distinct cwds recorded after `cwd` (`Conversation::cwds`),
+    /// separated by NUL; empty when the conversation recorded one at most.
+    pub cwds: StrRef,
     pub preview_first: StrRef,
     pub preview_last: StrRef,
     /// Index into the manifest's project table.
@@ -224,7 +227,7 @@ pub struct Header {
 }
 
 pub const MAGIC: [u8; 8] = *b"CHGEN\0\0\0";
-pub const VERSION: u32 = 11;
+pub const VERSION: u32 = 12;
 
 pub fn source_to_u8(source: crate::history::model::SourceKind) -> u8 {
     match source {
@@ -263,7 +266,7 @@ mod tests {
 
     #[test]
     fn records_have_no_implicit_padding() {
-        assert_eq!(std::mem::size_of::<CardRow>(), 128);
+        assert_eq!(std::mem::size_of::<CardRow>(), 136);
         assert_eq!(std::mem::size_of::<ProjectRow>(), 32);
         assert_eq!(std::mem::size_of::<Fingerprint>(), 16);
         assert_eq!(std::mem::size_of::<IndexLoc>(), 8);

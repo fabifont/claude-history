@@ -36,6 +36,7 @@ pub fn one_message_conversation(
         project_name: project.map(str::to_string),
         project_path: None,
         cwd: None,
+        cwds: Vec::new(),
         message_count: 1,
         parse_errors: vec![],
         summary: summary.map(str::to_string),

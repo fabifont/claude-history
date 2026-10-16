@@ -610,3 +610,26 @@ fn threads_without_messages_were_last_active_at_their_last_record() {
         "2026-09-03T10:01:00+00:00"
     );
 }
+
+#[test]
+fn threads_record_the_cwds_of_their_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let context = |cwd: &str| {
+        format!(
+            r#"{{"timestamp":"2026-09-03T10:01:00.000Z","type":"turn_context","payload":{{"cwd":"{cwd}","model":"gpt-5-codex"}}}}"#
+        )
+    };
+    let records = [
+        context("/work/demo"),
+        context("/work/demo/sub"),
+        context("/work/demo"),
+    ];
+    let records: Vec<&str> = records.iter().map(String::as_str).collect();
+    let transcript = rollout_thread(dir.path(), "", &records);
+    assert_eq!(transcript.meta.cwd, Some(PathBuf::from("/work/demo")));
+    assert_eq!(
+        transcript.meta.cwds,
+        vec![PathBuf::from("/work/demo"), PathBuf::from("/work/demo/sub")]
+    );
+    assert_eq!(transcript.meta.model.as_deref(), Some("gpt-5-codex"));
+}

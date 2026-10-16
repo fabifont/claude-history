@@ -810,11 +810,11 @@ mod tests {
         let snapshot =
             crate::store::Snapshot::open(&fixture.root, false, Default::default()).unwrap();
         assert_eq!(
-            snapshot.head(usize::MAX, false, &[], |_| true).len(),
+            snapshot.head(usize::MAX, false, &[], None, |_| true).len(),
             generation.rows().len() - 2
         );
         assert_eq!(
-            snapshot.head(usize::MAX, true, &[], |_| true).len(),
+            snapshot.head(usize::MAX, true, &[], None, |_| true).len(),
             generation.rows().len()
         );
 

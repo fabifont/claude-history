@@ -221,6 +221,7 @@ pub(super) fn transcript_of(
         meta: SessionMeta {
             session_id: session.header.id,
             cwd: Some(cwd.clone()),
+            cwds: vec![cwd.clone()],
             project: Some(cwd),
             model,
             summary: None,

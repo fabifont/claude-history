@@ -12,7 +12,7 @@ use crate::history::adapter::{Adapter, Completeness, Discovery, Located};
 use crate::history::model::{
     ConversationKey, Event, EventKind, ExecutionMode, HeadStatus, Message, Origin, Part,
     Relationship, Revision, Role, Segment, SessionMeta, SourceInstance, SourceKind, TitleKind,
-    Transcript, Usage, Visibility,
+    Transcript, Usage, Visibility, push_cwd,
 };
 use crate::history::path::decode_project_dir_name_to_path;
 use chrono::{DateTime, Utc};
@@ -301,7 +301,8 @@ pub(crate) fn decode_reader(
         end: lines.bytes,
         inherited: false,
     }];
-    let project = records.cwd.clone().unwrap_or_else(|| {
+    let cwd = records.cwds.first().cloned();
+    let project = cwd.clone().unwrap_or_else(|| {
         path.parent()
             .and_then(Path::file_name)
             .map(|dir| decode_project_dir_name_to_path(&dir.to_string_lossy()))
@@ -313,7 +314,8 @@ pub(crate) fn decode_reader(
             .and_then(|name| name.to_str())
             .unwrap_or_default()
             .to_owned(),
-        cwd: records.cwd.take(),
+        cwd,
+        cwds: std::mem::take(&mut records.cwds),
         project: Some(project),
         model: records.model.take(),
         summary: records.summary.take(),
@@ -397,14 +399,14 @@ impl<R: BufRead> Lines<R> {
 }
 
 /// Converts Claude-format records into events, in order, collecting the
-/// session metadata they define: the first user record's cwd, the first
+/// session metadata they define: the distinct cwds of user records, the first
 /// assistant model, the first summary unless a generated title replaces
 /// it, and the last custom title. A file-history snapshot, which records
 /// file states for undo rather than the conversation, yields no event.
 #[derive(Default)]
 pub(crate) struct Records {
     count: usize,
-    cwd: Option<PathBuf>,
+    cwds: Vec<PathBuf>,
     model: Option<String>,
     summary: Option<String>,
     custom_title: Option<String>,
@@ -422,10 +424,8 @@ impl Records {
                 usage,
                 ..
             } => {
-                if self.cwd.is_none()
-                    && let Some(cwd) = cwd
-                {
-                    self.cwd = Some(PathBuf::from(cwd));
+                if let Some(cwd) = cwd {
+                    push_cwd(&mut self.cwds, PathBuf::from(cwd));
                 }
                 let parts = match message.content {
                     UserContent::String(text) => vec![Part::Text(text)],
@@ -594,6 +594,24 @@ mod tests {
         assert_eq!(
             transcript.meta.updated_at.unwrap().to_rfc3339(),
             "2026-10-15T14:51:56+00:00"
+        );
+    }
+
+    #[test]
+    fn records_every_distinct_cwd_with_the_first_as_cwd() {
+        let transcript = decode_with_mtime(
+            &[
+                r#"{"type":"user","cwd":"/work","message":{"role":"user","content":"a"}}"#,
+                r#"{"type":"user","cwd":"/work/repo","message":{"role":"user","content":"b"}}"#,
+                r#"{"type":"user","cwd":"/work","message":{"role":"user","content":"c"}}"#,
+                r#"{"type":"user","message":{"role":"user","content":"d"}}"#,
+            ],
+            SystemTime::now(),
+        );
+        assert_eq!(transcript.meta.cwd, Some(PathBuf::from("/work")));
+        assert_eq!(
+            transcript.meta.cwds,
+            vec![PathBuf::from("/work"), PathBuf::from("/work/repo")]
         );
     }
 

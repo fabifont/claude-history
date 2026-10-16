@@ -17,7 +17,7 @@ fn loading_app(workspace: Option<&str>, excluded: Vec<&str>) -> App {
         false,
         KeyBindings::default(),
         workspace.is_some(),
-        workspace.map(str::to_string),
+        workspace.map(|dir| crate::history::Workspace::new(std::path::Path::new(dir))),
         excluded.into_iter().map(str::to_string).collect(),
         vec![],
         TuiSearchOptions::default(),
@@ -111,7 +111,7 @@ fn snapshot_rows_honor_workspace_exclusions_and_time_window() {
     corpus.push(conversation("/p/-tmp-gamma/e.jsonl", 5 * HOUR_MS));
     let root = publish(&corpus);
 
-    let mut app = loading_app(Some("-tmp-alpha"), vec!["gamma"]);
+    let mut app = loading_app(Some("/tmp/alpha"), vec!["gamma"]);
     let time = TimeFilter {
         after: Some(chrono::Local.timestamp_millis_opt(2 * HOUR_MS).unwrap()),
         before: None,
@@ -175,11 +175,69 @@ fn snapshot_pi_rows_match_workspace_by_canonical_project_path() {
     elsewhere.project_path = Some(PathBuf::from("/tmp/elsewhere-project"));
     let root = publish(&[here, elsewhere]);
 
-    let project_dir = crate::history::convert_path_to_project_dir_name(&current);
-    let mut app = loading_app(Some(&project_dir), vec![]);
+    let mut app = loading_app(current.to_str(), vec![]);
     show(&mut app, &root, TimeFilter::default());
     assert_eq!(listed_paths(&app), vec!["/pi/sessions/here.jsonl"]);
     assert!(!app.has_multiple_sources());
+}
+
+#[test]
+fn snapshot_rows_match_workspace_by_recorded_cwds() {
+    use crate::history::model::SourceKind;
+    let card = |path: &str, at: i64, source: SourceKind, cwds: &[&str]| {
+        let mut card = conversation(path, at * HOUR_MS);
+        card.source = source;
+        card.cwds = cwds.iter().map(PathBuf::from).collect();
+        card.cwd = card.cwds.first().cloned();
+        card.project_path = card.cwd.clone();
+        card.full_text = "needle".into();
+        card
+    };
+    let corpus = vec![
+        // Started in the parent folder, then worked in the repo.
+        card(
+            "/p/-work-group/moved.jsonl",
+            1,
+            SourceKind::Claude,
+            &["/work/group", "/work/group/repo-b", "/work/group/repo/src"],
+        ),
+        card(
+            "/p/-work-group/sibling.jsonl",
+            2,
+            SourceKind::Claude,
+            &["/work/group", "/work/group/repo-other"],
+        ),
+        card("/p/-work-group-repo/home.jsonl", 3, SourceKind::Claude, &[]),
+        card(
+            "/s/codex.jsonl",
+            4,
+            SourceKind::Codex,
+            &["/work/x", "/work/group/repo"],
+        ),
+        card("/s/pi.jsonl", 5, SourceKind::Pi, &["/work/group/repo/deep"]),
+        card("/s/pi-other.jsonl", 6, SourceKind::Pi, &["/work/group"]),
+    ];
+    let root = publish(&corpus);
+    let snapshot = crate::store::Snapshot::open(root.path(), true, TimeFilter::default()).unwrap();
+    let doc = snapshot
+        .find(std::path::Path::new("/p/-work-group/moved.jsonl"))
+        .unwrap();
+    assert_eq!(snapshot.card(doc).cwds, corpus[0].cwds);
+
+    let mut app = loading_app(Some("/work/group/repo"), vec![]);
+    show(&mut app, &root, TimeFilter::default());
+    let in_scope = [
+        "/s/pi.jsonl",
+        "/s/codex.jsonl",
+        "/p/-work-group-repo/home.jsonl",
+        "/p/-work-group/moved.jsonl",
+    ];
+    assert_eq!(listed_paths(&app), in_scope);
+
+    assert!(app.open_search_index());
+    type_query(&mut app, "needle");
+    wait_for_search(&mut app);
+    assert_eq!(listed_paths(&app), in_scope);
 }
 
 fn needle_corpus() -> Vec<Conversation> {
@@ -249,7 +307,7 @@ fn index_results_match_in_memory_search() {
 #[test]
 fn index_scope_follows_workspace_filter() {
     let root = publish(&needle_corpus());
-    let mut app = loading_app(Some("-tmp-beta"), vec![]);
+    let mut app = loading_app(Some("/tmp/beta"), vec![]);
     show(&mut app, &root, TimeFilter::default());
     assert!(app.open_search_index());
     type_query(&mut app, "full");
@@ -440,7 +498,7 @@ fn uuid_query_finds_cards_beyond_the_first_rows() {
 #[test]
 fn semantic_results_map_to_cards_by_path() {
     let root = publish(&corpus());
-    let mut app = loading_app(Some("-tmp-alpha"), vec![]);
+    let mut app = loading_app(Some("/tmp/alpha"), vec![]);
     show(&mut app, &root, TimeFilter::default());
     let mut loaded = corpus();
     loaded.push(conversation("/p/-tmp-alpha/unpublished.jsonl", 9 * HOUR_MS));
