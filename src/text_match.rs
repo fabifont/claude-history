@@ -93,7 +93,7 @@ pub fn contains_prefix_match(text: &str, word: &str) -> bool {
         if is_word_start(text, actual_pos) {
             return true;
         }
-        start = actual_pos + word.len().max(1);
+        start = actual_pos + text[actual_pos..].chars().next().map_or(1, char::len_utf8);
     }
     false
 }
@@ -171,5 +171,6 @@ mod tests {
     fn prefix_match_respects_word_start() {
         assert!(contains_prefix_match("redaction plan", "red"));
         assert!(!contains_prefix_match("fired plan", "red"));
+        assert!(contains_prefix_match("bump to v1.1.1", "1.1"));
     }
 }

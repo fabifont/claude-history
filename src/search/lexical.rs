@@ -564,7 +564,10 @@ fn is_word_start(text: &str, pos: usize) -> bool {
             .is_some_and(|c| !c.is_alphanumeric())
 }
 
-/// Count prefix matches of `word` in `text`, up to `max_count`.
+/// Count prefix matches of `word` in `text`, up to `max_count`: occurrences
+/// at word starts, each after the end of the previous one counted. An
+/// occurrence inside a word does not hide one starting within it, so `1.1`
+/// is found in `v1.1.1`.
 pub(crate) fn count_prefix_matches(text: &str, word: &str, max_count: usize) -> usize {
     let mut start = 0;
     let mut count = 0;
@@ -575,10 +578,17 @@ pub(crate) fn count_prefix_matches(text: &str, word: &str, max_count: usize) -> 
             if count >= max_count {
                 break;
             }
+            start = actual_pos + word.len().max(1);
+        } else {
+            start = next_char(text, actual_pos);
         }
-        start = actual_pos + word.len().max(1);
     }
     count
+}
+
+/// Byte offset of the char after the one at `pos`.
+fn next_char(text: &str, pos: usize) -> usize {
+    pos + text[pos..].chars().next().map_or(1, char::len_utf8)
 }
 
 /// Count how many precomputed adjacent pairs appear in text.
@@ -598,8 +608,10 @@ pub(crate) fn count_adjacent_pairs(
                 if count >= max_count {
                     return count;
                 }
+                start = actual_pos + combined.len().max(1);
+            } else {
+                start = next_char(text, actual_pos);
             }
-            start = actual_pos + combined.len().max(1);
         }
     }
     count
@@ -1099,6 +1111,21 @@ mod tests {
         let searchable = precompute_search_text(&convs);
         let results = search(&convs, &searchable, "agents config", now);
         assert_eq!(results[0], 0, "adjacent terms should score higher");
+    }
+
+    #[test]
+    fn mid_word_occurrence_does_not_hide_a_word_start_inside_it() {
+        assert_eq!(count_prefix_matches("bump to v1.1.1 now", "1.1", 10), 1);
+        assert_eq!(count_prefix_matches("1.1.1 x1.1", "1.1", 10), 1);
+        assert_eq!(count_prefix_matches("aab ab", "ab", 10), 1);
+        assert_eq!(
+            count_adjacent_pairs("v1.1.1 xa", &["1.1 xa".to_owned()], 3),
+            1
+        );
+        let now = Local::now();
+        let convs = vec![make_conv("bump to v1.1.1 now", now)];
+        let searchable = precompute_search_text(&convs);
+        assert_eq!(search(&convs, &searchable, "1.1", now), [0]);
     }
 
     #[test]
