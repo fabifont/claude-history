@@ -12,7 +12,7 @@ pub mod lexindex;
 pub mod search;
 pub mod text;
 
-pub use generation::{Generation, ProjectView, Publish};
+pub use generation::{Generation, ProjectView, Publish, PublishLock};
 
 use crate::history::Conversation;
 use crate::time_filter::TimeFilter;
@@ -220,13 +220,14 @@ pub fn snapshot_is_current(
 }
 
 /// Writes a generation for `conversations` (the complete corpus, loaded
-/// starting at `loaded_since`) unless `CURRENT` already matches it.
+/// starting at `loaded_since`) into the root of `lock` unless `CURRENT`
+/// already matches it.
 pub fn write_snapshot(
-    root: &Path,
+    lock: &PublishLock,
     conversations: &[Conversation],
     loaded_since: SystemTime,
 ) -> std::io::Result<Publish> {
-    generation::publish(root, &corpus(conversations, loaded_since))
+    generation::publish_locked(lock, &corpus(conversations, loaded_since))
 }
 
 fn corpus(conversations: &[Conversation], loaded_since: SystemTime) -> generation::Corpus<'_> {

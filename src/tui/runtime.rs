@@ -461,24 +461,48 @@ pub fn publish_snapshot() -> Result<()> {
     let Some(root) = crate::store::default_root() else {
         return Ok(());
     };
-    let loaded_since = SystemTime::now();
-    let mut conversations = Vec::new();
-    for message in
-        crate::history::load_all_conversations_streaming(false, None, TimeFilter::default())
-    {
-        match message {
-            LoaderMessage::Batch(batch) => conversations.extend(batch),
-            LoaderMessage::Done => break,
-            LoaderMessage::ProjectError => return Ok(()),
-            LoaderMessage::Fatal(err) => return Err(err),
+    let outcome = publish_snapshot_at(&root, || {
+        let mut conversations = Vec::new();
+        for message in
+            crate::history::load_all_conversations_streaming(false, None, TimeFilter::default())
+        {
+            match message {
+                LoaderMessage::Batch(batch) => conversations.extend(batch),
+                LoaderMessage::Done => break,
+                LoaderMessage::ProjectError => return Ok(None),
+                LoaderMessage::Fatal(err) => return Err(err),
+            }
         }
-    }
-    crate::bench::mark("publish_loaded");
-    let outcome = crate::store::write_snapshot(&root, &conversations, loaded_since)?;
+        crate::bench::mark("publish_loaded");
+        Ok(Some(conversations))
+    })?;
     crate::bench::mark("publish_done");
     crate::bench::mark_peak_rss_as("publish_peak_rss");
     let _ = debug_log::log_debug(&format!("List snapshot: {outcome:?}"));
     Ok(())
+}
+
+/// Publishes the corpus returned by `load` under `root`, holding the
+/// publish lock from before loading until the generation is published, so
+/// concurrent builders never load a corpus they cannot publish. Returns
+/// `Busy` without loading when another process holds the lock, and `None`
+/// when `load` yields no complete corpus.
+fn publish_snapshot_at(
+    root: &std::path::Path,
+    load: impl FnOnce() -> Result<Option<Vec<Conversation>>>,
+) -> Result<Option<crate::store::Publish>> {
+    let Some(lock) = crate::store::PublishLock::try_acquire(root)? else {
+        return Ok(Some(crate::store::Publish::Busy));
+    };
+    let loaded_since = SystemTime::now();
+    let Some(conversations) = load()? else {
+        return Ok(None);
+    };
+    Ok(Some(crate::store::write_snapshot(
+        &lock,
+        &conversations,
+        loaded_since,
+    )?))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -898,5 +922,34 @@ mod tests {
     #[test]
     fn content_width_reserves_timestamp_prefix_when_timing_is_on() {
         assert_eq!(calculate_content_width(60, true), 32);
+    }
+
+    #[test]
+    fn snapshot_builder_skips_loading_while_another_holds_the_lock() {
+        use crate::store::{Generation, Publish, PublishLock};
+        let dir = tempfile::tempdir().unwrap();
+        let conversations = || {
+            vec![crate::store::test_support::conversation(
+                "/p/proj/a.jsonl",
+                1_000,
+            )]
+        };
+
+        let held = PublishLock::try_acquire(dir.path()).unwrap().unwrap();
+        let outcome = publish_snapshot_at(dir.path(), || -> Result<_> {
+            panic!("loaded while another builder holds the lock")
+        })
+        .unwrap();
+        assert_eq!(outcome, Some(Publish::Busy));
+        drop(held);
+
+        let outcome = publish_snapshot_at(dir.path(), || {
+            assert!(PublishLock::try_acquire(dir.path()).unwrap().is_none());
+            Ok(Some(conversations()))
+        })
+        .unwrap();
+        assert_eq!(outcome, Some(Publish::Published("g000001".into())));
+        assert_eq!(Generation::open(dir.path()).unwrap().rows().len(), 1);
+        assert!(PublishLock::try_acquire(dir.path()).unwrap().is_some());
     }
 }

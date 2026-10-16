@@ -599,26 +599,53 @@ pub fn is_current(root: &Path, corpus: &Corpus) -> bool {
     current_matches(root, &build_manifest(corpus, &[]))
 }
 
+/// Exclusive right to publish and collect generations under one root, held
+/// until dropped.
+pub struct PublishLock {
+    root: PathBuf,
+    _file: File,
+}
+
+impl PublishLock {
+    /// Takes `LOCK` under `root` without waiting; `None` when another
+    /// process or thread holds it.
+    pub fn try_acquire(root: &Path) -> io::Result<Option<Self>> {
+        fs::create_dir_all(root)?;
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join(LOCK))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self {
+                root: root.to_path_buf(),
+                _file: file,
+            })),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(err)) => Err(err),
+        }
+    }
+}
+
 /// Publishes `corpus` as a new generation with its text and index, unless
 /// `CURRENT` already holds the same cards. Writes nothing when unchanged.
+#[cfg(test)]
 pub fn publish(root: &Path, corpus: &Corpus) -> io::Result<Publish> {
-    let unreferenced = build_manifest(corpus, &[]);
-    if current_matches(root, &unreferenced) {
+    if current_matches(root, &build_manifest(corpus, &[])) {
         return Ok(Publish::Unchanged);
     }
-    fs::create_dir_all(root)?;
-    let lock = File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(root.join(LOCK))?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(fs::TryLockError::WouldBlock) => return Ok(Publish::Busy),
-        Err(fs::TryLockError::Error(err)) => return Err(err),
+    match PublishLock::try_acquire(root)? {
+        Some(lock) => publish_locked(&lock, corpus),
+        None => Ok(Publish::Busy),
     }
-    // Another process may have published the same corpus while we waited.
-    if current_matches(root, &unreferenced) {
+}
+
+/// `publish` under an already held `lock`, into the lock's root.
+pub fn publish_locked(lock: &PublishLock, corpus: &Corpus) -> io::Result<Publish> {
+    let root = lock.root.as_path();
+    // Another process may have published the same corpus before the lock
+    // was taken.
+    if current_matches(root, &build_manifest(corpus, &[])) {
         return Ok(Publish::Unchanged);
     }
 
@@ -651,7 +678,6 @@ pub fn publish(root: &Path, corpus: &Corpus) -> io::Result<Publish> {
     sync_dir(root);
 
     collect(root, number, &existing);
-    drop(lock);
     Ok(Publish::Published(name))
 }
 
@@ -915,6 +941,29 @@ mod tests {
         fs::write(dir.path().join(CURRENT), "../elsewhere").unwrap();
         assert!(Generation::open(dir.path()).is_none());
         assert!(Generation::open(&dir.path().join("missing")).is_none());
+    }
+
+    #[test]
+    fn held_publish_lock_excludes_other_publishers_until_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let conversations = sample();
+        let corpus = || Corpus::new(&conversations, unknown_fingerprints(conversations.len()));
+        let lock = PublishLock::try_acquire(dir.path()).unwrap().unwrap();
+        assert!(PublishLock::try_acquire(dir.path()).unwrap().is_none());
+        assert_eq!(publish(dir.path(), &corpus()).unwrap(), Publish::Busy);
+        assert!(Generation::open(dir.path()).is_none());
+
+        assert_eq!(
+            publish_locked(&lock, &corpus()).unwrap(),
+            Publish::Published("g000001".into())
+        );
+        assert_eq!(
+            publish_locked(&lock, &corpus()).unwrap(),
+            Publish::Unchanged
+        );
+        assert!(PublishLock::try_acquire(dir.path()).unwrap().is_none());
+        drop(lock);
+        assert!(PublishLock::try_acquire(dir.path()).unwrap().is_some());
     }
 
     #[test]
