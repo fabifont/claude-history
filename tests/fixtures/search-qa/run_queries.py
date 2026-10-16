@@ -105,17 +105,30 @@ def tui_rows(screen):
 USER_ONLY = [False]
 
 
+def settled_screen(session, timeout=15):
+    """The TUI screen once it stops changing."""
+    time.sleep(0.5)
+    previous = sh(session, "screen")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(0.4)
+        screen = sh(session, "screen")
+        if screen == previous:
+            return screen
+        previous = screen
+    return previous
+
+
 def tui(session, query, user_only=False):
     if USER_ONLY[0] != user_only:
         sh(session, "keys", "C-v")
         USER_ONLY[0] = user_only
         time.sleep(0.3)
-    sh(session, "keys", "-l", "x")
-    sh(session, "keys", "Escape")
-    time.sleep(0.3)
+    # Ctrl+U clears the query. Escape would merge with a backlog of typed
+    # keys into an Alt chord when the TUI lags behind.
+    sh(session, "keys", "C-u")
     sh(session, "keys", "-l", query)
-    time.sleep(1.5)
-    screen = sh(session, "screen")
+    screen = settled_screen(session)
     header = screen.splitlines()[1] if len(screen.splitlines()) > 1 else ""
     m = re.search(r"(\d+)/(\d+)\s*│", header)
     count = int(m.group(2)) if m else None
