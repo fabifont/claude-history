@@ -184,20 +184,22 @@ impl App {
     }
 }
 
-pub(super) fn filter_conversation_indices<I>(
+pub(super) fn filter_conversation_indices<I, C>(
     indices: I,
-    conversations: &[Conversation],
+    conversations: &[C],
     excluded_projects: &HashSet<String>,
     workspace_filter: bool,
     current_project_dir_name: Option<&str>,
 ) -> Vec<usize>
 where
     I: IntoIterator<Item = usize>,
+    C: std::borrow::Borrow<Conversation>,
 {
     indices
         .into_iter()
         .filter(|&idx| {
             conversations[idx]
+                .borrow()
                 .project_name
                 .as_deref()
                 .is_none_or(|name| !project_is_excluded(name, excluded_projects))
@@ -207,20 +209,22 @@ where
             else {
                 return true;
             };
-            if conversations[idx].source != crate::history::Source::Claude {
+            if conversations[idx].borrow().source != crate::history::Source::Claude {
                 let Ok(current) = std::env::current_dir() else {
                     return false;
                 };
                 let current = current.canonicalize().unwrap_or(current);
                 return conversations[idx]
+                    .borrow()
                     .project_path
                     .as_ref()
-                    .or(conversations[idx].cwd.as_ref())
+                    .or(conversations[idx].borrow().cwd.as_ref())
                     .is_some_and(|path| {
                         path.canonicalize().unwrap_or_else(|_| path.clone()) == current
                     });
             }
             conversations[idx]
+                .borrow()
                 .path
                 .parent()
                 .and_then(|p| p.file_name())

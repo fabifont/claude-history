@@ -12,6 +12,7 @@ use crate::semantic::types::{
     SemanticCancellationToken, SemanticChunkIdentity, SemanticExplanation, SemanticQuality,
     SemanticRationaleKind, SemanticScoreBreakdown,
 };
+use crate::store::SearchIndex;
 use crate::tui::app::{SemanticProgress, SemanticResultMetadata};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,6 +23,9 @@ pub enum SemanticWorkerCommand {
     UpdateCorpus {
         corpus_version: u64,
         conversations: Arc<Vec<Arc<Conversation>>>,
+        /// Lexical index whose doc ids are the indices of `conversations`,
+        /// whose cards carry no text, for quoted-only queries.
+        texts: Option<Arc<SearchIndex>>,
     },
     UpdateScope {
         corpus_version: u64,
@@ -133,13 +137,23 @@ fn run_semantic_worker(
             continue;
         }
         if request.query.is_quoted_only() {
-            let response = exact_literal_semantic_response(
-                request.generation,
-                request.prewarm,
-                worker.corpus.as_ref(),
-                worker.scope.as_ref(),
-                &request.query,
-            );
+            let response = match &worker.texts {
+                Some(texts) => indexed_literal_semantic_response(
+                    request.generation,
+                    request.prewarm,
+                    texts,
+                    worker.corpus.as_ref(),
+                    worker.scope.as_ref(),
+                    &request.query,
+                ),
+                None => exact_literal_semantic_response(
+                    request.generation,
+                    request.prewarm,
+                    worker.corpus.as_ref(),
+                    worker.scope.as_ref(),
+                    &request.query,
+                ),
+            };
             let _ = res_tx.send(SemanticSearchMessage::Complete(response));
             continue;
         }
@@ -209,6 +223,7 @@ struct SemanticWorkerState {
     scope_version: u64,
     scope_corpus_version: u64,
     corpus: Arc<Vec<Arc<Conversation>>>,
+    texts: Option<Arc<SearchIndex>>,
     scope: Arc<Vec<usize>>,
     pending_search: Option<SemanticSearchRequest>,
 }
@@ -229,10 +244,12 @@ impl SemanticWorkerState {
             SemanticWorkerCommand::UpdateCorpus {
                 corpus_version,
                 conversations,
+                texts,
             } => {
                 if corpus_version >= self.corpus_version {
                     self.corpus_version = corpus_version;
                     self.corpus = conversations;
+                    self.texts = texts;
                     cancellation.cancel();
                 }
                 self.take_ready_pending()
@@ -424,9 +441,12 @@ fn exact_literal_semantic_response(
     let metadata = filtered
         .iter()
         .filter_map(|index| {
-            conversations
-                .get(*index)
-                .map(|conversation| (*index, exact_literal_metadata(conversation, parsed)))
+            conversations.get(*index).map(|conversation| {
+                (
+                    *index,
+                    exact_literal_metadata(conversation, &conversation.full_text, parsed),
+                )
+            })
         })
         .collect();
 
@@ -440,8 +460,58 @@ fn exact_literal_semantic_response(
     }
 }
 
+/// Like `exact_literal_semantic_response`, for cards whose text is in
+/// `texts`: the index finds the matches, newest first, and the text of the
+/// first `EVIDENCE_LIMIT` is read for their evidence.
+fn indexed_literal_semantic_response(
+    generation: u64,
+    prewarm: bool,
+    texts: &SearchIndex,
+    conversations: &[Arc<Conversation>],
+    scope: &[usize],
+    parsed: &ParsedQuery,
+) -> SemanticSearchResponse {
+    const EVIDENCE_LIMIT: usize = 200;
+    let mut in_scope = vec![false; conversations.len()];
+    for &index in scope {
+        if let Some(slot) = in_scope.get_mut(index) {
+            *slot = true;
+        }
+    }
+    let scope = |doc: u32| in_scope.get(doc as usize).copied().unwrap_or(false);
+    let mut ranking = texts.search(parsed.raw(), chrono::Local::now(), &scope);
+    let filtered: Vec<usize> = ranking
+        .complete()
+        .iter()
+        .map(|hit| hit.doc as usize)
+        .filter(|&doc| doc < conversations.len())
+        .collect();
+    let metadata = filtered
+        .iter()
+        .enumerate()
+        .map(|(rank, &index)| {
+            let conversation = &conversations[index];
+            let text = if rank < EVIDENCE_LIMIT {
+                texts.text(index as u32)
+            } else {
+                String::new()
+            };
+            (index, exact_literal_metadata(conversation, &text, parsed))
+        })
+        .collect();
+    SemanticSearchResponse {
+        generation,
+        filtered,
+        metadata,
+        error: None,
+        progress: SemanticProgress::Complete,
+        prewarm,
+    }
+}
+
 fn literal_evidence_preview(
     conversation: &Conversation,
+    full_text: &str,
     parsed: &ParsedQuery,
     visible_preview: &str,
 ) -> String {
@@ -452,9 +522,9 @@ fn literal_evidence_preview(
         .chain(parsed.literals().iter())
         .find_map(|literal| {
             literal
-                .match_ranges(&conversation.full_text)
+                .match_ranges(full_text)
                 .first()
-                .map(|range| evidence_window(&conversation.full_text, *range))
+                .map(|range| evidence_window(full_text, *range))
                 .or_else(|| {
                     conversation.project_name.as_deref().and_then(|project| {
                         literal
@@ -494,6 +564,7 @@ fn evidence_window(text: &str, range: (usize, usize)) -> String {
 
 fn exact_literal_metadata(
     conversation: &Conversation,
+    full_text: &str,
     parsed: &ParsedQuery,
 ) -> SemanticResultMetadata {
     SemanticResultMetadata {
@@ -510,7 +581,7 @@ fn exact_literal_metadata(
                 .iter()
                 .map(|literal| literal.text().to_string())
                 .collect(),
-            evidence_preview: literal_evidence_preview(conversation, parsed, ""),
+            evidence_preview: literal_evidence_preview(conversation, full_text, parsed, ""),
             rationale_kind: SemanticRationaleKind::LexicalBoosted,
             chunk: SemanticChunkIdentity {
                 conversation_index: conversation.index,
@@ -585,6 +656,7 @@ mod tests {
                 "/projects/project-a/session-a.jsonl",
                 semantic_turns,
             )]),
+            texts: None,
         })
         .expect("send corpus");
         tx.send(SemanticWorkerCommand::UpdateScope {
@@ -715,6 +787,67 @@ mod tests {
     }
 
     #[test]
+    fn quoted_only_search_of_cards_reads_matches_from_the_index() {
+        let mut old = conversation("/projects/project-a/session-a.jsonl", vec![]);
+        old.timestamp = Local::now() - ChronoDuration::days(1);
+        let mut newest = conversation("/projects/project-a/session-b.jsonl", vec![]);
+        newest.timestamp = Local::now();
+        let mut hidden = conversation("/projects/project-a/session-c.jsonl", vec![]);
+        hidden.timestamp = Local::now() + ChronoDuration::days(1);
+        let mut unrelated = conversation("/projects/project-a/session-d.jsonl", vec![]);
+        unrelated.full_text = "nothing to see".into();
+        let root = tempfile::tempdir().unwrap();
+        crate::store::generation::publish(root.path(), &[old, newest, hidden, unrelated]).unwrap();
+        let snapshot = crate::store::Snapshot::open(
+            root.path(),
+            false,
+            crate::time_filter::TimeFilter::default(),
+        )
+        .unwrap();
+        let cards = crate::store::SemanticCards::load(&snapshot, None).unwrap();
+        let index = SearchIndex::open(snapshot).unwrap();
+        let paths: Vec<_> = cards
+            .conversations()
+            .iter()
+            .map(|card| card.path.display().to_string())
+            .collect();
+        let doc = |name: &str| paths.iter().position(|path| path.ends_with(name)).unwrap();
+        assert!(
+            cards
+                .conversations()
+                .iter()
+                .all(|card| card.full_text.is_empty())
+        );
+
+        let response = indexed_literal_semantic_response(
+            1,
+            false,
+            &index,
+            cards.conversations(),
+            &[
+                doc("session-a.jsonl"),
+                doc("session-b.jsonl"),
+                doc("session-d.jsonl"),
+            ],
+            &ParsedQuery::parse("\"title sentinel\""),
+        );
+
+        assert_eq!(
+            response.filtered,
+            vec![doc("session-b.jsonl"), doc("session-a.jsonl")]
+        );
+        for index in &response.filtered {
+            assert!(
+                response.metadata[index]
+                    .explanation
+                    .evidence_preview
+                    .contains("title sentinel")
+            );
+        }
+        assert_eq!(response.progress, SemanticProgress::Complete);
+    }
+
+    #[test]
     fn quoted_only_search_respects_scope_and_orders_newest_first() {
         let mut old = conversation("/projects/project-a/session-a.jsonl", vec![]);
         old.timestamp = Local::now() - ChronoDuration::days(1);
@@ -726,6 +859,7 @@ mod tests {
         tx.send(SemanticWorkerCommand::UpdateCorpus {
             corpus_version: 1,
             conversations: corpus(vec![old, newest, hidden]),
+            texts: None,
         })
         .expect("send corpus");
         tx.send(SemanticWorkerCommand::UpdateScope {
@@ -779,6 +913,7 @@ mod tests {
                     conversation("/projects/project-a/session-a.jsonl", vec!["hidden"]),
                     conversation("/projects/project-a/session-b.jsonl", vec!["visible"]),
                 ]),
+                texts: None,
             },
             &cancellation,
         );
@@ -816,6 +951,7 @@ mod tests {
                     "/projects/project-a/session-a.jsonl",
                     vec!["visible"],
                 )]),
+                texts: None,
             },
             &cancellation,
         );

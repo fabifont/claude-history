@@ -443,10 +443,9 @@ fn semantic_results_map_to_cards_by_path() {
     show(&mut app, &root, TimeFilter::default());
     let mut loaded = corpus();
     loaded.push(conversation("/p/-tmp-alpha/unpublished.jsonl", 9 * HOUR_MS));
-    app.semantic_corpus = SemanticCorpus::Loaded {
-        conversations: Arc::new(loaded),
-        docs: None,
-    };
+    app.semantic_corpus.loaded = Some(Arc::new(crate::store::SemanticCards::from_conversations(
+        "loaded", loaded,
+    )));
 
     assert_eq!(*app.semantic_scope_indices(), vec![0, 2, 3]);
     let (rows, _) = app.semantic_rows(vec![2, 3, 0], HashMap::new());
@@ -458,6 +457,61 @@ fn semantic_results_map_to_cards_by_path() {
         paths,
         vec!["/p/-tmp-alpha/c.jsonl", "/p/-tmp-alpha/a.jsonl"]
     );
+}
+
+#[test]
+fn semantic_corpus_is_read_from_the_generation_and_follows_swaps() {
+    let mut corpus = corpus();
+    corpus[0].semantic_turns = vec!["alpha turn".to_string()].into();
+    corpus[1].semantic_turns = vec!["beta turn".to_string()].into();
+    let root = publish(&corpus);
+    let mut app = loading_app(None, vec![]);
+    show(&mut app, &root, TimeFilter::default());
+    app.removed
+        .insert(crate::store::generation::key_hash("/p/-tmp-beta/b.jsonl"));
+
+    assert!(!app.ensure_semantic_corpus());
+    wait_for_search(&mut app);
+    let first = app.semantic_corpus.loaded.clone().unwrap();
+    let turns = |cards: &crate::store::SemanticCards, name: &str| {
+        cards
+            .conversations()
+            .iter()
+            .find(|card| card.path.ends_with(name))
+            .map(|card| card.semantic_turns.clone())
+            .unwrap()
+    };
+    assert_eq!(&*turns(&first, "a.jsonl"), ["alpha turn".to_string()]);
+    assert!(Arc::ptr_eq(
+        &app.semantic_conversations_snapshot,
+        first.conversations()
+    ));
+    let scope = app.semantic_scope_indices();
+    let scoped: Vec<_> = scope
+        .iter()
+        .map(|&index| first.conversations()[index].path.display().to_string())
+        .collect();
+    assert_eq!(
+        scoped,
+        vec!["/p/-tmp-alpha/c.jsonl", "/p/-tmp-alpha/a.jsonl"]
+    );
+
+    corpus[2].semantic_turns = vec!["gamma turn".to_string()].into();
+    crate::store::generation::publish(root.path(), &corpus).unwrap();
+    let next = crate::store::Snapshot::open(root.path(), true, TimeFilter::default()).unwrap();
+    assert!(app.swap_generation(next));
+    assert!(
+        app.ensure_semantic_corpus(),
+        "the older corpus serves meanwhile"
+    );
+    wait_for_search(&mut app);
+    let second = app.semantic_corpus.loaded.clone().unwrap();
+    assert_ne!(second.generation_name(), first.generation_name());
+    assert_eq!(&*turns(&second, "c.jsonl"), ["gamma turn".to_string()]);
+    assert!(Arc::ptr_eq(
+        &turns(&second, "a.jsonl"),
+        &turns(&first, "a.jsonl")
+    ));
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use super::app::{Action, App, AppMode, DialogMode, TuiSearchOptions};
+use super::app::{Action, App, AppMode, DialogMode, ListSearchMode, TuiSearchOptions};
 use super::ui;
 use crate::cli::DebugLevel;
 use crate::config::KeyBindings;
@@ -784,6 +784,51 @@ pub fn bench_startup(
         Ok(())
     }
 
+    /// With `CLAUDE_HISTORY_BENCH_SEMANTIC=<query>`, switches to semantic
+    /// mode the way ctrl+t does, runs the query, and reports the time until
+    /// its results are drawn, the peak footprint, and the top results.
+    fn run_semantic_bench(terminal: &mut Screen, app: &mut App) -> Result<()> {
+        let Some(query) = std::env::var("CLAUDE_HISTORY_BENCH_SEMANTIC")
+            .ok()
+            .filter(|query| !query.trim().is_empty())
+        else {
+            return Ok(());
+        };
+        let wait = |app: &mut App| {
+            while app.has_search_work_in_flight() {
+                if !app.receive_search_results() {
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            }
+        };
+        app.replace_query("");
+        wait(app);
+        let started = Instant::now();
+        app.set_list_search_mode(ListSearchMode::Semantic);
+        app.replace_query(&query);
+        wait(app);
+        draw(terminal, app)?;
+        eprintln!(
+            "bench semantic_first_results {:.1}ms",
+            started.elapsed().as_secs_f64() * 1e3
+        );
+        bench::mark_peak_rss_as("semantic_peak_rss");
+        if let Some(error) = app.semantic_error() {
+            eprintln!("bench semantic_error {error}");
+        }
+        eprintln!("bench semantic_results {}", app.filtered().len());
+        for &row in app.filtered().iter().take(10) {
+            eprintln!(
+                "bench semantic_top {}",
+                app.conversations()[row].path.display()
+            );
+        }
+        app.set_list_search_mode(ListSearchMode::Lexical);
+        app.replace_query("");
+        wait(app);
+        Ok(())
+    }
+
     let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT))
         .map_err(|e| AppError::Io(io::Error::other(e)))?;
 
@@ -816,6 +861,7 @@ pub fn bench_startup(
         eprintln!("bench results {}", app.filtered().len());
         run_bench_queries(&mut terminal, &mut app)?;
         bench::mark_peak_rss_as("generation_peak_rss");
+        run_semantic_bench(&mut terminal, &mut app)?;
         searched = true;
     }
 

@@ -29,18 +29,16 @@ pub(super) struct SemanticSearchState {
     pub(super) cancellation: Option<SemanticCancellationToken>,
 }
 
-/// Full conversations that semantic search ranks in generation mode, where
-/// rows are cards without text.
+/// Conversations with semantic data that semantic search ranks in
+/// generation mode, where rows are cards without it.
 #[derive(Default)]
-pub(super) enum SemanticCorpus {
-    #[default]
-    Unloaded,
-    Loading(mpsc::Receiver<Vec<Conversation>>),
-    Loaded {
-        conversations: Arc<Vec<Conversation>>,
-        /// Generation doc of each conversation, for the generation named.
-        docs: Option<(String, Vec<Option<u32>>)>,
-    },
+pub(super) struct SemanticCorpus {
+    /// Cards of the newest generation read so far.
+    pub(super) loaded: Option<Arc<store::SemanticCards>>,
+    /// Generation being read, while one is.
+    loading: Option<(String, mpsc::Receiver<Option<store::SemanticCards>>)>,
+    /// Generation doc of each loaded conversation, for the generation named.
+    docs: Option<(String, Vec<Option<u32>>)>,
 }
 
 pub(super) enum SearchCommand {
@@ -357,25 +355,24 @@ impl App {
     }
 
     pub(super) fn rebuild_semantic_conversations_snapshot(&mut self) {
-        let source: &[Conversation] = if self.snapshot.is_some() {
-            match &self.semantic_corpus {
-                SemanticCorpus::Loaded { conversations, .. } => conversations.as_slice(),
-                _ => &[],
+        self.semantic_conversations_snapshot = if self.snapshot.is_some() {
+            match &self.semantic_corpus.loaded {
+                Some(cards) => cards.conversations().clone(),
+                None => Arc::default(),
             }
         } else {
-            &self.conversations
+            Arc::new(self.conversations.iter().cloned().map(Arc::new).collect())
         };
-        self.semantic_conversations_snapshot =
-            Arc::new(source.iter().cloned().map(Arc::new).collect::<Vec<_>>());
         self.semantic_corpus_version += 1;
         self.semantic_sent_scope_signature = None;
     }
 
     pub(super) fn semantic_scope_indices(&self) -> Arc<Vec<usize>> {
         if let Some(snapshot) = &self.snapshot {
-            let SemanticCorpus::Loaded { conversations, .. } = &self.semantic_corpus else {
+            let Some(cards) = &self.semantic_corpus.loaded else {
                 return Arc::default();
             };
+            let conversations = cards.conversations();
             let removed = |conversation: &Conversation| {
                 self.removed.contains(&store::generation::key_hash(
                     &conversation.path.to_string_lossy(),
@@ -401,51 +398,66 @@ impl App {
         Arc::new(self.filter_indices(0..self.conversations.len()))
     }
 
-    /// Starts loading the full conversations semantic search needs in
-    /// generation mode. Returns whether they are loaded.
+    /// Starts reading the semantic data of the generation shown when the
+    /// corpus is of an older one or none. Returns whether a corpus is
+    /// loaded; an older generation's serves until the new one is read.
     pub(super) fn ensure_semantic_corpus(&mut self) -> bool {
-        if self.snapshot.is_none() {
+        let Some(snapshot) = &self.snapshot else {
             return true;
-        }
-        match &self.semantic_corpus {
-            SemanticCorpus::Loaded { .. } => true,
-            SemanticCorpus::Loading(_) => false,
-            SemanticCorpus::Unloaded => {
-                let (tx, rx) = mpsc::channel();
-                let show_last = self.snapshot.as_ref().is_some_and(|s| s.show_last());
-                let spawned = std::thread::Builder::new()
-                    .name("semantic-corpus".into())
-                    .spawn(move || {
-                        let conversations = crate::history::load_all_conversations(show_last, None)
-                            .unwrap_or_default();
-                        let _ = tx.send(conversations);
-                    });
-                if spawned.is_ok() {
-                    self.semantic_corpus = SemanticCorpus::Loading(rx);
+        };
+        let corpus = &mut self.semantic_corpus;
+        let name = snapshot.generation_name();
+        let current = corpus
+            .loaded
+            .as_ref()
+            .is_some_and(|cards| cards.generation_name() == name)
+            || corpus
+                .loading
+                .as_ref()
+                .is_some_and(|(loading, _)| loading == name);
+        if !current {
+            let (tx, rx) = mpsc::channel();
+            let cards = snapshot.clone();
+            let previous = corpus.loaded.clone();
+            let spawned = std::thread::Builder::new()
+                .name("semantic-corpus".into())
+                .spawn(move || {
+                    let _ = tx.send(store::SemanticCards::load(&cards, previous.as_deref()));
+                });
+            if spawned.is_ok() {
+                corpus.loading = Some((name.to_owned(), rx));
+                if corpus.loaded.is_none() {
                     self.semantic_search.pending_status = Some(SemanticProgress::LoadingSessions);
-                } else {
-                    self.semantic_search.error = Some("semantic corpus unavailable".to_string());
                 }
-                false
+            } else {
+                self.semantic_search.error = Some("semantic corpus unavailable".to_string());
             }
         }
+        self.semantic_corpus.loaded.is_some()
     }
 
-    /// Takes the semantic corpus once it has loaded. Returns whether it
+    /// Takes the semantic corpus being read once it is. Returns whether it
     /// arrived.
     fn receive_semantic_corpus(&mut self) -> bool {
-        let SemanticCorpus::Loading(rx) = &self.semantic_corpus else {
+        let Some((_, rx)) = &self.semantic_corpus.loading else {
             return false;
         };
-        let conversations = match rx.try_recv() {
-            Ok(conversations) => conversations,
+        let cards = match rx.try_recv() {
+            Ok(cards) => cards,
             Err(mpsc::TryRecvError::Empty) => return false,
-            Err(mpsc::TryRecvError::Disconnected) => Vec::new(),
+            Err(mpsc::TryRecvError::Disconnected) => None,
         };
-        self.semantic_corpus = SemanticCorpus::Loaded {
-            conversations: Arc::new(conversations),
-            docs: None,
-        };
+        self.semantic_corpus.loading = None;
+        match cards {
+            Some(cards) => {
+                self.semantic_corpus.loaded = Some(Arc::new(cards));
+                self.semantic_corpus.docs = None;
+            }
+            None if self.semantic_corpus.loaded.is_none() => {
+                self.semantic_search.error = Some("semantic corpus unavailable".to_string());
+            }
+            None => return false,
+        }
         self.readiness.semantic = true;
         if matches!(
             self.semantic_search.pending_status,
@@ -475,9 +487,10 @@ impl App {
         let Some(snapshot) = self.snapshot.clone() else {
             return (self.filter_indices(indices), metadata);
         };
-        let SemanticCorpus::Loaded {
-            conversations,
+        let SemanticCorpus {
+            loaded: Some(cards),
             docs,
+            ..
         } = &mut self.semantic_corpus
         else {
             return (Vec::new(), HashMap::new());
@@ -486,14 +499,19 @@ impl App {
             .as_ref()
             .is_none_or(|(name, _)| name != snapshot.generation_name())
         {
-            let by_key = snapshot.docs_by_key();
-            let mapped = conversations
-                .iter()
-                .map(|conversation| {
-                    let key = store::generation::key_hash(&conversation.path.to_string_lossy());
-                    by_key.get(&key).copied()
-                })
-                .collect();
+            let mapped = if cards.generation_name() == snapshot.generation_name() {
+                (0..cards.conversations().len() as u32).map(Some).collect()
+            } else {
+                let by_key = snapshot.docs_by_key();
+                cards
+                    .conversations()
+                    .iter()
+                    .map(|conversation| {
+                        let key = store::generation::key_hash(&conversation.path.to_string_lossy());
+                        by_key.get(&key).copied()
+                    })
+                    .collect()
+            };
             *docs = Some((snapshot.generation_name().to_owned(), mapped));
         }
         let doc_of: Vec<Option<u32>> = docs.as_ref().map(|(_, d)| d.clone()).unwrap_or_default();
@@ -535,9 +553,15 @@ impl App {
 
     fn send_semantic_state(&mut self) -> Option<(u64, u64)> {
         if self.semantic_sent_corpus_version != self.semantic_corpus_version {
+            let texts = self.semantic_corpus.loaded.as_ref().and_then(|cards| {
+                self.search_index
+                    .clone()
+                    .filter(|index| index.cards().generation_name() == cards.generation_name())
+            });
             if !self.send_semantic_command(SemanticWorkerCommand::UpdateCorpus {
                 corpus_version: self.semantic_corpus_version,
                 conversations: self.semantic_conversations_snapshot.clone(),
+                texts,
             }) {
                 return None;
             }
@@ -827,7 +851,7 @@ impl App {
     }
 
     pub fn has_search_work_in_flight(&self) -> bool {
-        matches!(self.semantic_corpus, SemanticCorpus::Loading(_))
+        self.semantic_corpus.loading.is_some()
             || self.search_in_flight
             || self.semantic_search.pending_generation.is_some()
             || self.semantic_search.prewarm_generation.is_some()
@@ -962,6 +986,17 @@ impl App {
                 self.dispatch_search();
             }
         }
+    }
+
+    /// Switches to `mode` the way toggling does, when it is not the mode.
+    pub(crate) fn set_list_search_mode(&mut self, mode: ListSearchMode) {
+        if self.list_search_mode != mode {
+            self.toggle_list_search_mode();
+        }
+    }
+
+    pub(crate) fn semantic_error(&self) -> Option<&str> {
+        self.semantic_search.error.as_deref()
     }
 
     pub(super) fn toggle_list_search_mode(&mut self) {

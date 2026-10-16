@@ -45,8 +45,15 @@ impl SemanticDoc {
         bincode::serialize(self).expect("semantic data serializes")
     }
 
+    /// Sets the semantic fields of `conversation` to this data.
+    pub fn apply(self, conversation: &mut Conversation) {
+        conversation.semantic_turns = self.turns.into();
+        conversation.semantic_turn_ranges = self.ranges;
+        conversation.semantic_route_text = self.route_text.into();
+        conversation.agent_search_text = self.agent_text.into();
+    }
+
     /// Reads `encode` output. No bytes decode to empty data.
-    #[cfg(test)]
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         if bytes.is_empty() {
             return Some(Self::default());
