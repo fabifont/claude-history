@@ -12,6 +12,7 @@ pub mod lexindex;
 pub mod reconcile;
 pub mod search;
 pub mod segments;
+pub mod semantic;
 pub mod text;
 
 pub use generation::{Generation, ProjectView};

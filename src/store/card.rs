@@ -122,6 +122,18 @@ pub struct IndexLoc {
     pub doc: u32,
 }
 
+/// Where a card's semantic data lives in the generation's semantic segments
+/// (see `semantic`), parallel to the card rows.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
+pub struct SemRow {
+    /// Frame in `sem-NNNN.zst`; empty for a card without semantic data.
+    pub blob: BlobRef,
+    /// Hash of the encoded semantic data, 0 when there is none, so equal
+    /// hashes imply equal data.
+    pub hash: u64,
+}
+
 /// One index segment of a generation. Docs of the segment that no card
 /// points at are dead and skipped by queries.
 #[repr(C)]
@@ -155,6 +167,8 @@ pub struct Header {
     pub fingerprints_off: u64,
     /// `IndexLoc[row_count]`.
     pub locs_off: u64,
+    /// `SemRow[row_count]`.
+    pub sems_off: u64,
     /// `IndexSegRow[seg_count]`, ascending ids.
     pub segs_off: u64,
     /// `IgnoredRow[ignored_count]`.
@@ -166,7 +180,7 @@ pub struct Header {
 }
 
 pub const MAGIC: [u8; 8] = *b"CHGEN\0\0\0";
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 pub fn source_to_u8(source: crate::history::Source) -> u8 {
     match source {
@@ -207,9 +221,10 @@ mod tests {
         assert_eq!(std::mem::size_of::<ProjectRow>(), 32);
         assert_eq!(std::mem::size_of::<Fingerprint>(), 16);
         assert_eq!(std::mem::size_of::<IndexLoc>(), 8);
+        assert_eq!(std::mem::size_of::<SemRow>(), 24);
         assert_eq!(std::mem::size_of::<IndexSegRow>(), 8);
         assert_eq!(std::mem::size_of::<IgnoredRow>(), 24);
-        assert_eq!(std::mem::size_of::<Header>(), 96);
+        assert_eq!(std::mem::size_of::<Header>(), 104);
     }
 
     #[test]

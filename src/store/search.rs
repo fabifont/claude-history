@@ -775,10 +775,9 @@ pub(crate) mod oracle {
     use super::*;
     use crate::history::Conversation;
     use crate::search::{SearchableConversation, debug_search, precompute_search_text};
-    use crate::store::card::{BlobRef, CardRow};
+    use crate::store::card::BlobRef;
     use crate::store::lexindex;
     use crate::store::text::{self, TextSegments};
-    use bytemuck::Zeroable;
     use chrono::TimeZone;
 
     /// Texts read from a zstd text segment, as from a generation.
@@ -842,14 +841,8 @@ pub(crate) mod oracle {
             );
             let texts: Vec<&str> = conversations.iter().map(|c| &*c.full_text).collect();
             let refs = text::write_segment(&text::segment_path(dir.path(), 0), 0, &texts).unwrap();
-            let rows: Vec<CardRow> = refs
-                .iter()
-                .map(|&text| CardRow {
-                    text,
-                    ..CardRow::zeroed()
-                })
-                .collect();
-            let segments = TextSegments::open(dir.path(), &rows).unwrap();
+            let segments =
+                TextSegments::open(dir.path(), text::TEXT, refs.iter().copied()).unwrap();
             Self {
                 searchable: precompute_search_text(&conversations),
                 docs: SearchDocs::from_conversations(&conversations),

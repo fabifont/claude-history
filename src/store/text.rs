@@ -4,9 +4,10 @@
 //! directory, and each card points at its frame with a `BlobRef`. Segments
 //! are written whole and never modified, so a later generation can link an
 //! unchanged segment instead of rewriting it and add new segments beside it;
-//! collection still only unlinks whole directories.
+//! collection still only unlinks whole directories. Semantic data (see
+//! `semantic`) is stored the same way in `sem-NNNN.zst`.
 
-use super::card::{BlobRef, CardRow};
+use super::card::BlobRef;
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::fs::File;
@@ -21,17 +22,27 @@ const BATCH: usize = 256;
 /// trigger a huge allocation.
 const MAX_TEXT: u64 = 1 << 32;
 
+/// File name prefix of conversation text segments.
+pub const TEXT: &str = "text";
+/// File name prefix of semantic data segments.
+pub const SEM: &str = "sem";
+
 pub fn segment_file(seg: u32) -> String {
-    format!("text-{seg:04}.zst")
+    kind_file(TEXT, seg)
 }
 
 pub fn segment_path(dir: &Path, seg: u32) -> PathBuf {
     dir.join(segment_file(seg))
 }
 
+/// Segment `seg` of the segments named `kind` (`TEXT` or `SEM`).
+pub fn kind_file(kind: &str, seg: u32) -> String {
+    format!("{kind}-{seg:04}.zst")
+}
+
 /// Writes segment `seg` to `path` with one frame per entry of `texts`, in
 /// order, and returns their refs. Empty texts get an empty ref and no frame.
-pub fn write_segment<S: AsRef<str> + Sync>(
+pub fn write_segment<S: AsRef<[u8]> + Sync>(
     path: &Path,
     seg: u32,
     texts: &[S],
@@ -41,7 +52,7 @@ pub fn write_segment<S: AsRef<str> + Sync>(
     for batch in texts.chunks(BATCH) {
         let frames: Vec<Vec<u8>> = batch
             .par_iter()
-            .map(|text| compress(text.as_ref().as_bytes()))
+            .map(|text| compress(text.as_ref()))
             .collect::<io::Result<_>>()?;
         for frame in frames {
             refs.push(out.push(&frame)?);
@@ -133,17 +144,21 @@ pub struct TextSegments {
 }
 
 impl TextSegments {
-    /// Maps the segments in `dir` that `rows` refer to. Returns `None` when
-    /// one is missing or a ref points outside its segment.
-    pub fn open(dir: &Path, rows: &[CardRow]) -> Option<Self> {
+    /// Maps the `kind` segments in `dir` that `refs` point into. Returns
+    /// `None` when one is missing or a ref points outside its segment.
+    pub fn open(
+        dir: &Path,
+        kind: &str,
+        refs: impl Iterator<Item = BlobRef> + Clone,
+    ) -> Option<Self> {
         let mut segments: Vec<Option<memmap2::Mmap>> = Vec::new();
-        for row in rows.iter().filter(|row| row.text.len > 0) {
-            let seg = row.text.seg as usize;
+        for r in refs.clone().filter(|r| r.len > 0) {
+            let seg = r.seg as usize;
             if segments.len() <= seg {
                 segments.resize_with(seg + 1, || None);
             }
             if segments[seg].is_none() {
-                let file = File::open(segment_path(dir, row.text.seg)).ok()?;
+                let file = File::open(dir.join(kind_file(kind, r.seg))).ok()?;
                 // SAFETY: published segments are never written again and are
                 // only removed by unlinking, so the mapped bytes cannot change
                 // underneath.
@@ -151,8 +166,8 @@ impl TextSegments {
             }
         }
         let text = Self { segments };
-        rows.iter()
-            .all(|row| row.text.len == 0 || text.frame(row.text).is_some())
+        refs.into_iter()
+            .all(|r| r.len == 0 || text.frame(r).is_some())
             .then_some(text)
     }
 
@@ -166,8 +181,13 @@ impl TextSegments {
     /// Decompresses the text behind `r`. A frame that fails to decode or
     /// whose checksum does not match reads as `None`.
     pub fn read(&self, r: BlobRef) -> Option<String> {
+        String::from_utf8(self.read_bytes(r)?).ok()
+    }
+
+    /// Decompresses the bytes behind `r`, like `read`.
+    pub fn read_bytes(&self, r: BlobRef) -> Option<Vec<u8>> {
         if r.len == 0 {
-            return Some(String::new());
+            return Some(Vec::new());
         }
         decompress(self.frame(r)?)
     }
@@ -183,7 +203,7 @@ impl TextSegments {
     }
 }
 
-fn decompress(frame: &[u8]) -> Option<String> {
+fn decompress(frame: &[u8]) -> Option<Vec<u8>> {
     let size = zstd::zstd_safe::get_frame_content_size(frame).ok()??;
     if size > MAX_TEXT {
         return None;
@@ -192,7 +212,7 @@ fn decompress(frame: &[u8]) -> Option<String> {
         static DECOMPRESSOR: RefCell<Option<zstd::bulk::Decompressor<'static>>> =
             const { RefCell::new(None) };
     }
-    let bytes = DECOMPRESSOR.with(|cell| {
+    DECOMPRESSOR.with(|cell| {
         let mut cell = cell.borrow_mut();
         let decompressor = match &mut *cell {
             Some(decompressor) => decompressor,
@@ -200,22 +220,15 @@ fn decompress(frame: &[u8]) -> Option<String> {
         };
         let bytes = decompressor.decompress(frame, size as usize).ok()?;
         (bytes.len() as u64 == size).then_some(bytes)
-    })?;
-    String::from_utf8(bytes).ok()
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytemuck::Zeroable;
 
-    fn rows(refs: &[BlobRef]) -> Vec<CardRow> {
-        refs.iter()
-            .map(|&text| CardRow {
-                text,
-                ..CardRow::zeroed()
-            })
-            .collect()
+    fn open(dir: &Path, refs: &[BlobRef]) -> Option<TextSegments> {
+        TextSegments::open(dir, TEXT, refs.iter().copied())
     }
 
     #[test]
@@ -231,7 +244,7 @@ mod tests {
         let refs = write_segment(&segment_path(dir.path(), 0), 0, &texts).unwrap();
         assert_eq!(refs.len(), texts.len());
         assert_eq!(refs[0], BlobRef::default());
-        let segments = TextSegments::open(dir.path(), &rows(&refs)).unwrap();
+        let segments = open(dir.path(), &refs).unwrap();
         for (text, r) in texts.iter().zip(&refs) {
             assert_eq!(segments.read(*r).as_deref(), Some(text.as_str()));
         }
@@ -243,14 +256,14 @@ mod tests {
     fn open_rejects_missing_segments_and_refs_out_of_bounds() {
         let dir = tempfile::tempdir().unwrap();
         let refs = write_segment(&segment_path(dir.path(), 0), 0, &["alpha", "beta"]).unwrap();
-        assert!(TextSegments::open(dir.path(), &rows(&refs)).is_some());
+        assert!(open(dir.path(), &refs).is_some());
 
         let mut past_end = refs.clone();
         past_end[1].off += 1;
-        assert!(TextSegments::open(dir.path(), &rows(&past_end)).is_none());
+        assert!(open(dir.path(), &past_end).is_none());
         let mut other_segment = refs.clone();
         other_segment[0].seg = 1;
-        assert!(TextSegments::open(dir.path(), &rows(&other_segment)).is_none());
+        assert!(open(dir.path(), &other_segment).is_none());
     }
 
     #[test]
@@ -264,7 +277,7 @@ mod tests {
             bytes[i] ^= 0x55;
             std::fs::remove_file(&path).unwrap();
             std::fs::write(&path, &bytes).unwrap();
-            let segments = TextSegments::open(dir.path(), &rows(&refs)).unwrap();
+            let segments = open(dir.path(), &refs).unwrap();
             assert_eq!(segments.read(refs[0]), None, "byte {i}");
         }
     }
