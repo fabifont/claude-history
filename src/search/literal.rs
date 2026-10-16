@@ -1,6 +1,6 @@
 use crate::history::Conversation;
+use crate::text_match::is_word_start;
 use rayon::prelude::*;
-use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaseMode {
@@ -32,25 +32,28 @@ impl Literal {
         self.case_mode
     }
 
+    /// Whether the literal occurs in `text` starting at a word start.
     pub fn matches(&self, text: &str) -> bool {
-        if self.text.is_empty() {
-            return false;
-        }
-
-        match self.case_mode {
-            CaseMode::Sensitive => text.contains(&self.text),
-            CaseMode::Insensitive => contains_case_insensitive(text, &self.text),
-        }
+        !self.find_ranges(text, true).is_empty()
     }
 
+    /// Byte ranges of the non-overlapping occurrences in `text` that start at
+    /// a word start.
     pub fn match_ranges(&self, text: &str) -> Vec<(usize, usize)> {
+        self.find_ranges(text, false)
+    }
+
+    /// Occurrences start at a word start: the start of `text` or after a
+    /// non-alphanumeric character, so `_`, `.`, `/`, `-` and whitespace all
+    /// begin words and `streaming` matches in `load_streaming` but not in
+    /// `livestreaming`.
+    fn find_ranges(&self, text: &str, first_only: bool) -> Vec<(usize, usize)> {
         if self.text.is_empty() {
             return Vec::new();
         }
-
         match self.case_mode {
-            CaseMode::Sensitive => find_substring_ranges(text, &self.text),
-            CaseMode::Insensitive => find_case_insensitive_ranges(text, &self.text),
+            CaseMode::Sensitive => find_word_start_ranges(text, &self.text, first_only),
+            CaseMode::Insensitive => find_case_insensitive_ranges(text, &self.text, first_only),
         }
     }
 }
@@ -121,66 +124,67 @@ pub fn exact_fallback(
     matches.into_iter().map(|(index, _)| index).collect()
 }
 
-fn contains_case_insensitive(text: &str, needle: &str) -> bool {
-    let needle_chars: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
-    if needle_chars.is_empty() {
-        return false;
-    }
-
-    let mut window = VecDeque::with_capacity(needle_chars.len());
-    for folded in text.chars().flat_map(char::to_lowercase) {
-        window.push_back(folded);
-        if window.len() > needle_chars.len() {
-            window.pop_front();
-        }
-        if window.len() == needle_chars.len()
-            && window.iter().copied().eq(needle_chars.iter().copied())
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn find_substring_ranges(text: &str, needle: &str) -> Vec<(usize, usize)> {
+fn find_word_start_ranges(text: &str, needle: &str, first_only: bool) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut start = 0;
     while let Some(pos) = text[start..].find(needle) {
         let range_start = start + pos;
-        let range_end = range_start + needle.len();
-        ranges.push((range_start, range_end));
-        start = range_end;
+        if is_word_start(text, range_start) {
+            let range_end = range_start + needle.len();
+            ranges.push((range_start, range_end));
+            if first_only {
+                break;
+            }
+            start = range_end;
+        } else {
+            start = range_start + text[range_start..].chars().next().map_or(1, char::len_utf8);
+        }
     }
     ranges
 }
 
-fn find_case_insensitive_ranges(text: &str, needle: &str) -> Vec<(usize, usize)> {
+fn find_case_insensitive_ranges(text: &str, needle: &str, first_only: bool) -> Vec<(usize, usize)> {
     let needle_chars: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
-    if needle_chars.is_empty() {
+    let Some(&first) = needle_chars.first() else {
         return Vec::new();
-    }
-
-    let mut folded_chars = Vec::new();
-    let mut folded_map = Vec::new();
-    for (start, ch) in text.char_indices() {
-        let end = start + ch.len_utf8();
-        for folded in ch.to_lowercase() {
-            folded_chars.push(folded);
-            folded_map.push((start, end));
-        }
-    }
+    };
 
     let mut ranges = Vec::new();
-    let mut i = 0;
-    while i + needle_chars.len() <= folded_chars.len() {
-        if folded_chars[i..i + needle_chars.len()] == needle_chars[..] {
-            ranges.push((folded_map[i].0, folded_map[i + needle_chars.len() - 1].1));
-            i += needle_chars.len();
-        } else {
-            i += 1;
+    let mut resume = 0;
+    let mut prev_alnum = false;
+    for (start, ch) in text.char_indices() {
+        let word_start = !prev_alnum;
+        prev_alnum = ch.is_alphanumeric();
+        if start < resume || !word_start || ch.to_lowercase().next() != Some(first) {
+            continue;
+        }
+        if let Some(end) = folded_match_end(&text[start..], &needle_chars) {
+            ranges.push((start, start + end));
+            if first_only {
+                break;
+            }
+            resume = start + end;
         }
     }
     ranges
+}
+
+/// Byte length of the shortest prefix of `text` whose lowercase folding
+/// starts with `needle`, if any.
+fn folded_match_end(text: &str, needle: &[char]) -> Option<usize> {
+    let mut matched = 0;
+    for (offset, ch) in text.char_indices() {
+        for folded in ch.to_lowercase() {
+            if folded != needle[matched] {
+                return None;
+            }
+            matched += 1;
+            if matched == needle.len() {
+                return Some(offset + ch.len_utf8());
+            }
+        }
+    }
+    None
 }
 
 fn literal_text(conversation: &Conversation, include_agent_text: bool) -> String {
@@ -255,6 +259,49 @@ mod tests {
 
         assert!(literal.matches("pre İSTANBUL post"));
         assert!(!literal.matches("pre constantinople post"));
+    }
+
+    #[test]
+    fn literal_matches_only_at_word_starts() {
+        for case in [
+            Literal::new("streaming".to_string()),
+            Literal::new("Streaming".to_string()),
+        ] {
+            assert!(!case.matches("LiveStreaming livestreaming"));
+            assert_eq!(case.match_ranges("liveStreaming"), Vec::new());
+        }
+
+        let literal = Literal::new("conversations_streaming".to_string());
+        assert!(literal.matches("load_all_conversations_streaming()"));
+        assert!(!literal.matches("subconversations_streaming"));
+        for text in [
+            "a_streaming",
+            "a.streaming",
+            "a/streaming",
+            "a-streaming",
+            "streaming",
+        ] {
+            assert!(
+                Literal::new("streaming".to_string()).matches(text),
+                "{text}"
+            );
+        }
+        assert!(Literal::new("ünchen".to_string()).matches("(ünchen)"));
+        assert!(!Literal::new("nchen".to_string()).matches("münchen"));
+    }
+
+    #[test]
+    fn literal_ranges_skip_mid_word_occurrences() {
+        let literal = Literal::new("log".to_string());
+
+        assert_eq!(
+            literal.match_ranges("catalog log blog.log"),
+            vec![(8, 11), (17, 20)]
+        );
+        assert_eq!(
+            Literal::new("Log".to_string()).match_ranges("catalog Log blogLog"),
+            vec![(8, 11)]
+        );
     }
 
     #[test]

@@ -784,7 +784,7 @@ mod tests {
     #[test]
     fn exact_tool_result_search_uses_bounded_head_and_tail() {
         let long = format!(
-            "HEAD{}TAIL",
+            "HEAD {} TAIL",
             "x".repeat(crate::agent::transcript::MAX_AGENT_SEGMENT_CHARS * 2)
         );
         let transcript = transcript(vec![tool_result_message(1, json!(long))]);
