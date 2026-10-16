@@ -22,6 +22,12 @@
 //! `count_adjacent_pairs` count unless matches can overlap or a word is
 //! longer than `TERM_CAP` (see `search::is_exact_word`).
 //!
+//! Ideographs (U+4E00..=U+9FFF) that follow an alphanumeric char in their
+//! chunk also get an inner term: a space, then the rest of the chunk cut to
+//! `TERM_CAP` bytes. No ordinary term or query word starts with a space, so
+//! inner terms leave word-start counts untouched while letting `inner_tf`
+//! find ideographic words inside runs of CJK text.
+//!
 //! Term frequencies are capped at `TF_CAP` per (term, document). Doc ids are
 //! row indices of the generation's cards, newest first.
 //!
@@ -61,7 +67,7 @@ pub const SHORT_LEN: usize = 2;
 const FST_MAGIC: [u8; 8] = *b"CHLXFST\0";
 const POST_MAGIC: [u8; 8] = *b"CHLXPST\0";
 const SHORT_MAGIC: [u8; 8] = *b"CHLXSHT\0";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const _: () = assert!(TF_CAP < 16);
 const INLINE: u64 = 1 << 63;
 /// Upper bound on fst partitions, which are built in parallel.
@@ -141,6 +147,30 @@ pub fn for_each_term<'t>(lowered: &'t str, mut emit: impl FnMut(&'t str)) {
     }
 }
 
+/// Whether `c` is an ideograph that gets inner terms.
+pub fn is_ideograph(c: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&c)
+}
+
+/// Calls `emit` with the chunk rest, cut to `TERM_CAP` bytes, at every
+/// ideograph of `lowered` (normalized text) that follows an alphanumeric char
+/// in its chunk. The stored inner term is a space followed by that rest.
+pub fn for_each_inner_term<'t>(lowered: &'t str, mut emit: impl FnMut(&'t str)) {
+    // Ideographs are three-byte sequences with these lead bytes.
+    if !lowered.bytes().any(|b| (0xE4..=0xE9).contains(&b)) {
+        return;
+    }
+    for chunk in lowered.split(' ') {
+        let mut prev_alnum = false;
+        for (i, ch) in chunk.char_indices() {
+            if prev_alnum && is_ideograph(ch) {
+                emit(truncate_on_char_boundary(&chunk[i..], TERM_CAP));
+            }
+            prev_alnum = ch.is_alphanumeric();
+        }
+    }
+}
+
 /// Multiply-rotate hash for short keys, much cheaper than SipHash when
 /// counting the hundreds of millions of term occurrences of a full build.
 #[derive(Default)]
@@ -186,8 +216,18 @@ impl DocTerms {
     fn new(lowered: &str) -> Self {
         let mut counts: HashMap<&str, u32, BuildHasherDefault<FxHasher>> = HashMap::default();
         for_each_term(lowered, |term| *counts.entry(term).or_default() += 1);
-        let mut terms: Vec<(&str, u32)> = counts.into_iter().collect();
-        terms.sort_unstable_by_key(|&(term, _)| term);
+        let mut inner: HashMap<&str, u32, BuildHasherDefault<FxHasher>> = HashMap::default();
+        for_each_inner_term(lowered, |rest| *inner.entry(rest).or_default() += 1);
+        let mut terms: Vec<(Cow<str>, u32)> = counts
+            .into_iter()
+            .map(|(term, n)| (Cow::Borrowed(term), n))
+            .chain(
+                inner
+                    .into_iter()
+                    .map(|(rest, n)| (Cow::Owned(format!(" {rest}")), n)),
+            )
+            .collect();
+        terms.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
 
         let mut doc = DocTerms {
             bytes: Vec::new(),
@@ -196,7 +236,8 @@ impl DocTerms {
             short: Vec::new(),
         };
         let mut short: [Option<(ShortKey, u8)>; SHORT_LEN] = [None; SHORT_LEN];
-        for (term, n) in terms {
+        for (term, n) in &terms {
+            let (term, n) = (term.as_ref(), *n);
             let tf = n.min(u32::from(TF_CAP)) as u8;
             doc.bytes.extend_from_slice(term.as_bytes());
             doc.ends.push(doc.bytes.len() as u32);
@@ -627,6 +668,17 @@ impl LexIndex {
     /// or an adjacent pair) in each document. Words longer than `TERM_CAP`
     /// are counted by their `TERM_CAP`-byte prefix, which can only
     /// overcount.
+    /// Per-document count of `word` (normalized, starting with an ideograph)
+    /// occurring right after an alphanumeric char, cut to `TERM_CAP` bytes
+    /// like `prefix_tf`. With `prefix_tf`, it bounds where `word` occurs at
+    /// all.
+    pub fn inner_tf(&self, word: &str) -> Vec<u8> {
+        if !word.starts_with(is_ideograph) {
+            return vec![0; self.n_docs as usize];
+        }
+        self.prefix_tf(&format!(" {}", truncate_on_char_boundary(word, TERM_CAP)))
+    }
+
     pub fn prefix_tf(&self, word: &str) -> Vec<u8> {
         let mut acc = vec![0u8; self.n_docs as usize];
         if word.is_empty() {
@@ -682,7 +734,7 @@ impl LexIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::text_match::normalize_for_search;
+    use crate::text_match::{is_word_start, normalize_for_search};
 
     fn index_of(texts: &[&str]) -> (tempfile::TempDir, LexIndex) {
         let lowered: Vec<String> = texts.iter().map(|t| normalize_for_search(t)).collect();
@@ -738,6 +790,11 @@ mod tests {
         let mut terms = Vec::new();
         for_each_term("a 测试", |term| terms.push(term.to_string()));
         assert_eq!(terms, ["a 测", "测试"]);
+        let mut inner = Vec::new();
+        for_each_inner_term("这是测试 x会话 测 a测", |rest| {
+            inner.push(rest.to_string())
+        });
+        assert_eq!(inner, ["是测试", "测试", "试", "会话", "话", "测"]);
         let long = "a".repeat(30) + "é";
         let mut terms = Vec::new();
         for_each_term(&long, |term| terms.push(term.len()));
@@ -756,7 +813,7 @@ mod tests {
             "Hardened_Runtime config/main-worktree a.a.a",
             "",
             "e e e e e e e e e e e e e",
-            "零 测试 cache 会话 café cafe",
+            "零 测试 cache 会话 café cafe 这是测试测试 x会话",
             &"x".repeat(40),
             "the then there theme the.foo",
         ];
@@ -791,6 +848,29 @@ mod tests {
             let tf = index.prefix_tf(word);
             for (doc, text) in lowered.iter().enumerate() {
                 assert_eq!(tf[doc], naive_tf(text, word), "word {word:?} doc {doc}");
+            }
+        }
+
+        for word in [
+            "测",
+            "测试",
+            "试",
+            "会话",
+            "话",
+            "是测试测试",
+            "零",
+            "测试x",
+        ] {
+            let inner = index.inner_tf(word);
+            let tf = index.prefix_tf(word);
+            for (doc, text) in lowered.iter().enumerate() {
+                let count = text
+                    .match_indices(word)
+                    .filter(|&(i, _)| !is_word_start(text, i))
+                    .count()
+                    .min(TF_CAP as usize) as u8;
+                assert_eq!(inner[doc], count, "word {word:?} doc {doc}");
+                assert_eq!(inner[doc] > 0 || tf[doc] > 0, text.contains(word));
             }
         }
     }

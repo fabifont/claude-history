@@ -16,7 +16,9 @@
 //! What the index cannot narrow is checked newest first, and only as far as
 //! the requested results need: literals without a word to look up, and
 //! documents that may match a query with CJK words only inside words, which
-//! the scorer accepts with a flat score.
+//! the scorer accepts with a flat score. Those are narrowed to documents
+//! containing the query's ideograph-only words, found through word-start and
+//! inner terms.
 
 use super::card::card_flags;
 use super::generation::Generation;
@@ -330,6 +332,21 @@ pub fn search<'a>(
         })
         .collect();
     let mask = literal_mask(index, docs, &literals);
+    // Documents can match only by containing a query word with CJK if they
+    // contain each ideographic word, which the index finds at word starts
+    // and inside runs of ideographs.
+    let ideographic: Vec<usize> = (0..words.len())
+        .filter(|&w| cjk && is_ideographic(&words[w]))
+        .collect();
+    let inner_tfs: Vec<Vec<u8>> = ideographic
+        .par_iter()
+        .map(|&w| index.inner_tf(&words[w]))
+        .collect();
+    let may_contain = |doc: usize, project: &ProjectFields| {
+        ideographic.iter().zip(&inner_tfs).all(|(&w, inner)| {
+            word_tfs[w][doc] > 0 || inner[doc] > 0 || project.lower.contains(words[w].as_str())
+        })
+    };
 
     let mut tfs = Vec::new();
     let mut order = Vec::new();
@@ -342,7 +359,7 @@ pub fn search<'a>(
         let doc_tfs: Vec<u8> = word_tfs.iter().map(|tf| tf[d]).collect();
         let qualifies = (0..words.len()).all(|w| doc_tfs[w] > 0 || in_project[project][w]);
         if !qualifies {
-            if cjk {
+            if cjk && may_contain(d, &docs.projects[project]) {
                 let fresh = fresh(doc);
                 order.push(Candidate {
                     doc,
@@ -524,11 +541,14 @@ impl Ranking<'_> {
         let flat = || {
             // Ideographs have no case and are not separators, so they occur
             // in the normalized text exactly where they occur in the text.
-            let ideographic =
-                |word: &&String| word.chars().all(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c));
-            if plan.words.iter().filter(ideographic).any(|word| {
-                !full_text.contains(word.as_str()) && !project.lower.contains(word.as_str())
-            }) {
+            if plan
+                .words
+                .iter()
+                .filter(|word| is_ideographic(word))
+                .any(|word| {
+                    !full_text.contains(word.as_str()) && !project.lower.contains(word.as_str())
+                })
+            {
                 return None;
             }
             let body = normalize_for_search(&full_text);
@@ -640,6 +660,11 @@ fn body_tf_score(tfs: impl Iterator<Item = usize>) -> f64 {
         score += tf_score(tf);
     }
     WEIGHT_BODY * score
+}
+
+/// Whether `word` consists of ideographs only.
+fn is_ideographic(word: &str) -> bool {
+    word.chars().all(lexindex::is_ideograph)
 }
 
 /// What literals match: `full_text`, then the project name, joined by a
@@ -1100,6 +1125,35 @@ mod tests {
         assert_eq!(docs("\"deploy error\""), [2, 3]);
         assert_eq!(docs("\"deploy error-rep\""), [2]);
         assert_eq!(docs("\"reporter\""), [2, 4]);
+    }
+
+    #[test]
+    fn cjk_queries_read_only_documents_containing_their_ideographs() {
+        let now = Local.timestamp_opt(1_760_000_000, 0).unwrap();
+        let conversations: Vec<Conversation> = (0..100)
+            .map(|i| {
+                let text = match i {
+                    10 => "这是测试 cache",
+                    20 => "测试 cache",
+                    30 => "x测试y",
+                    40 => "测 试",
+                    _ => "plain cache text",
+                };
+                conv(
+                    text,
+                    None,
+                    None,
+                    None,
+                    now - Duration::hours(i),
+                    &format!("/{i:03}"),
+                )
+            })
+            .collect();
+        let corpus = Corpus::new(conversations);
+        for (query, read) in [("测试", 2), ("测试 cache", 2), ("试", 3), ("cache 测试", 2)] {
+            let stats = corpus.check(query, now, 10);
+            assert_eq!(stats.texts_read, read, "{query}");
+        }
     }
 
     #[test]
