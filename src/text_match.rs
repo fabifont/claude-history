@@ -50,14 +50,116 @@ pub fn nfc(text: &str) -> Cow<'_, str> {
 pub fn normalize_for_search(text: &str) -> String {
     let text = nfc(text);
     let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        if is_word_separator(ch) {
-            out.push(' ');
+    text.chars().for_each(|ch| push_normalized(&mut out, ch));
+    out
+}
+
+fn push_normalized(out: &mut String, ch: char) {
+    if is_word_separator(ch) {
+        out.push(' ');
+    } else {
+        push_folded(out, ch);
+    }
+}
+
+/// Byte ranges of the occurrences of `word` in `text`, both search-normalized,
+/// that keyword search counts: those at a word start, or all of them when
+/// `anywhere` (the substring fallback of queries with CJK text). Occurrences
+/// do not overlap.
+pub fn word_match_ranges(text: &str, word: &str, anywhere: bool) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    if word.is_empty() {
+        return ranges;
+    }
+    let mut start = 0;
+    while let Some(pos) = text[start..].find(word) {
+        let at = start + pos;
+        if anywhere || is_word_start(text, at) {
+            ranges.push((at, at + word.len()));
+            start = at + word.len();
         } else {
-            push_folded(&mut out, ch);
+            start = at + text[at..].chars().next().map_or(1, char::len_utf8);
         }
     }
-    out
+    ranges
+}
+
+/// A text in NFC with its search-normalized form, for finding query words
+/// the way keyword search does and mapping the matches back to the text.
+pub struct NormalizedText<'a> {
+    raw: &'a str,
+    normalized: String,
+}
+
+impl<'a> NormalizedText<'a> {
+    /// `raw` should be in NFC, as loaded conversation texts are; the
+    /// normalized form is then `normalize_for_search(raw)`.
+    pub fn new(raw: &'a str) -> Self {
+        let mut normalized = String::with_capacity(raw.len());
+        raw.chars()
+            .for_each(|ch| push_normalized(&mut normalized, ch));
+        Self { raw, normalized }
+    }
+
+    pub fn raw(&self) -> &'a str {
+        self.raw
+    }
+
+    pub fn normalized(&self) -> &str {
+        &self.normalized
+    }
+
+    /// Byte ranges in the raw text, sorted, of the matches of the words of
+    /// `query` (search-normalized, words separated by spaces). Words match
+    /// at word starts, or anywhere when the query has CJK text, as in
+    /// keyword search.
+    pub fn query_ranges(&self, query: &str) -> Vec<(usize, usize)> {
+        let anywhere = contains_cjk(query);
+        let mut ranges: Vec<(usize, usize)> = query
+            .split_whitespace()
+            .flat_map(|word| word_match_ranges(&self.normalized, word, anywhere))
+            .collect();
+        ranges.sort_unstable();
+        self.raw_ranges(&ranges)
+    }
+
+    /// Byte ranges in the raw text of the chars that `ranges`, byte ranges in
+    /// the normalized form, came from.
+    pub fn raw_ranges(&self, ranges: &[(usize, usize)]) -> Vec<(usize, usize)> {
+        // Each range's start and last byte, in normalized order; even
+        // entries are starts and odd ones ends.
+        let mut points: Vec<(usize, usize)> = ranges
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &(start, end))| [(start, 2 * i), (end.max(start + 1) - 1, 2 * i + 1)])
+            .collect();
+        points.sort_unstable();
+        let mut mapped = vec![self.raw.len(); points.len()];
+        let mut points = points.into_iter().peekable();
+        let mut folded = String::new();
+        let mut at = 0;
+        for (raw_at, ch) in self.raw.char_indices() {
+            // Folding a char depends on the char folded before it.
+            let previous = folded.chars().next_back();
+            folded.clear();
+            folded.extend(previous);
+            let carried = folded.len();
+            push_normalized(&mut folded, ch);
+            let next = at + folded.len() - carried;
+            while let Some(&(point, index)) = points.peek()
+                && point < next
+            {
+                mapped[index] = if index % 2 == 0 {
+                    raw_at
+                } else {
+                    raw_at + ch.len_utf8()
+                };
+                points.next();
+            }
+            at = next;
+        }
+        mapped.chunks(2).map(|pair| (pair[0], pair[1])).collect()
+    }
 }
 
 pub fn is_word_separator(c: char) -> bool {
@@ -182,6 +284,31 @@ mod tests {
             normalize_for_search("Cafe\u{301} İstanbul STRAẞE ΛΟΓΟΣ"),
             normalize_for_search("café istanbul strasse λογος")
         );
+    }
+
+    #[test]
+    fn normalized_text_maps_matches_back_to_raw_chars() {
+        let raw = "İstanbul ﬁle STRAẞE i\u{307}stanbul ok";
+        let text = NormalizedText::new(raw);
+        assert_eq!(text.normalized, normalize_for_search(raw));
+        let found = |query: &str| {
+            text.query_ranges(query)
+                .into_iter()
+                .map(|(start, end)| &raw[start..end])
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(found("istanbul"), ["İstanbul", "i\u{307}stanbul"]);
+        assert_eq!(found("stanbul"), Vec::<&str>::new());
+        assert_eq!(found("fi"), ["ﬁ"]);
+        assert_eq!(found("strasse ok"), ["STRAẞE", "ok"]);
+        assert_eq!(found("ss"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn word_matches_follow_word_starts_unless_anywhere() {
+        assert_eq!(word_match_ranges("v1.1.1 x", "1.1", false), [(3, 6)]);
+        assert_eq!(word_match_ranges("aab ab", "ab", false), [(4, 6)]);
+        assert_eq!(word_match_ranges("aab ab", "ab", true), [(1, 3), (4, 6)]);
     }
 
     #[test]

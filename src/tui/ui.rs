@@ -3,6 +3,7 @@ use crate::search::evidence::select_hidden_context_ranges;
 use crate::search::literal::{Literal, match_literal_ranges};
 use crate::search::normalize_for_search;
 use crate::search::query::ParsedQuery;
+use crate::text_match::{NormalizedText, is_word_separator};
 use crate::tui::app::{
     App, AppMode, DialogMode, ListSearchMode, SemanticResultMetadata, ViewSearchMode, ViewState,
     list_lines_per_item,
@@ -2371,125 +2372,30 @@ struct TermHit {
     term_idx: usize,
 }
 
-/// Pre-normalized text with char-to-byte mapping for efficient repeated searches.
-struct NormalizedText {
-    norm_chars: Vec<char>,
-    char_map: Vec<(usize, usize)>,
-}
-
-impl NormalizedText {
-    fn new(text: &str) -> Self {
-        let mut norm_chars: Vec<char> = Vec::new();
-        let mut char_map: Vec<(usize, usize)> = Vec::new();
-
-        let mut iter = text.char_indices().peekable();
-        while let Some((byte_start, ch)) = iter.next() {
-            let byte_end = iter.peek().map_or(text.len(), |(i, _)| *i);
-            if ch == '_' {
-                norm_chars.push(' ');
-                char_map.push((byte_start, byte_end));
-            } else {
-                for lc in ch.to_lowercase() {
-                    norm_chars.push(lc);
-                    char_map.push((byte_start, byte_end));
-                }
-            }
-        }
-
-        Self {
-            norm_chars,
-            char_map,
-        }
-    }
-
-    /// Find all non-overlapping matches of a single term, with left word boundary.
-    fn find_term_ranges(&self, term: &str) -> Vec<(usize, usize)> {
-        let query_chars: Vec<char> = term.chars().collect();
-        if query_chars.is_empty() {
-            return Vec::new();
-        }
-
-        let query_starts_alnum = query_chars.first().is_some_and(|c| c.is_alphanumeric());
-        let mut matches = Vec::new();
-
-        let mut i = 0;
-        while i + query_chars.len() <= self.norm_chars.len() {
-            if self.norm_chars[i..i + query_chars.len()] == query_chars[..] {
-                let prev_is_alnum = i > 0 && self.norm_chars[i - 1].is_alphanumeric();
-                let valid_start = !query_starts_alnum || !prev_is_alnum;
-
-                if valid_start {
-                    let start_byte = self.char_map[i].0;
-                    let end_byte = self.char_map[i + query_chars.len() - 1].1;
-                    matches.push((start_byte, end_byte));
-                    i += query_chars.len();
-                } else {
-                    i += 1;
-                }
-            } else {
-                i += 1;
-            }
-        }
-
-        matches
-    }
-
-    /// Find all matches for a multi-word query, sorted and merged.
-    fn find_all_ranges(&self, query_normalized: &str) -> Vec<(usize, usize)> {
-        let terms: Vec<&str> = query_normalized.split_whitespace().collect();
-        if terms.is_empty() {
-            return Vec::new();
-        }
-
-        let mut all_matches = Vec::new();
-        for term in &terms {
-            all_matches.extend(self.find_term_ranges(term));
-        }
-
-        // Sort and merge overlapping or separator-adjacent ranges.
-        // This ensures "run_with_loader" highlights as one span including the underscores
-        // when searching "run with loader" (underscores normalized to spaces).
-        all_matches.sort_unstable_by_key(|m| m.0);
-        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(all_matches.len());
-        for m in all_matches {
-            if let Some(last) = merged.last_mut() {
-                if m.0 <= last.1 {
-                    // Overlapping — merge
-                    last.1 = last.1.max(m.1);
-                    continue;
-                }
-                // Check if the gap between ranges is only separators (_, -, /)
-                let gap = &self.norm_chars[..];
-                let gap_start = self.byte_to_char_index(last.1);
-                let gap_end = self.byte_to_char_index(m.0);
-                if gap_start < gap_end
-                    && gap[gap_start..gap_end]
-                        .iter()
-                        .all(|c| *c == ' ' || *c == '_' || *c == '-' || *c == '/')
-                {
-                    last.1 = m.1;
-                    continue;
-                }
-            }
-            merged.push(m);
-        }
-
-        merged
-    }
-
-    /// Convert a byte offset in the original text to a char index in norm_chars
-    fn byte_to_char_index(&self, byte_offset: usize) -> usize {
-        self.char_map
-            .iter()
-            .position(|(start, _)| *start >= byte_offset)
-            .unwrap_or(self.char_map.len())
-    }
-}
-
-/// Find all non-overlapping matches of `query_normalized` in `text` after normalizing `text`.
-/// Returns byte ranges in the original `text` for each match.
+/// Byte ranges in `text` of the words of `query_normalized`, matched as
+/// keyword search matches them.
 fn find_normalized_match_ranges(text: &str, query_normalized: &str) -> Vec<(usize, usize)> {
-    NormalizedText::new(text).find_all_ranges(query_normalized)
+    merge_separated_ranges(
+        text,
+        NormalizedText::new(text).query_ranges(query_normalized),
+    )
+}
+
+/// Sorted `ranges` with those that overlap or are separated only by word
+/// separators merged, so `run_with_loader` highlights as one span for
+/// `run with loader`.
+fn merge_separated_ranges(text: &str, ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        if let Some(last) = merged.last_mut()
+            && (start <= last.1 || text[last.1..start].chars().all(is_word_separator))
+        {
+            last.1 = last.1.max(end);
+            continue;
+        }
+        merged.push((start, end));
+    }
+    merged
 }
 
 #[derive(Debug, Default)]
@@ -2609,9 +2515,10 @@ impl ContextMatchSpec {
 
     fn find_ranges(&self, text: &str, normalized: Option<&NormalizedText>) -> Vec<(usize, usize)> {
         match self {
-            Self::Normalized(term) => normalized
-                .map(|normalized| normalized.find_all_ranges(term))
-                .unwrap_or_else(|| find_normalized_match_ranges(text, term)),
+            Self::Normalized(term) => match normalized {
+                Some(normalized) => merge_separated_ranges(text, normalized.query_ranges(term)),
+                None => find_normalized_match_ranges(text, term),
+            },
             Self::Literal(literal) => literal.match_ranges(text),
         }
     }
@@ -4061,6 +3968,21 @@ mod tests {
             &"Extend log redaction to cover"[ranges[0].0..ranges[0].1],
             "red"
         );
+    }
+
+    #[test]
+    fn find_normalized_ranges_follow_keyword_search() {
+        let found = |text: &'static str, query: &str| {
+            find_normalized_match_ranges(text, &normalize_for_search(query))
+                .into_iter()
+                .map(|(start, end)| &text[start..end])
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(found("the İstanbul trip", "istanbul"), ["İstanbul"]);
+        assert_eq!(found("ΛΟΓΟΣ and λογος", "λογος"), ["ΛΟΓΟΣ", "λογος"]);
+        assert_eq!(found("中间这是测试会话内容", "测试会话"), ["测试会话"]);
+        assert_eq!(found("asp.net", ".net"), Vec::<&str>::new());
+        assert_eq!(found("bump v1.1.1", "1.1"), ["1.1"]);
     }
 
     #[test]

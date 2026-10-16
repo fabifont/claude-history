@@ -1114,6 +1114,29 @@ mod tests {
     }
 
     #[test]
+    fn word_match_ranges_find_what_the_scorer_counts() {
+        const PIECES: &[&str] = &["a", "ab", "b", " ", ".", "1", "1.1", "测", "测试", "x"];
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        for _ in 0..3000 {
+            let text: String = (0..next(30)).map(|_| PIECES[next(PIECES.len())]).collect();
+            let word: String = (0..1 + next(2))
+                .map(|_| PIECES[next(PIECES.len())])
+                .collect();
+            assert_eq!(
+                crate::text_match::word_match_ranges(&text, &word, false).len(),
+                count_prefix_matches(&text, &word, usize::MAX),
+                "{text:?} {word:?}"
+            );
+        }
+    }
+
+    #[test]
     fn mid_word_occurrence_does_not_hide_a_word_start_inside_it() {
         assert_eq!(count_prefix_matches("bump to v1.1.1 now", "1.1", 10), 1);
         assert_eq!(count_prefix_matches("1.1.1 x1.1", "1.1", 10), 1);

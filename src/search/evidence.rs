@@ -1,6 +1,6 @@
 use crate::search::literal::Literal;
 use crate::search::query::ParsedQuery;
-use crate::text_match::{is_word_start, next_lowercase_candidate, normalize_for_search};
+use crate::text_match::{NormalizedText, contains_cjk, normalize_for_search, word_match_ranges};
 
 /// Where a conversation's text matches a query beyond its preview.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -54,29 +54,29 @@ impl HitCluster {
 
 #[derive(Clone)]
 enum EvidenceSpec {
-    Normalized(String),
+    /// A search-normalized query word, matching as keyword search counts it:
+    /// at word starts, or `anywhere` when the query has CJK text.
+    Normalized {
+        term: String,
+        anywhere: bool,
+    },
     Literal(Literal),
 }
 
 impl EvidenceSpec {
     fn key(&self) -> (&str, bool) {
         match self {
-            Self::Normalized(term) => (term.as_str(), false),
+            Self::Normalized { term, .. } => (term.as_str(), false),
             Self::Literal(literal) => (literal.text(), true),
         }
     }
 
-    fn has_match(&self, text: &str) -> bool {
+    fn ranges(&self, text: &NormalizedText) -> Vec<(usize, usize)> {
         match self {
-            Self::Normalized(term) => find_first_normalized_match(text, term).is_some(),
-            Self::Literal(literal) => literal.matches(text),
-        }
-    }
-
-    fn ranges(&self, text: &str) -> Vec<(usize, usize)> {
-        match self {
-            Self::Normalized(term) => find_normalized_term_ranges(text, term),
-            Self::Literal(literal) => literal.match_ranges(text),
+            Self::Normalized { term, anywhere } => {
+                text.raw_ranges(&word_match_ranges(text.normalized(), term, *anywhere))
+            }
+            Self::Literal(literal) => literal.match_ranges(text.raw()),
         }
     }
 }
@@ -174,9 +174,14 @@ fn evidence_specs(parsed: &ParsedQuery) -> Vec<EvidenceSpec> {
         .filter(|term| !term.contains('_'))
         .collect::<Vec<_>>()
         .join(" ");
-    let normalized = normalize_for_search(&normalized_query)
+    let normalized_query = normalize_for_search(&normalized_query);
+    let anywhere = contains_cjk(&normalized_query);
+    let normalized = normalized_query
         .split_whitespace()
-        .map(|term| EvidenceSpec::Normalized(term.to_string()))
+        .map(|term| EvidenceSpec::Normalized {
+            term: term.to_string(),
+            anywhere,
+        })
         .collect::<Vec<_>>();
 
     dedupe_specs(
@@ -210,22 +215,24 @@ fn select_context_ranges(
     preview: &str,
     specs: &[EvidenceSpec],
 ) -> Option<Vec<(usize, usize)>> {
+    let preview = NormalizedText::new(preview);
+    let full_text = NormalizedText::new(full_text);
     let mut missing_mask: u64 = 0;
     let mut missing_count = 0u32;
     for (i, spec) in specs.iter().enumerate() {
-        if !spec.has_match(preview) {
+        if spec.ranges(&preview).is_empty() {
             missing_mask |= 1 << i;
             missing_count += 1;
         }
     }
 
-    let all_hits = find_all_spec_hits(full_text, specs);
+    let all_hits = find_all_spec_hits(&full_text, specs);
     if all_hits.is_empty() {
         return None;
     }
 
     if missing_count == 0 {
-        let preview_hit_count = find_all_spec_hits(preview, specs).len();
+        let preview_hit_count = find_all_spec_hits(&preview, specs).len();
         if all_hits.len() <= preview_hit_count {
             return None;
         }
@@ -235,7 +242,7 @@ fn select_context_ranges(
         .iter()
         .map(|hit| (hit.start, hit.end, hit.term_idx))
         .collect();
-    select_hidden_context_ranges(full_text, &hit_spans, missing_mask, missing_count)
+    select_hidden_context_ranges(full_text.raw(), &hit_spans, missing_mask, missing_count)
 }
 
 pub(crate) fn select_hidden_context_ranges(
@@ -345,7 +352,7 @@ pub(crate) fn select_hidden_context_ranges(
     )
 }
 
-fn find_all_spec_hits(text: &str, specs: &[EvidenceSpec]) -> Vec<TermHit> {
+fn find_all_spec_hits(text: &NormalizedText, specs: &[EvidenceSpec]) -> Vec<TermHit> {
     let mut all_hits = Vec::new();
     for (term_idx, spec) in specs.iter().enumerate() {
         all_hits.extend(spec.ranges(text).into_iter().map(|(start, end)| TermHit {
@@ -358,150 +365,11 @@ fn find_all_spec_hits(text: &str, specs: &[EvidenceSpec]) -> Vec<TermHit> {
     all_hits
 }
 
-fn find_first_normalized_match(text: &str, term: &str) -> Option<(usize, usize)> {
-    find_normalized_term_ranges(text, term).into_iter().next()
-}
-
-fn find_normalized_term_ranges(text: &str, term: &str) -> Vec<(usize, usize)> {
-    let term_chars: Vec<char> = term.chars().collect();
-    let Some(&first) = term_chars.first() else {
-        return Vec::new();
-    };
-    // `_`, `-` and `/` normalize to a space, so a term starting with one
-    // can start at any char.
-    let any_start = first == ' ';
-    let query_starts_alnum = first.is_alphanumeric();
-    let mut ranges = Vec::new();
-    let mut from = 0;
-    while from < text.len() {
-        let start = if any_start {
-            from
-        } else {
-            match next_lowercase_candidate(text, from, first) {
-                Some(start) => start,
-                None => break,
-            }
-        };
-        let rest = &text[start..];
-        let valid_start = !query_starts_alnum || is_word_start(text, start);
-        let mut chars = rest.char_indices();
-        let end = valid_start
-            .then(|| {
-                term_chars.iter().try_fold(start, |_, &query_char| {
-                    let (offset, ch) = chars.next()?;
-                    (normalize_evidence_char(ch) == query_char)
-                        .then_some(start + offset + ch.len_utf8())
-                })
-            })
-            .flatten();
-        match end {
-            Some(end) => {
-                ranges.push((start, end));
-                from = end;
-            }
-            None => from = start + rest.chars().next().map_or(1, char::len_utf8),
-        }
-    }
-    ranges
-}
-
-fn normalize_evidence_char(ch: char) -> char {
-    if ch == '_' || ch == '-' || ch == '/' {
-        ' '
-    } else {
-        ch.to_lowercase().next().unwrap_or(ch)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::history::Conversation;
 
-    /// Char-by-char reference for `find_normalized_term_ranges`.
-    fn reference_term_ranges(text: &str, term: &str) -> Vec<(usize, usize)> {
-        let term_chars: Vec<char> = term.chars().collect();
-        if term_chars.is_empty() {
-            return Vec::new();
-        }
-
-        let query_starts_alnum = term_chars[0].is_alphanumeric();
-        let mut ranges = Vec::new();
-        let mut prev_is_alnum = false;
-        let mut iter = text.char_indices().peekable();
-
-        while let Some(&(byte_start, ch)) = iter.peek() {
-            let norm_ch = normalize_evidence_char(ch);
-            let is_alnum = ch.is_alphanumeric();
-            let valid_start = !query_starts_alnum || !prev_is_alnum;
-
-            if valid_start && norm_ch == term_chars[0] {
-                let mut lookahead = iter.clone();
-                lookahead.next();
-                let mut matched = true;
-                let mut end_byte = byte_start + ch.len_utf8();
-
-                for &query_char in term_chars.iter().skip(1) {
-                    if let Some(&(_, next_ch)) = lookahead.peek() {
-                        let next_norm = normalize_evidence_char(next_ch);
-                        end_byte += next_ch.len_utf8();
-                        lookahead.next();
-                        if next_norm != query_char {
-                            matched = false;
-                            break;
-                        }
-                    } else {
-                        matched = false;
-                        break;
-                    }
-                }
-
-                if matched {
-                    ranges.push((byte_start, end_byte));
-                    for _ in 0..term_chars.len().saturating_sub(1) {
-                        iter.next();
-                    }
-                    prev_is_alnum = term_chars.last().is_some_and(|c| c.is_alphanumeric());
-                    iter.next();
-                    continue;
-                }
-            }
-
-            prev_is_alnum = is_alnum;
-            iter.next();
-        }
-
-        ranges
-    }
-
-    #[test]
-    fn term_ranges_match_the_char_by_char_reference() {
-        const PIECES: &[&str] = &[
-            "a", "A", "b", "ab", "AB", "İ", "i", "I", "K", "\u{212A}", "k", "é", "É", "_", "-",
-            "/", " ", ".", "测", "测试", "ß", "ǅ", "1", "\n",
-        ];
-        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
-        let mut next = |n: usize| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            (state % n as u64) as usize
-        };
-        for _ in 0..3000 {
-            let text: String = (0..next(40)).map(|_| PIECES[next(PIECES.len())]).collect();
-            let term: String = (0..1 + next(3))
-                .map(|_| PIECES[next(PIECES.len())])
-                .collect::<String>()
-                .chars()
-                .map(normalize_evidence_char)
-                .collect();
-            assert_eq!(
-                find_normalized_term_ranges(&text, &term),
-                reference_term_ranges(&text, &term),
-                "{text:?} {term:?}"
-            );
-        }
-    }
     use chrono::{Local, TimeZone};
     use std::path::PathBuf;
 
@@ -550,6 +418,40 @@ mod tests {
         assert_eq!(evidence.context_ranges.len(), 1);
         let (start, end) = evidence.context_ranges[0];
         assert!(evidence.text[start..end].contains("deepgram"));
+    }
+
+    #[test]
+    fn evidence_shows_every_match_keyword_search_counts() {
+        let snippets = |query: &str, full_text: &str| {
+            let evidence =
+                build_lexical_evidence(full_text, "unrelated preview", &ParsedQuery::parse(query))
+                    .unwrap();
+            evidence
+                .context_ranges
+                .iter()
+                .map(|&(start, end)| evidence.text[start..end].to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            snippets("istanbul", "unrelated preview then the İstanbul trip"),
+            ["İstanbul"]
+        );
+        assert_eq!(
+            snippets("测试会话", "unrelated preview 中间这是测试会话内容"),
+            ["测试会话"]
+        );
+        assert_eq!(
+            snippets("strasse", "unrelated preview with Straße name"),
+            ["Straße"]
+        );
+        assert_eq!(
+            build_lexical_evidence(
+                "unrelated preview asp.net",
+                "unrelated preview",
+                &ParsedQuery::parse(".net")
+            ),
+            None
+        );
     }
 
     #[test]
