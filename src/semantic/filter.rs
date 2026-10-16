@@ -79,14 +79,15 @@ fn strip_tag_pair(text: &str, open: &str, close: &str) -> String {
     let mut output = String::new();
     let mut rest = text;
 
+    // An `open` with no `close` after it loses only the tag; the text after
+    // it is typed text and stays.
     while let Some(start) = rest.find(open) {
         output.push_str(&rest[..start]);
         let after_open = &rest[start + open.len()..];
-        let Some(end) = after_open.find(close) else {
-            rest = "";
-            break;
+        rest = match after_open.find(close) {
+            Some(end) => &after_open[end + close.len()..],
+            None => after_open,
         };
-        rest = &after_open[end + close.len()..];
     }
 
     output.push_str(rest);
@@ -289,6 +290,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(filtered, "Useful explanation more explanation");
+        let filtered = filter_turn(
+            SemanticTurnRole::User,
+            "explain the <system-reminder> tag handling for axolotl",
+        )
+        .unwrap();
+        assert_eq!(filtered, "explain the tag handling for axolotl");
     }
 
     #[test]

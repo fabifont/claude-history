@@ -221,6 +221,7 @@ conv("M1", "aaa.aaa.aaa repeating dotted", cwd="/home/user/qa/misc")
 conv("M2", "**bold** and (paren) and `code_span` markers", cwd="/home/user/qa/misc")
 conv("M3", "C++ and C# and .NET languages", cwd="/home/user/qa/misc")
 conv("M4", "smart “quotes” and ‘single’ and naïve—dash", cwd="/home/user/qa/misc")
+conv("Y9", "[Images] of capybara and [Image #2] with pademelon", cwd="/home/user/qa/useronly")
 
 
 def lines_claude(c, t0):

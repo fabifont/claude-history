@@ -197,15 +197,14 @@ const INSERTED_SPANS: &[(&str, &str)] = &[
     ("<local-command-stderr>", "</local-command-stderr>"),
     ("<bash-stdout>", "</bash-stdout>"),
     ("<bash-stderr>", "</bash-stderr>"),
-    ("[Image", "]"),
 ];
 
 /// What the person typed in one text part of a top-level user message, or
 /// `None` when the tool wrote the part: what `is_clear_metadata_message`
 /// rejects and texts starting with `GENERATED_PREFIXES`. A skill invocation
 /// reads as its command line (`/name args`), a Codex realtime delegation as
-/// the spoken input it carries, and `INSERTED_SPANS` are removed from the
-/// rest.
+/// the spoken input it carries, and `INSERTED_SPANS` and image placeholders
+/// are removed from the rest.
 pub(crate) fn authored_text(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if is_clear_metadata_message(trimmed)
@@ -232,6 +231,7 @@ pub(crate) fn authored_text(text: &str) -> Option<String> {
     for (open, close) in INSERTED_SPANS {
         kept = without_spans(&kept, open, close);
     }
+    let kept = without_image_placeholders(&kept);
     let kept = kept
         .replace("<bash-input>", "")
         .replace("</bash-input>", "");
@@ -252,20 +252,59 @@ fn pi_skill_command(text: &str) -> Option<String> {
     })
 }
 
-/// `text` without the spans from `open` to the next `close`. An unclosed
-/// span runs to the end.
+/// `text` without the spans from `open` to the next `close`. An `open` with
+/// no `close` after it is text the person typed and stays.
 fn without_spans(text: &str, open: &str, close: &str) -> String {
     let mut kept = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find(open) {
-        kept.push_str(&rest[..start]);
         let after = &rest[start + open.len()..];
-        rest = after
-            .find(close)
-            .map_or("", |end| &after[end + close.len()..]);
+        let Some(end) = after.find(close) else {
+            break;
+        };
+        kept.push_str(&rest[..start]);
+        rest = &after[end + close.len()..];
     }
     kept.push_str(rest);
     kept
+}
+
+/// `text` without the image placeholders that stand in for attached images:
+/// `[Image]`, `[Image #N]` and `[Image: description]` on one line. Other text
+/// starting with `[Image` stays.
+fn without_image_placeholders(text: &str) -> String {
+    const OPEN: &str = "[Image";
+    let mut kept = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        let after = &rest[start + OPEN.len()..];
+        let len = image_placeholder_rest(after);
+        kept.push_str(&rest[..start]);
+        match len {
+            Some(len) => rest = &after[len..],
+            None => {
+                kept.push_str(OPEN);
+                rest = after;
+            }
+        }
+    }
+    kept.push_str(rest);
+    kept
+}
+
+/// Length of the rest of an image placeholder after `[Image`, or `None` when
+/// `after` does not complete one.
+fn image_placeholder_rest(after: &str) -> Option<usize> {
+    if after.starts_with(']') {
+        return Some(1);
+    }
+    if let Some(number) = after.strip_prefix(" #") {
+        let digits = number.bytes().take_while(u8::is_ascii_digit).count();
+        return (digits > 0 && number[digits..].starts_with(']')).then_some(2 + digits + 1);
+    }
+    let description = after.strip_prefix(':')?;
+    let end = description.find([']', '\n'])?;
+    (description[end..].starts_with(']')).then_some(1 + end + 1)
 }
 
 #[cfg(test)]
@@ -477,6 +516,24 @@ mod tests {
             authored_text("look [Image #1] here<system-reminder>injected</system-reminder> now")
                 .as_deref(),
             Some("look  here now")
+        );
+        assert_eq!(
+            authored_text("the bug: [Image upload fails for pangolin").as_deref(),
+            Some("the bug: [Image upload fails for pangolin")
+        );
+        assert_eq!(
+            authored_text("[Images] of [Image #12] and [Image: image/png] and [Image] x [Image #]")
+                .as_deref(),
+            Some("[Images] of  and  and  x [Image #]")
+        );
+        assert_eq!(
+            authored_text("explain the <system-reminder> tag handling for axolotl").as_deref(),
+            Some("explain the <system-reminder> tag handling for axolotl")
+        );
+        assert_eq!(
+            authored_text("a <system-reminder>x</system-reminder> b <system-reminder> c")
+                .as_deref(),
+            Some("a  b <system-reminder> c")
         );
         assert_eq!(
             authored_text("<bash-input>ls -la</bash-input><bash-stdout>out</bash-stdout>")

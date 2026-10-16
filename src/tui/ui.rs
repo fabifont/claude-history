@@ -2287,24 +2287,42 @@ fn build_context_segments_from_ranges_unchecked(
     }
 }
 
-/// Sanitize preview text by removing XML-like tags and normalizing whitespace
+/// Sanitize preview text by removing XML-like tags and normalizing whitespace.
+/// A tag is removed only when its name also occurs as the other kind of tag
+/// (an opening tag with a closing one, or the reverse), so `a < b`, `Vec<T>`
+/// and a typed `<system-reminder>` stay as text.
 fn sanitize_preview(text: &str) -> String {
+    let tags: Vec<(usize, usize, &str, bool)> = text
+        .match_indices('<')
+        .filter_map(|(start, _)| {
+            let (len, name, closing) = markup_tag(&text[start..])?;
+            Some((start, start + len, name, closing))
+        })
+        .collect();
+    let paired = |name: &str, closing: bool| {
+        tags.iter()
+            .any(|&(_, _, other, other_closing)| other == name && other_closing != closing)
+    };
     let mut result = String::with_capacity(text.len());
-    let mut in_tag = false;
     let mut last_was_space = false;
+    let mut skip_until = 0;
+    let mut tags = tags
+        .iter()
+        .filter(|&&(_, _, name, closing)| paired(name, closing));
+    let mut next_tag = tags.next();
 
-    for ch in text.chars() {
+    for (i, ch) in text.char_indices() {
+        if let Some(&(start, end, _, _)) = next_tag
+            && i == start
+        {
+            skip_until = end;
+            next_tag = tags.next();
+        }
+        if i < skip_until {
+            continue;
+        }
         match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if in_tag => {}
-            '\n' | '\r' | '\t' => {
-                if !last_was_space {
-                    result.push(' ');
-                    last_was_space = true;
-                }
-            }
-            ' ' => {
+            '\n' | '\r' | '\t' | ' ' => {
                 if !last_was_space {
                     result.push(' ');
                     last_was_space = true;
@@ -2318,6 +2336,31 @@ fn sanitize_preview(text: &str) -> String {
     }
 
     result.trim().to_string()
+}
+
+/// The markup tag `text` starts with: its length, name and whether it closes.
+/// A tag is `<name ...>` or `</name>` on one line, with a name of ASCII
+/// letters, digits, `_`, `-`, `:` and `.` starting with a letter.
+fn markup_tag(text: &str) -> Option<(usize, &str, bool)> {
+    let rest = text.strip_prefix('<')?;
+    let (closing, rest) = match rest.strip_prefix('/') {
+        Some(rest) => (true, rest),
+        None => (false, rest),
+    };
+    let name_len = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.')))
+        .unwrap_or(rest.len());
+    let name = &rest[..name_len];
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let after = &rest[name_len..];
+    let end = after.find(['>', '<', '\n'])?;
+    if !after[end..].starts_with('>') || (end > 0 && !after.starts_with(char::is_whitespace)) {
+        return None;
+    }
+    let len = text.len() - after.len() + end + 1;
+    Some((len, name, closing))
 }
 
 /// One match used to compute term coverage and phrase density per cluster.
@@ -2709,6 +2752,28 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::mpsc;
+
+    #[test]
+    fn sanitize_preview_strips_paired_tags_and_keeps_other_angle_brackets() {
+        assert_eq!(
+            sanitize_preview(
+                "<command-message>run</command-message>\n  <bash-input>ls</bash-input>"
+            ),
+            "run ls"
+        );
+        assert_eq!(
+            sanitize_preview("[Y3] explain the <system-reminder> tag handling for axolotl"),
+            "[Y3] explain the <system-reminder> tag handling for axolotl"
+        );
+        assert_eq!(
+            sanitize_preview("if a < b and Vec<T> or x>y then <br/>"),
+            "if a < b and Vec<T> or x>y then <br/>"
+        );
+        assert_eq!(
+            sanitize_preview("a <task id=\"1\">done</task> b"),
+            "a done b"
+        );
+    }
 
     #[test]
     fn view_help_overlay_handles_tiny_terminal() {

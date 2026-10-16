@@ -1539,5 +1539,41 @@
 "E1"
 ],
 "order": true
+},
+{
+"id": 202,
+"group": "user-only",
+"q": "capybara",
+"expect": [
+"Y9"
+],
+"user_only": true,
+"note": "text around an image placeholder"
+},
+{
+"id": 203,
+"group": "user-only",
+"q": "\"Image #2\"",
+"expect": [],
+"user_only": true,
+"note": "[Image #N] placeholders are not own text"
+},
+{
+"id": 204,
+"group": "literals",
+"q": "\"Image #2\"",
+"expect": [
+"Y9"
+]
+},
+{
+"id": 205,
+"group": "user-only",
+"q": "images capybara",
+"expect": [
+"Y9"
+],
+"user_only": true,
+"note": "[Images] is typed text, not a placeholder"
 }
 ]
