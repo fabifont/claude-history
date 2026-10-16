@@ -8,11 +8,14 @@
 //! # Module Structure
 //!
 //! - `loader` - Loading conversations from directories
+//! - `model` - The normalized transcript model adapters decode into
 //! - `parser` - Parsing individual JSONL files
 //! - `path` - Path encoding/decoding utilities
 
 mod loader;
 mod messages;
+#[allow(dead_code)]
+pub mod model;
 pub mod omp_loader;
 pub mod parser;
 pub mod path;
@@ -39,30 +42,8 @@ pub(crate) use parser::process_conversation_file;
 pub use path::{convert_path_to_project_dir_name, format_short_name_from_path, is_same_project};
 pub use rename::append_session_rename;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Source {
-    Claude,
-    Pi,
-    Omp,
-}
-
-impl Source {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Pi => "pi",
-            Self::Omp => "omp",
-        }
-    }
-
-    pub fn list_label(self) -> &'static str {
-        match self {
-            Self::Claude => "CC",
-            Self::Pi => "Pi",
-            Self::Omp => "OMP",
-        }
-    }
-}
+/// The tool that wrote a conversation.
+pub use model::SourceKind as Source;
 
 pub use pi::detect_source;
 
