@@ -60,6 +60,8 @@ pub struct CardRow {
     pub cwds: StrRef,
     pub preview_first: StrRef,
     pub preview_last: StrRef,
+    /// `Conversation::parent`, empty when there is none.
+    pub parent: StrRef,
     /// Index into the manifest's project table.
     pub project_id: u32,
     pub message_count: u32,
@@ -83,7 +85,8 @@ pub mod card_flags {
     pub const AUTOMATED: u8 = 1 << 4;
     pub const CHILD: u8 = 1 << 5;
     pub const ORPHANED: u8 = 1 << 6;
-    pub const PROVENANCE: u8 = AUTOMATED | CHILD | ORPHANED;
+    pub const BRANCH: u8 = 1 << 7;
+    pub const PROVENANCE: u8 = AUTOMATED | CHILD | ORPHANED | BRANCH;
     /// Cards the list leaves out unless asked for.
     pub const HIDDEN: u8 = AUTOMATED | CHILD;
 
@@ -92,6 +95,7 @@ pub mod card_flags {
         bit(provenance.automated, AUTOMATED)
             | bit(provenance.child, CHILD)
             | bit(provenance.orphaned, ORPHANED)
+            | bit(provenance.branch, BRANCH)
     }
 
     pub fn provenance(flags: u8) -> crate::history::Provenance {
@@ -99,6 +103,7 @@ pub mod card_flags {
             automated: flags & AUTOMATED != 0,
             child: flags & CHILD != 0,
             orphaned: flags & ORPHANED != 0,
+            branch: flags & BRANCH != 0,
         }
     }
 }
@@ -227,7 +232,7 @@ pub struct Header {
 }
 
 pub const MAGIC: [u8; 8] = *b"CHGEN\0\0\0";
-pub const VERSION: u32 = 12;
+pub const VERSION: u32 = 13;
 
 pub fn source_to_u8(source: crate::history::model::SourceKind) -> u8 {
     match source {
@@ -266,7 +271,7 @@ mod tests {
 
     #[test]
     fn records_have_no_implicit_padding() {
-        assert_eq!(std::mem::size_of::<CardRow>(), 136);
+        assert_eq!(std::mem::size_of::<CardRow>(), 144);
         assert_eq!(std::mem::size_of::<ProjectRow>(), 32);
         assert_eq!(std::mem::size_of::<Fingerprint>(), 16);
         assert_eq!(std::mem::size_of::<IndexLoc>(), 8);

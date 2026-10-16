@@ -36,8 +36,8 @@ use search_state::{
 #[allow(unused_imports)]
 pub use types::{
     Action, AppMode, DialogMode, LIST_LINES_PER_ITEM, ListSearchMode, Readiness, ReconcileState,
-    SemanticProgress, SemanticResultMetadata, TuiSearchOptions, ViewSearchMode, ViewState,
-    list_lines_per_item,
+    SemanticProgress, SemanticResultMetadata, TuiSearchOptions, ViewFamily, ViewSearchMode,
+    ViewState, list_lines_per_item,
 };
 
 /// Cards materialized for the first frame. Bounded so the first frame costs
@@ -101,6 +101,11 @@ pub struct App {
     dialog_mode: DialogMode,
     /// Main app mode (list or view)
     app_mode: AppMode,
+    /// Views left by opening a related conversation from the viewer, most
+    /// recent last; leaving the viewer returns to them first
+    view_stack: Vec<ViewState>,
+    /// Conversations related to the one in the viewer
+    view_family: ViewFamily,
     /// Status message with timestamp for auto-clear
     status_message: Option<(String, std::time::Instant)>,
     /// Progress of the reconcile pass shown as indexing
@@ -194,6 +199,8 @@ impl App {
             evidence_checked: HashSet::new(),
             dialog_mode: DialogMode::None,
             app_mode: parts.app_mode,
+            view_stack: Vec::new(),
+            view_family: ViewFamily::default(),
             status_message: None,
             indexing: None,
             tool_display: parts.tool_display,
@@ -435,6 +442,7 @@ impl App {
         self.filtered.clear();
         self.selected = None;
         self.readiness = Readiness::ready();
+        self.refresh_view_family();
         // The index holds other conversations.
         self.drop_search_index();
         self.refresh_search_data();
@@ -524,7 +532,7 @@ impl App {
     }
 
     /// Row of the card stored at `path`, if the generation has one.
-    fn row_of_path(&mut self, path: &std::path::Path) -> Option<usize> {
+    pub(super) fn row_of_path(&mut self, path: &std::path::Path) -> Option<usize> {
         if let Some(row) = self.conversations.iter().position(|c| c.path == path) {
             return Some(row);
         }
@@ -600,8 +608,8 @@ impl App {
         self.readiness.list = true;
         self.search_index = None;
         self.semantic_search.results.clear();
-        if let Some(path) = viewed {
-            self.row_of_path(&path);
+        if viewed.is_some() {
+            self.refresh_view_family();
         }
         let docs: Vec<u32> = shown
             .iter()

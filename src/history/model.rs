@@ -121,8 +121,14 @@ pub enum ExecutionMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Relationship {
     Root,
-    /// Started by another conversation of the same instance.
+    /// Started by another conversation of the same instance, which `parent`
+    /// names by session id.
     Child {
+        parent: String,
+    },
+    /// A side conversation the person branched off `parent`, listed like a
+    /// conversation of its own.
+    Branch {
         parent: String,
     },
     Unknown,
@@ -311,6 +317,16 @@ pub struct Transcript {
     pub records: usize,
     /// Records that could not be decoded.
     pub diagnostics: Vec<ParseError>,
+}
+
+impl Relationship {
+    /// Session id of the conversation this one came from, when it is known.
+    pub fn parent(&self) -> Option<&str> {
+        match self {
+            Self::Child { parent } | Self::Branch { parent } if !parent.is_empty() => Some(parent),
+            _ => None,
+        }
+    }
 }
 
 impl Transcript {

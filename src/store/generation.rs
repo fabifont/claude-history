@@ -223,6 +223,7 @@ impl Generation {
                     row.cwds,
                     row.preview_first,
                     row.preview_last,
+                    row.parent,
                 ]
                 .into_iter()
                 .all(in_heap)
@@ -403,6 +404,7 @@ impl Generation {
             duration_minutes: (row.duration_minutes != NO_DURATION)
                 .then_some(u64::from(row.duration_minutes)),
             provenance: card_flags::provenance(row.flags),
+            parent: (row.parent.len > 0).then(|| self.str(row.parent).to_owned()),
         }
     }
 }
@@ -469,9 +471,7 @@ fn workspace_key(
     canonical: &mut HashMap<PathBuf, String>,
 ) -> (String, bool) {
     if conversation.source == SourceKind::Claude {
-        let dir = conversation
-            .path
-            .parent()
+        let dir = crate::history::sources::claude::project_dir(&conversation.path)
             .and_then(|parent| parent.file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
@@ -534,6 +534,7 @@ pub struct CardData {
     source: u8,
     /// `card_flags::PROVENANCE` bits.
     provenance: u8,
+    parent: Option<String>,
 }
 
 impl CardData {
@@ -586,6 +587,7 @@ impl CardData {
                 }),
             source: source_to_u8(conversation.source),
             provenance: card_flags::of_provenance(conversation.provenance),
+            parent: conversation.parent.clone(),
         }
     }
 
@@ -620,6 +622,7 @@ impl CardData {
             duration_minutes: row.duration_minutes,
             source: row.source,
             provenance: row.flags & card_flags::PROVENANCE,
+            parent: (row.parent.len > 0).then(|| str(row.parent)),
         }
     }
 }
@@ -711,6 +714,10 @@ fn build_manifest(
             cwds: heap.push(&card.cwds),
             preview_first: heap.push(&card.preview_first),
             preview_last: heap.push(&card.preview_last),
+            parent: card
+                .parent
+                .as_deref()
+                .map_or_else(StrRef::default, |parent| heap.push(parent)),
             project_id: project_ids[&card.project],
             message_count: card.message_count,
             duration_minutes: card.duration_minutes,
@@ -1498,6 +1505,10 @@ mod tests {
         newer.summary = Some("Newer summary".into());
         newer.duration_minutes = Some(7);
         newer.model = Some("claude-opus".into());
+        newer.cwd = Some("/w/app".into());
+        newer.cwds = vec!["/w/app".into(), "/w/app/sub".into(), "/w/lib".into()];
+        newer.parent = Some("root-session".into());
+        newer.provenance.branch = true;
         vec![older, newer]
     }
 
@@ -1524,11 +1535,21 @@ mod tests {
         assert_eq!(newest.model.as_deref(), Some("claude-opus"));
         assert_eq!(newest.timestamp, conversations[1].timestamp);
         assert_eq!(newest.project_name.as_deref(), Some("app"));
+        assert_eq!(newest.cwd, Some(PathBuf::from("/w/app")));
+        assert_eq!(
+            newest.cwds,
+            ["/w/app", "/w/app/sub", "/w/lib"].map(PathBuf::from)
+        );
+        assert_eq!(newest.parent.as_deref(), Some("root-session"));
+        assert!(newest.provenance.branch && !newest.provenance.hidden_by_default());
 
         let older = generation.conversation(1, false);
         assert_eq!(older.custom_title.as_deref(), Some("Older title"));
         assert_eq!(older.preview.len(), PREVIEW_CAP);
         assert_eq!(older.duration_minutes, None);
+        assert!(older.cwds.is_empty());
+        assert_eq!(older.parent, None);
+        assert!(!older.provenance.branch);
         assert_eq!(&*generation.conversation(1, true).preview, "last");
 
         let project = generation.project(generation.rows()[0].project_id);

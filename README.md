@@ -282,8 +282,10 @@ JSONL files and their matching session artifact directories.
 | `Ctrl+R`       | Resume conversation                                |
 | `Ctrl+F`       | Fork and resume conversation                       |
 | `Ctrl+X`       | Delete conversation                                |
+| `s`            | List the session's subagents and forks             |
+| `P`            | Open the parent session                            |
 | `?`            | Show keyboard shortcuts                            |
-| `q` / `Esc`    | Return to list (or quit in direct file input mode) |
+| `q` / `Esc`    | Back to the previous conversation, else the list   |
 | `Ctrl+C`       | Quit                                               |
 
 ### Message navigation
@@ -474,7 +476,8 @@ conversations in a ledger-style format with scrolling support.
 - **Light/dark theme**: Automatically detects terminal background color and
   applies an appropriate color theme
 
-Press `q` or `Esc` to return to the conversation list.
+Press `q` or `Esc` to return to the conversation list, or to the conversation
+you opened this one from.
 
 ### CLI reference
 
@@ -546,6 +549,34 @@ tool calls and messages within those subagents are also hidden by default. Use
 `--show-thinking` (or press `T` in the TUI) to display both thinking blocks and
 subagent internals. Subagent messages appear dimmed with a `↳` prefix to
 distinguish them from top-level conversation entries.
+
+### Subagents and `/btw` forks
+
+Claude Code keeps the full transcript of each subagent, and of each `/btw` side
+question, next to its session, under `<session-id>/subagents/`.
+
+- A `/btw` fork is listed and searched like a conversation of its own, tagged
+  `fork`, with the question you asked as its first message. The `/btw` question
+  is also searchable in the session it was asked in.
+- A subagent transcript stays out of the list and of `agent search`, like Codex
+  subagents: press `Ctrl+G`, or start with `--all-kinds`, to list it, tagged
+  `sub`. `agent read`/`outline` resolve its refs either way, and it is never
+  embedded for semantic search.
+
+The viewer header of a session names its subagents and forks; press `s` to pick
+one and open it. The header of a subagent or fork names the session it came
+from; press `P` to open it. `Esc` returns to the conversation you came from.
+These work for Codex subagent threads too.
+
+Actions on a subagent or fork act on the session it belongs to, or on the
+sidecar alone:
+
+- resume resumes the session it came from
+- delete removes only the sidecar transcript and its metadata
+- fork and rename are not supported
+
+Deleting a session also deletes its subagent transcripts but keeps its `/btw`
+forks, which stay listed on their own.
 
 ### Resuming conversations
 

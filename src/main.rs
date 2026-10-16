@@ -1003,6 +1003,7 @@ mod agent_command_tests {
             total_tokens: 0,
             duration_minutes: None,
             provenance: Default::default(),
+            parent: None,
         }
     }
 
@@ -1586,6 +1587,7 @@ mod agent_command_tests {
             total_tokens: 0,
             duration_minutes: None,
             provenance: Default::default(),
+            parent: None,
         };
         let input = agent::search::AgentConversationInput {
             conversation: &conversation,

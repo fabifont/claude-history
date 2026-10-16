@@ -1,13 +1,12 @@
-use super::{App, AppMode, DialogMode, ViewSearchMode, ViewState};
+use super::{App, AppMode, DialogMode, ViewFamily, ViewSearchMode, ViewState};
 use crate::tui::ui;
 use crate::tui::viewer::{MessageRange, RenderOptions, RenderedLine, ToolOutputId};
 use ratatui::prelude::*;
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 impl App {
     pub fn enter_view_mode(&mut self, content_width: usize) {
-        use crate::tui::viewer::{open_conversation, render_conversation};
-
         let Some(selected) = self.selected else {
             return;
         };
@@ -15,6 +14,166 @@ impl App {
             return;
         };
         let path = self.conversations[conv_idx].path.clone();
+        if let Some(state) = self.view_of(path, content_width) {
+            self.view_stack.clear();
+            self.app_mode = AppMode::View(state);
+            self.refresh_view_family();
+        }
+    }
+
+    /// Leaves the viewer for the view it was opened from, else the list.
+    pub(super) fn leave_view(&mut self) {
+        match self.view_stack.pop() {
+            Some(state) => {
+                self.app_mode = AppMode::View(state);
+                self.refresh_view_family();
+            }
+            None => self.exit_view_mode(),
+        }
+    }
+
+    /// Finds the parent and children of the conversation in the viewer,
+    /// materializing their cards.
+    pub(super) fn refresh_view_family(&mut self) {
+        let AppMode::View(state) = &self.app_mode else {
+            self.view_family = ViewFamily::default();
+            return;
+        };
+        let path = state.conversation_path.clone();
+        let Some(row) = self.row_of_path(&path) else {
+            self.view_family = ViewFamily::default();
+            return;
+        };
+        let conversation = self.conversations[row].clone();
+        let conversation = &conversation;
+        let docs = self.snapshot.as_ref().map(|snapshot| {
+            (
+                snapshot.parent_of(conversation),
+                snapshot.children_of(conversation),
+            )
+        });
+        self.view_family = match docs {
+            Some((parent, children)) => {
+                let parent = parent.filter(|&doc| !self.is_removed(doc));
+                let children: Vec<u32> = children
+                    .into_iter()
+                    .filter(|&doc| !self.is_removed(doc))
+                    .collect();
+                ViewFamily {
+                    parent: parent.map(|doc| self.card_row(doc)),
+                    children: children.into_iter().map(|doc| self.card_row(doc)).collect(),
+                }
+            }
+            None => {
+                let parent = self
+                    .conversations
+                    .iter()
+                    .position(|candidate| crate::history::is_parent_of(candidate, conversation));
+                let mut children: Vec<usize> = (0..self.conversations.len())
+                    .filter(|&child| {
+                        crate::history::is_parent_of(conversation, &self.conversations[child])
+                    })
+                    .collect();
+                children.sort_by_key(|&child| self.conversations[child].timestamp);
+                ViewFamily { parent, children }
+            }
+        };
+    }
+
+    /// Opens the parent of the conversation in the viewer, coming back here
+    /// when it is left.
+    pub(super) fn open_view_parent(&mut self) {
+        match self.view_family.parent {
+            Some(row) => self.open_related(row),
+            None => {
+                let has_parent = self
+                    .viewed_conversation()
+                    .is_some_and(|conversation| conversation.parent.is_some());
+                self.set_status_message(if has_parent {
+                    "Parent session not found".to_string()
+                } else {
+                    "This session has no parent".to_string()
+                });
+            }
+        }
+    }
+
+    /// Lists the subagents and forks of the conversation in the viewer.
+    pub(super) fn open_children_dialog(&mut self) {
+        if self.view_family.children.is_empty() {
+            self.set_status_message("No subagents or forks in this session".to_string());
+        } else {
+            self.dialog_mode = DialogMode::Children { selected: 0 };
+        }
+    }
+
+    pub(super) fn handle_children_key(&mut self, code: crossterm::event::KeyCode) {
+        use crossterm::event::KeyCode;
+        let DialogMode::Children { selected } = self.dialog_mode else {
+            return;
+        };
+        let count = self.view_family.children.len();
+        match code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.dialog_mode = DialogMode::Children {
+                    selected: (selected + 1).min(count.saturating_sub(1)),
+                };
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.dialog_mode = DialogMode::Children {
+                    selected: selected.saturating_sub(1),
+                };
+            }
+            KeyCode::Enter => {
+                self.dialog_mode = DialogMode::None;
+                if let Some(&row) = self.view_family.children.get(selected) {
+                    self.open_related(row);
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => {
+                self.dialog_mode = DialogMode::None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Opens conversation `row` in the viewer, keeping the current view to
+    /// return to.
+    fn open_related(&mut self, row: usize) {
+        let AppMode::View(current) = &self.app_mode else {
+            return;
+        };
+        let width = current.content_width;
+        let path = self.conversations[row].path.clone();
+        if let Some(state) = self.view_of(path, width) {
+            let AppMode::View(previous) =
+                std::mem::replace(&mut self.app_mode, AppMode::View(state))
+            else {
+                unreachable!("the viewer was open");
+            };
+            self.view_stack.push(previous);
+            self.refresh_view_family();
+        }
+    }
+
+    /// The conversation in the viewer, when it has a row.
+    pub(crate) fn viewed_conversation(&self) -> Option<&crate::history::Conversation> {
+        let AppMode::View(state) = &self.app_mode else {
+            return None;
+        };
+        self.conversations
+            .iter()
+            .find(|conversation| conversation.path == state.conversation_path)
+    }
+
+    pub fn view_family(&self) -> &ViewFamily {
+        &self.view_family
+    }
+
+    /// A fresh view of the conversation at `path`, or `None` with the
+    /// reason in the status line when it cannot be opened.
+    fn view_of(&mut self, path: PathBuf, content_width: usize) -> Option<ViewState> {
+        use crate::tui::viewer::{open_conversation, render_conversation};
 
         let options = RenderOptions {
             tool_display: self.tool_display,
@@ -33,7 +192,7 @@ impl App {
                 } else {
                     Some(0)
                 };
-                self.app_mode = AppMode::View(ViewState {
+                Some(ViewState {
                     conversation_path: path,
                     transcript: Some(transcript),
                     scroll_offset: 0,
@@ -52,17 +211,20 @@ impl App {
                     message_nav_active: false,
                     expanded_tool_outputs: BTreeSet::new(),
                     hovered_tool_output: None,
-                });
+                })
             }
             Err(e) => {
                 self.status_message =
                     Some((format!("Failed to open: {}", e), std::time::Instant::now()));
+                None
             }
         }
     }
 
     pub fn exit_view_mode(&mut self) {
         self.app_mode = AppMode::List;
+        self.view_stack.clear();
+        self.view_family = ViewFamily::default();
     }
 
     pub(super) fn start_view_search(&mut self) {

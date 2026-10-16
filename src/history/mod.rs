@@ -104,6 +104,9 @@ pub struct Conversation {
     /// Conversation duration in minutes (from first to last message)
     pub duration_minutes: Option<u64>,
     pub provenance: Provenance,
+    /// Session id of the conversation this one was started or branched
+    /// from, in the same source; see `is_parent_of`.
+    pub parent: Option<String>,
 }
 
 /// How a conversation came about, as its source records it.
@@ -113,6 +116,10 @@ pub struct Provenance {
     pub automated: bool,
     /// Started by another conversation, such as a subagent.
     pub child: bool,
+    /// A side conversation the person branched off another one, such as a
+    /// Claude Code `/btw` fork. Listed like any conversation, but its
+    /// source's tool reaches it only through the one it came from.
+    pub branch: bool,
     /// The source names a current history that no longer exists, so the
     /// source's own tool cannot act on this one.
     pub orphaned: bool,
@@ -125,16 +132,39 @@ impl Provenance {
         self.automated || self.child
     }
 
-    /// The tag marking a conversation hidden by default when it is listed.
+    /// The tag marking a conversation that is not an ordinary root in the
+    /// list.
     pub fn list_label(&self) -> Option<&'static str> {
         if self.child {
             Some("sub")
+        } else if self.branch {
+            Some("fork")
         } else if self.automated {
             Some("auto")
         } else {
             None
         }
     }
+}
+
+/// Whether `parent` is the conversation `child` names as its parent: the
+/// same source and session id, and for Claude, whose sessions can be copied
+/// between projects with their subagents and forks, the session directory
+/// holding `child`.
+pub fn is_parent_of(parent: &Conversation, child: &Conversation) -> bool {
+    child.source == parent.source
+        && child.parent.as_deref() == Some(parent.session_id.as_str())
+        && parent_in_place(parent.source, &parent.path, &child.path)
+}
+
+/// The path half of `is_parent_of`, for callers holding only the paths.
+pub(crate) fn parent_in_place(
+    source: model::SourceKind,
+    parent_path: &std::path::Path,
+    child_path: &std::path::Path,
+) -> bool {
+    source != model::SourceKind::Claude
+        || sources::claude::parent_transcript(child_path).as_deref() == Some(parent_path)
 }
 
 pub(crate) fn semantic_route_text(full_text: &str, agent_search_text: &str) -> String {

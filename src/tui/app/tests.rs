@@ -33,6 +33,7 @@ fn conversation(project: Option<&str>, project_dir: &str, uuid: &str, text: &str
         total_tokens: 0,
         duration_minutes: None,
         provenance: Default::default(),
+        parent: None,
     }
 }
 

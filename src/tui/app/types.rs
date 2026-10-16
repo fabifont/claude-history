@@ -33,6 +33,19 @@ pub enum DialogMode {
     SemanticDebug,
     /// Rename the selected conversation
     Rename { input: String, cursor: usize },
+    /// Subagents and forks of the conversation in the viewer, by index
+    /// into `ViewFamily::children`
+    Children { selected: usize },
+}
+
+/// The conversations related to the one in the viewer, as rows of the app's
+/// conversations.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ViewFamily {
+    /// The conversation it was started or branched from.
+    pub parent: Option<usize>,
+    /// Its subagents and forks, oldest first.
+    pub children: Vec<usize>,
 }
 
 /// Main application mode

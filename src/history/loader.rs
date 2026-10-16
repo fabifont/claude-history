@@ -68,7 +68,8 @@ fn find_all_jsonl_by_uuid(uuid: &str) -> Result<Vec<PathBuf>> {
 }
 
 /// Delete a session by UUID across all projects.
-/// Removes both the .jsonl file and the session subdirectory (tool-results/, subagents/).
+/// Removes both the .jsonl file and the session subdirectory (tool-results/,
+/// subagents/), keeping the `/btw` forks among its subagents.
 /// Returns the number of files deleted.
 pub fn delete_session_by_uuid(uuid: &str) -> Result<usize> {
     // Validate format to prevent path traversal
@@ -89,7 +90,7 @@ pub fn delete_session_by_uuid(uuid: &str) -> Result<usize> {
         if let Some(project_dir) = jsonl_path.parent() {
             let session_dir = project_dir.join(uuid);
             if session_dir.is_dir() {
-                std::fs::remove_dir_all(&session_dir)?;
+                super::sources::claude::remove_session_dir(&session_dir)?;
             }
         }
     }
@@ -110,7 +111,7 @@ pub fn delete_empty_transcripts(
             if let Some(project_dir) = transcript.path.parent() {
                 let session_dir = project_dir.join(&transcript.session_id);
                 if session_dir.is_dir() {
-                    std::fs::remove_dir_all(session_dir)?;
+                    super::sources::claude::remove_session_dir(&session_dir)?;
                 }
             }
             deleted += 1;

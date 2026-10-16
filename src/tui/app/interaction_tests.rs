@@ -39,6 +39,7 @@ fn test_conversation(path: PathBuf, custom_title: Option<String>) -> Conversatio
         total_tokens: 0,
         duration_minutes: None,
         provenance: Default::default(),
+        parent: None,
     }
 }
 
@@ -619,4 +620,94 @@ fn codex_conversations_resume_but_do_not_rename() {
         app.handle_key(KeyCode::Char('r'), KeyModifiers::CONTROL, 10),
         Some(Action::Resume(resumed)) if resumed == path
     ));
+}
+
+#[test]
+fn the_viewer_opens_subagents_and_forks_and_returns_to_their_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("-work");
+    let sidecars = project.join("s1").join("subagents");
+    std::fs::create_dir_all(&sidecars).unwrap();
+    let parent_path = project.join("s1.jsonl");
+    let subagent_path = sidecars.join("agent-a1.jsonl");
+    let fork_path = sidecars.join("agent-afork.jsonl");
+    write_named_conversation(&parent_path, "parent body");
+    write_named_conversation(&subagent_path, "subagent body");
+    write_named_conversation(&fork_path, "fork body");
+
+    let parent = test_conversation(parent_path.clone(), None);
+    let mut subagent = test_conversation(subagent_path.clone(), None);
+    subagent.parent = Some("s1".into());
+    subagent.provenance.child = true;
+    let mut fork = test_conversation(fork_path.clone(), None);
+    fork.parent = Some("s1".into());
+    fork.provenance.branch = true;
+    fork.timestamp = Local.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap();
+    let mut app = App::new(
+        vec![parent, subagent, fork],
+        ToolDisplayMode::Summary,
+        false,
+        KeyBindings::default(),
+        vec![],
+    );
+    let viewed = |app: &App| app.viewed_conversation().map(|c| c.path.clone());
+
+    app.selected = app.filtered.iter().position(|&row| row == 0);
+    app.enter_view_mode(80);
+    assert_eq!(app.view_family().parent, None);
+    assert_eq!(app.view_family().children, vec![1, 2]);
+
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::NONE, 10);
+    assert_eq!(app.dialog_mode, DialogMode::Children { selected: 0 });
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, 10);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE, 10);
+    assert_eq!(app.dialog_mode, DialogMode::None);
+    assert_eq!(viewed(&app), Some(fork_path.clone()));
+    assert_eq!(app.view_family().parent, Some(0));
+
+    // Actions apply to the conversation in the viewer.
+    assert!(matches!(
+        app.handle_key(KeyCode::Char('r'), KeyModifiers::CONTROL, 10),
+        Some(Action::Resume(resumed)) if resumed == fork_path
+    ));
+    app.handle_key(KeyCode::Char('f'), KeyModifiers::CONTROL, 10);
+    let (message, _) = app.status_message.take().unwrap();
+    assert!(message.contains("not supported"), "{message}");
+
+    app.handle_key(KeyCode::Char('P'), KeyModifiers::NONE, 10);
+    assert_eq!(viewed(&app), Some(parent_path.clone()));
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE, 10);
+    assert_eq!(viewed(&app), Some(fork_path));
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE, 10);
+    assert_eq!(viewed(&app), Some(parent_path.clone()));
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE, 10);
+    assert!(matches!(app.app_mode, AppMode::List));
+
+    // A fork outlives its session but has nothing left to resume.
+    std::fs::remove_file(&parent_path).unwrap();
+    app.selected = app.filtered.iter().position(|&row| row == 2);
+    assert!(
+        app.handle_key(KeyCode::Char('r'), KeyModifiers::CONTROL, 10)
+            .is_none()
+    );
+    let (message, _) = app.status_message.take().unwrap();
+    assert_eq!(message, "The session this came from no longer exists");
+}
+
+#[test]
+fn a_session_without_relatives_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abc123.jsonl");
+    write_conversation(&path, None);
+    let mut app = app_with_conversation(path, None);
+    app.selected = Some(0);
+    app.enter_view_mode(80);
+
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::NONE, 10);
+    assert_eq!(app.dialog_mode, DialogMode::None);
+    let (message, _) = app.status_message.take().unwrap();
+    assert_eq!(message, "No subagents or forks in this session");
+    app.handle_key(KeyCode::Char('P'), KeyModifiers::NONE, 10);
+    let (message, _) = app.status_message.take().unwrap();
+    assert_eq!(message, "This session has no parent");
 }

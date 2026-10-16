@@ -256,6 +256,7 @@ impl Indexer {
         let provenance = Provenance {
             automated: transcript.mode == ExecutionMode::Automated,
             child: matches!(transcript.relationship, Relationship::Child { .. }),
+            branch: matches!(transcript.relationship, Relationship::Branch { .. }),
             orphaned: transcript.head == HeadStatus::Orphaned,
         };
         // A child conversation's prompts come from the conversation that
@@ -317,6 +318,7 @@ impl Indexer {
             total_tokens,
             duration_minutes,
             provenance,
+            parent: transcript.relationship.parent().map(str::to_owned),
         })
     }
 }

@@ -10,6 +10,7 @@
 //! say when it is incomplete: a conversation that a partial or degraded
 //! listing did not report may still exist, and its stored state is kept.
 
+use super::Provenance;
 use super::actions::{Capabilities, Launch, Launcher, Resume, Target};
 use super::model::{ConversationKey, Event, SourceInstance, Transcript};
 use std::any::Any;
@@ -170,6 +171,12 @@ pub trait Adapter: Send + Sync {
     }
 
     fn capabilities(&self) -> Capabilities;
+
+    /// The actions supported for a conversation of `provenance`.
+    fn capabilities_for(&self, provenance: Provenance) -> Capabilities {
+        let _ = provenance;
+        self.capabilities()
+    }
 
     /// Plans resuming `target` in the tool that wrote it, started as
     /// `launch` says, or forking it into a new conversation.

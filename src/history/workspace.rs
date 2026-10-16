@@ -47,9 +47,7 @@ impl Workspace {
     /// a directory below it.
     pub fn contains(&self, conversation: &Conversation) -> bool {
         let project_matches = if conversation.source == SourceKind::Claude {
-            conversation
-                .path
-                .parent()
+            crate::history::sources::claude::project_dir(&conversation.path)
                 .and_then(Path::file_name)
                 .is_some_and(|name| self.contains_project_key(&name.to_string_lossy(), false))
         } else {

@@ -132,6 +132,10 @@ impl App {
                 return None;
             }
             DialogMode::Rename { .. } => return self.handle_rename_key(code, modifiers),
+            DialogMode::Children { .. } => {
+                self.handle_children_key(code);
+                return None;
+            }
             DialogMode::None => {}
         }
 
@@ -172,7 +176,7 @@ impl App {
             return None;
         }
         if self.keys.resume.matches(code, modifiers) {
-            return if self.single_file_mode || !self.selected_allows(|can| can.resume, "Resuming") {
+            return if self.single_file_mode || !self.selected_resumable() {
                 None
             } else {
                 self.get_selected_path().map(Action::Resume)
@@ -207,17 +211,25 @@ impl App {
                     self.clear_view_search();
                     return None;
                 }
-                if self.single_file_mode {
+                if self.single_file_mode && self.view_stack.is_empty() {
                     return Some(Action::Quit);
                 }
-                self.app_mode = AppMode::List;
+                self.leave_view();
                 None
             }
             KeyCode::Char('q') => {
-                if self.single_file_mode {
+                if self.single_file_mode && self.view_stack.is_empty() {
                     return Some(Action::Quit);
                 }
-                self.app_mode = AppMode::List;
+                self.leave_view();
+                None
+            }
+            KeyCode::Char('s') => {
+                self.open_children_dialog();
+                None
+            }
+            KeyCode::Char('P') => {
+                self.open_view_parent();
                 None
             }
             KeyCode::Down | KeyCode::Char('j') => {
@@ -454,7 +466,7 @@ impl App {
             return None;
         }
         if self.keys.resume.matches(code, modifiers) {
-            if !self.selected_allows(|can| can.resume, "Resuming") {
+            if !self.selected_resumable() {
                 return None;
             }
             return self.get_selected_path().map(Action::Resume);

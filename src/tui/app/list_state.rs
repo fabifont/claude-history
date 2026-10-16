@@ -1,4 +1,4 @@
-use super::App;
+use super::{App, AppMode};
 use crate::history::actions::{self, Capabilities};
 use crate::history::path::project_is_excluded;
 use crate::history::{Conversation, Workspace};
@@ -108,10 +108,11 @@ impl App {
         self.selected = Some(new_selected);
     }
 
+    /// Path of the selected conversation: the one in the viewer while it
+    /// is open, else the list's selection.
     pub(super) fn get_selected_path(&self) -> Option<PathBuf> {
-        self.selected
-            .and_then(|sel| self.filtered.get(sel))
-            .map(|&idx| self.conversations[idx].path.clone())
+        self.get_selected_conversation_index()
+            .map(|idx| self.conversations[idx].path.clone())
     }
 
     pub(crate) fn get_selected_source(&self) -> Option<crate::history::model::SourceKind> {
@@ -150,19 +151,44 @@ impl App {
         false
     }
 
+    /// Whether the selected conversation can be resumed: a Claude sidecar
+    /// resumes its session, which must still exist.
+    pub(super) fn selected_resumable(&mut self) -> bool {
+        if !self.selected_allows(|can| can.resume, "Resuming") {
+            return false;
+        }
+        let Some(path) = self.get_selected_path() else {
+            return false;
+        };
+        let parent = crate::history::sources::claude::parent_transcript(&path);
+        if parent.is_some_and(|parent| !parent.exists()) {
+            self.set_status_message("The session this came from no longer exists".to_string());
+            return false;
+        }
+        true
+    }
+
+    /// Row of the selected conversation: the one in the viewer while it is
+    /// open, else the list's selection.
     pub(super) fn get_selected_conversation_index(&self) -> Option<usize> {
+        if let AppMode::View(state) = &self.app_mode
+            && let Some(row) = self
+                .conversations
+                .iter()
+                .position(|conversation| conversation.path == state.conversation_path)
+        {
+            return Some(row);
+        }
         self.selected
             .and_then(|sel| self.filtered.get(sel))
             .copied()
     }
 
     pub(crate) fn remove_selected_from_list(&mut self) {
-        let Some(selected) = self.selected else {
+        let Some(conv_idx) = self.get_selected_conversation_index() else {
             return;
         };
-        let Some(&conv_idx) = self.filtered.get(selected) else {
-            return;
-        };
+        let selected = self.selected.unwrap_or(0);
 
         if let Some(snapshot) = &self.snapshot {
             // Rows stay put so row indices remain valid; the row is hidden

@@ -276,6 +276,51 @@ impl Snapshot {
             .map(|doc| doc as u32)
     }
 
+    /// Doc of the card of the conversation `child` names as its parent; see
+    /// `history::is_parent_of`.
+    pub fn parent_of(&self, child: &Conversation) -> Option<u32> {
+        let parent = child.parent.as_deref()?;
+        let source = card::source_to_u8(child.source);
+        self.generation
+            .rows()
+            .iter()
+            .position(|row| {
+                row.source == source
+                    && self.generation.str(row.session_id) == parent
+                    && crate::history::parent_in_place(
+                        child.source,
+                        Path::new(self.generation.str(row.path)),
+                        &child.path,
+                    )
+            })
+            .map(|doc| doc as u32)
+    }
+
+    /// Docs of the cards of the conversations naming `parent` as theirs,
+    /// oldest first.
+    pub fn children_of(&self, parent: &Conversation) -> Vec<u32> {
+        let source = card::source_to_u8(parent.source);
+        let mut docs: Vec<u32> = self
+            .generation
+            .rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.source == source
+                    && row.parent.len > 0
+                    && self.generation.str(row.parent) == parent.session_id
+                    && crate::history::parent_in_place(
+                        parent.source,
+                        &parent.path,
+                        Path::new(self.generation.str(row.path)),
+                    )
+            })
+            .map(|(doc, _)| doc as u32)
+            .collect();
+        docs.reverse();
+        docs
+    }
+
     /// Whether the cards come from more than one source.
     pub fn has_multiple_sources(&self) -> bool {
         let mut rows = self.generation.rows().iter();
@@ -697,6 +742,7 @@ pub(crate) mod test_support {
             total_tokens: 42,
             duration_minutes: None,
             provenance: Default::default(),
+            parent: None,
         }
     }
 }

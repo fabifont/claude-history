@@ -43,7 +43,7 @@ pub fn capabilities_of(source: SourceKind, provenance: Provenance) -> Capabiliti
     // Capabilities belong to the kind of source, not to an instance.
     Registry::with_roots(None, None, None)
         .for_source(source)
-        .capabilities()
+        .capabilities_for(provenance)
 }
 
 /// Why `doing` ("Deleting", ...) is unavailable for a conversation of
@@ -52,6 +52,11 @@ pub fn refusal(source: SourceKind, provenance: Provenance, doing: &str) -> Strin
     if provenance.orphaned {
         format!(
             "{doing} is unavailable: {} no longer has this conversation's current history",
+            source.list_label()
+        )
+    } else if provenance.child || provenance.branch {
+        format!(
+            "{doing} {} subagents and forks is not supported",
             source.list_label()
         )
     } else {

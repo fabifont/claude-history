@@ -1,5 +1,14 @@
 ## Unreleased
 
+- New: Claude `/btw` side questions are listed and searched as conversations of
+  their own, tagged `fork`, and the question is searchable in the session it
+  was asked in ([#82](https://github.com/raine/claude-history/pull/82))
+- New: Claude subagent transcripts are indexed with their session and can be
+  read in full. In the viewer, press `s` to open a session's subagents and
+  forks, `P` to open the parent session, and `Esc` to go back. Subagents stay
+  hidden from the list unless `Ctrl+G` or `--all-kinds` is on
+  ([#74](https://github.com/raine/claude-history/pull/74))
+
 ## v0.1.77 (2026-10-17)
 
 - Much faster startup and search: the list appears almost instantly, searches

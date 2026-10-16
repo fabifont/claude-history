@@ -79,7 +79,7 @@ fn configured_scope(
 }
 
 fn project_is_excluded(path: &Path, excluded: &[String]) -> bool {
-    path.parent()
+    history::sources::claude::project_dir(path)
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
         .is_some_and(|project| {
@@ -487,11 +487,12 @@ impl AgentService {
     }
 }
 
-/// Keys of every Claude, Pi and OMP transcript on disk, and of the listed
-/// Codex threads among `listed`, else among the store's conversations;
-/// automated and child threads only with `all_kinds`. Codex keys need the
-/// thread's working directory, which only decoding reveals, so they come
-/// from the cards the store keeps.
+/// Keys of every Claude session, Pi and OMP transcript on disk, and of the
+/// listed Codex threads and Claude sidecars (subagents and `/btw` forks)
+/// among `listed`, else among the store's conversations; automated and
+/// child conversations only with `all_kinds`. Codex keys need the thread's
+/// working directory and sidecar keys their metadata, which only decoding
+/// reveals, so they come from the cards the store keeps.
 fn discover_agent_keys(
     workspace: Option<&history::Workspace>,
     listed: Option<&[history::Conversation]>,
@@ -661,8 +662,15 @@ fn discover_agent_keys(
         listed
             .iter()
             .filter(|conversation| {
-                conversation.source == history::model::SourceKind::Codex
-                    && (all_kinds || !conversation.provenance.hidden_by_default())
+                let from_cards = match conversation.source {
+                    history::model::SourceKind::Codex => true,
+                    history::model::SourceKind::Claude => {
+                        history::sources::claude::sidecar(&conversation.path).is_some()
+                            && workspace.is_none_or(|workspace| workspace.contains(conversation))
+                    }
+                    _ => false,
+                };
+                from_cards && (all_kinds || !conversation.provenance.hidden_by_default())
             })
             .filter_map(|conversation| {
                 agent::refs::AgentConversationKey::from_conversation_in(conversation, &registry)
@@ -803,6 +811,7 @@ fn conversation_from_agent_transcript(
         total_tokens: 0,
         duration_minutes: None,
         provenance: Default::default(),
+        parent: None,
     }
 }
 
@@ -1006,6 +1015,7 @@ fn stripped_semantic_conversation(
         total_tokens: 0,
         duration_minutes: None,
         provenance: Default::default(),
+        parent: None,
     }
 }
 

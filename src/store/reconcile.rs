@@ -603,6 +603,98 @@ mod tests {
     }
 
     #[test]
+    fn sidecars_are_indexed_with_their_session_and_parsed_again_when_they_change() {
+        use crate::store::card::card_flags;
+        let fixture = Fixture::new();
+        let sidecars = "-tmp-work/s1/subagents";
+        let parent = fixture.claude("-tmp-work", "s1.jsonl", "parent prompt");
+        let subagent = fixture.claude(sidecars, "agent-a1.jsonl", "explore the walrus");
+        let fork = fixture.claude(sidecars, "agent-anarwhal-2.jsonl", "narwhal question");
+        fixture.claude(sidecars, "agent-aprompt_suggestion-3.jsonl", "suggest");
+        fixture.claude(sidecars, "agent-acompact-4.jsonl", "compact");
+        let meta = |path: &Path, meta: serde_json::Value| {
+            let meta_path = path.with_extension("meta.json");
+            fs::write(&meta_path, meta.to_string()).unwrap();
+            settle(&meta_path);
+        };
+        meta(
+            &subagent,
+            serde_json::json!({"agentType": "Explore", "description": "Find walrus", "toolUseId": "toolu_1"}),
+        );
+        meta(
+            &fork,
+            serde_json::json!({"agentType": "fork", "isFork": true, "description": "Ask narwhal"}),
+        );
+        fixture.run();
+
+        let generation = fixture.current();
+        let card = |path: &Path| {
+            let row = generation
+                .rows()
+                .iter()
+                .position(|row| generation.str(row.path) == path.to_string_lossy())
+                .unwrap_or_else(|| {
+                    panic!("{} is not listed: {:?}", path.display(), fixture.paths())
+                });
+            (
+                generation.rows()[row],
+                generation.conversation(row as u32, false),
+            )
+        };
+        let claude_paths = fixture
+            .paths()
+            .into_iter()
+            .filter(|path| path.contains("-tmp-work"))
+            .count();
+        assert_eq!(claude_paths, 3, "{:?}", fixture.paths());
+        let (row, card_of_parent) = card(&parent);
+        assert_eq!(row.flags & card_flags::PROVENANCE, 0);
+        assert_eq!(card_of_parent.parent, None);
+        let (row, card_of_subagent) = card(&subagent);
+        assert_eq!(row.flags & card_flags::HIDDEN, card_flags::CHILD);
+        assert_eq!(card_of_subagent.session_id, "a1");
+        assert_eq!(card_of_subagent.parent.as_deref(), Some("s1"));
+        assert_eq!(
+            card_of_subagent.summary.as_deref(),
+            Some("Explore: Find walrus")
+        );
+        assert_eq!(card_of_subagent.project_name.as_deref(), Some("work"));
+        let (row, card_of_fork) = card(&fork);
+        assert_eq!(row.flags & card_flags::PROVENANCE, card_flags::BRANCH);
+        assert_eq!(card_of_fork.parent.as_deref(), Some("s1"));
+        assert_eq!(card_of_fork.summary.as_deref(), Some("Ask narwhal"));
+        assert_eq!(
+            generation.project(row.project_id).workspace_key,
+            "-tmp-work"
+        );
+        drop(generation);
+        assert_eq!(fixture.run().publish, Publish::Unchanged);
+
+        meta(
+            &fork,
+            serde_json::json!({"agentType": "fork", "isFork": true, "description": "Ask narwhals twice"}),
+        );
+        let outcome = fixture.run();
+        assert_eq!(outcome.parsed, 1);
+        let generation = fixture.current();
+        let row = generation
+            .rows()
+            .iter()
+            .position(|row| generation.str(row.path) == fork.to_string_lossy())
+            .unwrap();
+        assert_eq!(
+            generation
+                .conversation(row as u32, false)
+                .summary
+                .as_deref(),
+            Some("Ask narwhals twice")
+        );
+
+        fixture.claude(sidecars, "agent-a5.jsonl", "second subagent");
+        assert_eq!(fixture.run().parsed, 1);
+    }
+
+    #[test]
     fn sessions_of_a_root_pi_and_omp_share_are_kept_for_their_source() {
         let mut fixture = Fixture::new();
         let shared = fixture.pi.path.clone();

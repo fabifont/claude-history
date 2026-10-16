@@ -492,7 +492,7 @@ pub fn view_layout_rects(area: Rect, app: &App, state: &ViewState) -> ViewLayout
         3
     } else {
         2
-    };
+    } + u16::from(family_line(app, conv).is_some());
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -539,8 +539,173 @@ fn render_view_mode(frame: &mut Frame, app: &App, state: &ViewState) {
         }
         DialogMode::SemanticDebug => render_semantic_debug_popup(frame, app),
         DialogMode::Rename { input, cursor } => render_rename_dialog(frame, input, *cursor),
+        DialogMode::Children { selected } => render_children_dialog(frame, app, *selected),
         DialogMode::None => {}
     }
+}
+
+/// What the viewer calls `conversation`: its title, else its summary, else
+/// its first previewed message.
+fn conversation_label(conversation: &crate::history::Conversation) -> String {
+    let first_message = || {
+        let preview = &conversation.preview_first;
+        sanitize_preview(preview.split(" ... ").next().unwrap_or(preview))
+    };
+    let label = conversation
+        .custom_title
+        .as_deref()
+        .or(conversation.summary.as_deref())
+        .filter(|label| !label.trim().is_empty())
+        .map_or_else(first_message, sanitize_preview);
+    if label.is_empty() {
+        conversation.session_id.clone()
+    } else {
+        label
+    }
+}
+
+/// `text` cut to `max_width` columns, ending in `…` when cut.
+fn truncate_end(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width + 1 > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out.push('…');
+    out
+}
+
+/// The viewer header's line naming the conversation's parent and counting
+/// its subagents and forks, when it has any.
+fn family_line(
+    app: &App,
+    conversation: Option<&crate::history::Conversation>,
+) -> Option<Line<'static>> {
+    let conversation = conversation?;
+    let family = app.view_family();
+    let key_style = Style::default().fg(rgb(th().accent));
+    let muted = Style::default().fg(rgb(th().text_muted));
+    let mut spans = vec![Span::raw("  ")];
+    if let Some(parent_id) = &conversation.parent {
+        let kind = if conversation.provenance.branch {
+            "fork"
+        } else {
+            "subagent"
+        };
+        match family.parent.map(|row| &app.conversations()[row]) {
+            Some(parent) => {
+                spans.push(Span::styled(format!("↳ {kind} of "), muted));
+                spans.push(Span::styled(
+                    truncate_end(&conversation_label(parent), 60),
+                    Style::default().fg(rgb(th().text_secondary)),
+                ));
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled("P", key_style));
+                spans.push(Span::styled(" open", muted));
+            }
+            None => spans.push(Span::styled(
+                format!("↳ {kind} of session {parent_id} (not found)"),
+                muted,
+            )),
+        }
+    }
+    if !family.children.is_empty() {
+        let (forks, subagents): (Vec<usize>, Vec<usize>) = family
+            .children
+            .iter()
+            .partition(|&&row| app.conversations()[row].provenance.branch);
+        let mut counts = Vec::new();
+        for (count, one, many) in [
+            (subagents.len(), "subagent", "subagents"),
+            (forks.len(), "fork", "forks"),
+        ] {
+            if count > 0 {
+                counts.push(format!("{count} {}", if count == 1 { one } else { many }));
+            }
+        }
+        if spans.len() > 1 {
+            spans.push(Span::styled("  ·  ", muted));
+        }
+        spans.push(Span::styled(
+            counts.join(", "),
+            Style::default().fg(rgb(th().text_secondary)),
+        ));
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("s", key_style));
+        spans.push(Span::styled(" list", muted));
+    }
+    (spans.len() > 1).then(|| Line::from(spans))
+}
+
+/// The subagents and forks of the conversation in the viewer, to open one.
+fn render_children_dialog(frame: &mut Frame, app: &App, selected: usize) {
+    let children = &app.view_family().children;
+    let area = frame.area();
+    let menu_width = area.width.saturating_sub(4).min(100);
+    let visible = usize::from(area.height.saturating_sub(6)).max(1);
+    let menu_height = children.len().min(visible) as u16 + 4;
+    let menu_area = centered_modal_area(area, menu_width, menu_height);
+    frame.render_widget(Clear, menu_area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(rgb(th().overlay_bg))),
+        menu_area,
+    );
+    let block = Block::default()
+        .title(" Subagents and forks ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(rgb(th().accent)));
+    let inner = block.inner(menu_area);
+    frame.render_widget(block, menu_area);
+    if inner.is_empty() {
+        return;
+    }
+    let offset = selected.saturating_sub(visible.saturating_sub(1));
+    let mut lines = Vec::new();
+    for (index, &row) in children.iter().enumerate().skip(offset).take(visible) {
+        let child = &app.conversations()[row];
+        let kind = if child.provenance.branch {
+            "fork"
+        } else {
+            "sub "
+        };
+        let meta = format!(
+            "  {} · {}",
+            child.message_count,
+            child.timestamp.format("%m-%d %H:%M")
+        );
+        let prefix = if index == selected { "▶ " } else { "  " };
+        let label_width = usize::from(inner.width)
+            .saturating_sub(prefix.len() + kind.len() + 1 + UnicodeWidthStr::width(meta.as_str()));
+        let style = if index == selected {
+            Style::default().fg(rgb(th().accent)).bold()
+        } else {
+            Style::default().fg(rgb(th().text_primary))
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix, style),
+            Span::styled(
+                format!("{kind} "),
+                Style::default().fg(rgb(th().text_muted)),
+            ),
+            Span::styled(truncate_end(&conversation_label(child), label_width), style),
+            Span::styled(meta, Style::default().fg(rgb(th().text_secondary))),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "  [Enter] Open  [Esc] Cancel",
+        Style::default().fg(rgb(th().text_muted)),
+    ));
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rect) {
@@ -713,7 +878,7 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
     };
 
     // Build header lines
-    let lines = if fits_single && summary.is_some() {
+    let mut lines = if fits_single && summary.is_some() {
         // Single line with summary
         vec![Line::from(build_metadata_spans(true))]
     } else {
@@ -729,6 +894,8 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
         }
         lines
     };
+
+    lines.extend(family_line(app, conv));
 
     let header = Paragraph::new(lines).block(
         Block::default()
@@ -1301,9 +1468,9 @@ fn render_help_overlay(
     scroll: usize,
 ) {
     let exit_text = if is_single_file_mode {
-        "Quit"
+        "Back / quit"
     } else {
-        "Back to list"
+        "Back"
     };
 
     let shortcuts: Vec<(String, &str)> = if is_view_mode {
@@ -1326,6 +1493,8 @@ fn render_help_overlay(
             ("p".into(), "Show file path"),
             ("Y".into(), "Copy path"),
             ("I".into(), "Copy session ID"),
+            ("s".into(), "Subagents and forks"),
+            ("P".into(), "Open parent session"),
             (keys.resume.help_label(), "Resume"),
             (keys.fork.help_label(), "Fork resume"),
             (keys.delete.help_label(), "Delete"),
@@ -2750,6 +2919,7 @@ mod tests {
             total_tokens: 0,
             duration_minutes: None,
             provenance: Default::default(),
+            parent: None,
         }
     }
 

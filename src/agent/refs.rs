@@ -161,9 +161,7 @@ impl AgentConversationKey {
                 .to_string_lossy()
                 .into_owned()
         } else {
-            conversation
-                .path
-                .parent()
+            crate::history::sources::claude::project_dir(&conversation.path)
                 .and_then(|p| p.file_name())
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| {
