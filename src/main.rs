@@ -26,7 +26,7 @@ use cli::{Args, Commands, DeleteEmptyArgs};
 use error::{AppError, Result};
 use search::mode::{SearchModeResolution, TuiSearchMode};
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use std::process::Command;
 use tui::ListSearchMode;
@@ -171,7 +171,6 @@ fn run() -> Result<()> {
 
     // Extract resume config
     let resume_config = config.resume.unwrap_or_default();
-    let default_args = resume_config.default_args.as_deref().unwrap_or(&[]);
 
     let search_config = config.search.unwrap_or_default();
     let tui_config = config.tui.unwrap_or_default();
@@ -471,17 +470,11 @@ fn run() -> Result<()> {
     {
         (tui::Action::Select(path), conv) => (conv, path),
         (tui::Action::Resume(path), conv) => {
-            let conv = conv.as_ref();
-            let project_path = conv.and_then(|c| c.project_path.as_ref());
-            let source = conv.map(|c| c.source).unwrap_or(history::Source::Claude);
-            resume_with_agent(source, &path, project_path, default_args, false)?;
+            resume_with_agent(conv.as_ref(), &path, &resume_config, false)?;
             return Ok(());
         }
         (tui::Action::ForkResume(path), conv) => {
-            let conv = conv.as_ref();
-            let project_path = conv.and_then(|c| c.project_path.as_ref());
-            let source = conv.map(|c| c.source).unwrap_or(history::Source::Claude);
-            resume_with_agent(source, &path, project_path, default_args, true)?;
+            resume_with_agent(conv.as_ref(), &path, &resume_config, true)?;
             return Ok(());
         }
         (tui::Action::Quit, _) => return Err(AppError::SelectionCancelled),
@@ -525,15 +518,7 @@ fn run() -> Result<()> {
                 debug::debug(args.debug, &format!("project_path exists: {}", p.exists()));
             }
         }
-        let project_path = conv.and_then(|c| c.project_path.as_ref());
-        let source = conv.map(|c| c.source).unwrap_or(history::Source::Claude);
-        resume_with_agent(
-            source,
-            &selected_path,
-            project_path,
-            default_args,
-            args.fork_session,
-        )?;
+        resume_with_agent(conv, &selected_path, &resume_config, args.fork_session)?;
         return Ok(());
     }
 
@@ -586,30 +571,30 @@ fn tui_search_mode(mode: TuiSearchMode) -> ListSearchMode {
 }
 
 fn resume_with_agent(
-    source: history::Source,
+    conversation: Option<&history::Conversation>,
     selected_path: &Path,
-    project_path: Option<&PathBuf>,
-    default_args: &[String],
+    resume_config: &config::ResumeConfig,
     fork_session: bool,
 ) -> Result<()> {
-    let adapter = history::sources::Registry::from_env().for_source(source);
-    let capabilities = adapter.capabilities();
+    let source = conversation.map_or(history::Source::Claude, |c| c.source);
+    let provenance = conversation.map(|c| c.provenance).unwrap_or_default();
+    let capabilities = history::actions::capabilities_of(source, provenance);
     if !(if fork_session {
         capabilities.fork
     } else {
         capabilities.resume
     }) {
-        return Err(AppError::ClaudeExecutionError(format!(
-            "{} sessions cannot be {}",
-            source.list_label(),
-            if fork_session { "forked" } else { "resumed" }
+        let doing = if fork_session { "Forking" } else { "Resuming" };
+        return Err(AppError::ClaudeExecutionError(history::actions::refusal(
+            source, provenance, doing,
         )));
     }
+    let adapter = history::sources::Registry::from_env().for_source(source);
     let target = history::actions::Target {
         path: selected_path,
-        project: project_path.map(PathBuf::as_path),
+        project: conversation.and_then(|c| c.project_path.as_deref()),
     };
-    let resume = adapter.resume(target, fork_session, default_args)?;
+    let resume = adapter.resume(target, fork_session, resume_config.default_args(source))?;
     if let Some(copy) = &resume.copy {
         copy.apply()?;
     }
@@ -660,6 +645,7 @@ mod agent_command_tests {
     use crate::agent::test_support::{assistant_jsonl_line as assistant, user_jsonl_line as user};
     use crate::search::mode::SearchMode;
     use cli::{AgentOutlineArgs, AgentOutputFlags, AgentReadArgs};
+    use std::path::PathBuf;
 
     fn key(project: &str, filename: &str) -> AgentConversationKey {
         AgentConversationKey::new(

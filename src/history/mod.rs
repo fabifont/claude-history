@@ -54,6 +54,9 @@ pub use pi::detect_source;
 pub fn normalized_log_entries(
     path: &std::path::Path,
 ) -> Result<Vec<(usize, crate::claude::LogEntry)>> {
+    if let Some(entries) = sources::codex::view::log_entries(path)? {
+        return Ok(entries);
+    }
     if let Some(projection) = pi::parse_file(path)? {
         return Ok(projection.entries);
     }

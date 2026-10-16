@@ -1,5 +1,6 @@
 use super::App;
 use crate::history::Conversation;
+use crate::history::actions::{self, Capabilities};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -126,6 +127,25 @@ impl App {
             .map(|conversation| conversation.source)
             .collect::<HashSet<_>>();
         sources.len() > 1
+    }
+
+    /// Whether the selected conversation allows the action `allowed`
+    /// picks, saying why not in the status line when it does not.
+    pub(super) fn selected_allows(
+        &mut self,
+        allowed: fn(&Capabilities) -> bool,
+        doing: &str,
+    ) -> bool {
+        let Some(index) = self.get_selected_conversation_index() else {
+            return false;
+        };
+        let conversation = &self.conversations[index];
+        let (source, provenance) = (conversation.source, conversation.provenance);
+        if allowed(&actions::capabilities_of(source, provenance)) {
+            return true;
+        }
+        self.set_status_message(actions::refusal(source, provenance, doing));
+        false
     }
 
     pub(super) fn get_selected_conversation_index(&self) -> Option<usize> {

@@ -182,10 +182,14 @@ fn native_id(root: &Path, path: &Path) -> String {
         .into_owned()
 }
 
-/// Decodes a session file outside any configured root, recognizing its
-/// source from its contents (as OMP when it starts with a session header and
+/// Decodes a session file outside any configured root: a Codex rollout as
+/// the thread of the Codex home holding it, else recognizing its source
+/// from its contents (as OMP when it starts with a session header and
 /// `omp` is set). `modified` dates a session that records no activity time.
 pub fn decode_path(path: &Path, modified: Option<SystemTime>, omp: bool) -> Result<Transcript> {
+    if let Some(transcript) = codex::view::decode_path(path) {
+        return transcript;
+    }
     let instance = SourceInstance {
         kind: SourceKind::Claude,
         root: path.parent().map(Path::to_path_buf).unwrap_or_default(),

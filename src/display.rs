@@ -486,6 +486,12 @@ fn process_log_entries<F: OutputFormatter>(
     options: &DisplayOptions,
     formatter: &mut F,
 ) -> Result<()> {
+    if let Some(entries) = crate::history::sources::codex::view::log_entries(file_path)? {
+        for (_, entry) in entries {
+            process_entry(formatter, &entry, options.no_tools, options.show_thinking);
+        }
+        return Ok(());
+    }
     if crate::history::detect_source(file_path)?.is_some()
         && let Some(projection) = crate::history::pi::parse_file(file_path)?
     {

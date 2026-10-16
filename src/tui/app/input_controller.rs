@@ -163,20 +163,23 @@ impl App {
         }
 
         if self.keys.delete.matches(code, modifiers) {
-            if !self.single_file_mode && !self.is_loading() {
+            if !self.single_file_mode
+                && !self.is_loading()
+                && self.selected_allows(|can| can.delete, "Deleting")
+            {
                 self.dialog_mode = DialogMode::ConfirmDelete;
             }
             return None;
         }
         if self.keys.resume.matches(code, modifiers) {
-            return if self.single_file_mode {
+            return if self.single_file_mode || !self.selected_allows(|can| can.resume, "Resuming") {
                 None
             } else {
                 self.get_selected_path().map(Action::Resume)
             };
         }
         if self.keys.fork.matches(code, modifiers) {
-            return if self.single_file_mode {
+            return if self.single_file_mode || !self.selected_allows(|can| can.fork, "Forking") {
                 None
             } else {
                 self.get_selected_path().map(Action::ForkResume)
@@ -445,15 +448,21 @@ impl App {
         }
 
         if self.keys.delete.matches(code, modifiers) {
-            if self.get_selected_path().is_some() {
+            if self.selected_allows(|can| can.delete, "Deleting") {
                 self.dialog_mode = DialogMode::ConfirmDelete;
             }
             return None;
         }
         if self.keys.resume.matches(code, modifiers) {
+            if !self.selected_allows(|can| can.resume, "Resuming") {
+                return None;
+            }
             return self.get_selected_path().map(Action::Resume);
         }
         if self.keys.fork.matches(code, modifiers) {
+            if !self.selected_allows(|can| can.fork, "Forking") {
+                return None;
+            }
             return self.get_selected_path().map(Action::ForkResume);
         }
         if self.keys.refresh.matches(code, modifiers) {
@@ -462,7 +471,7 @@ impl App {
 
         match code {
             _ if self.keys.rename.matches(code, modifiers) => {
-                if self.get_selected_path().is_some() {
+                if self.selected_allows(|can| can.rename, "Renaming") {
                     self.start_rename();
                 }
                 None

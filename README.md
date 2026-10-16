@@ -102,8 +102,8 @@ the preview.
 ### Pi coding-agent sessions
 
 Pi sessions work alongside other sources in every history surface. When multiple
-sources have conversations, list rows include fixed-width `CC`, `Pi`, or `OMP`
-labels. A single-source list stays uncluttered.
+sources have conversations, list rows include fixed-width `CC`, `Pi`, `OMP`, or
+`CX` labels. A single-source list stays uncluttered.
 
 The default Pi root is `~/.pi/agent/sessions`. Its child directories correspond
 to projects. Storage configuration follows Pi's precedence:
@@ -165,6 +165,47 @@ OMP actions use OMP's native session interface:
 - delete removes the selected JSONL file and its sibling artifact directory
 
 Claude resume default arguments apply only to Claude sessions.
+
+### Codex threads
+
+Codex threads are listed with the `CX` label. The Codex home is `$CODEX_HOME`,
+or `~/.codex` when it is unset. Threads come from the rollouts under its
+`sessions` and `archived_sessions` directories, including compressed
+`.jsonl.zst` rollouts. Codex's state database (`state_<n>.sqlite`, in the
+`sqlite_home` of Codex's `config.toml`, else `$CODEX_SQLITE_HOME`, else the
+Codex home) is read, never written, to find each thread's current rollout and
+its name. When a thread was forked from another, the viewer shows the history it
+continues from, followed by a `Fork` marker where the thread's own records
+begin. Search covers only the thread's own dialogue.
+
+Thread titles come from the name set in Codex, else Codex's
+`session_index.jsonl`, else the first user message.
+
+`codex exec` runs and subagent threads are indexed for lexical search but stay
+out of the list and of semantic search.
+
+Codex actions use the Codex CLI with `CODEX_HOME` set to the thread's home:
+
+- resume runs `codex resume <thread-id>` in the thread's working directory
+- fork runs `codex fork <thread-id>` in the same directory
+- delete runs `codex delete --force <thread-id>`, which removes every rollout of
+  the thread
+- rename is not supported
+
+A thread whose current rollout, as recorded by Codex, no longer exists is shown
+read-only, with no actions.
+
+Arguments for every Codex resume and fork go in `[resume.codex]`. For example,
+if your shell aliases `codex` to `codex --yolo`:
+
+```toml
+# ~/.config/claude-history/config.toml
+[resume.codex]
+default_args = ["--yolo"]
+```
+
+This runs `codex --yolo resume <thread-id>`. Claude's `[resume].default_args`
+are not passed to Codex.
 
 ### Delete empty transcripts
 
@@ -653,6 +694,10 @@ pager = true
 # Default arguments to pass to claude command when resuming
 # Example: default_args = ["--dangerously-skip-permissions"]
 
+[resume.codex]
+# Default arguments to pass to codex when resuming or forking a Codex thread
+# Example: default_args = ["--yolo"]
+
 [keys]
 # Customize keybindings (default: ctrl+r, ctrl+f, f2, ctrl+x, ctrl+l)
 # Supports ctrl+<key>, alt+<key>, single-character keys, and f1-f12
@@ -695,6 +740,9 @@ EOF
   when resuming conversations. Useful for flags like
   `--dangerously-skip-permissions` that you want applied every time you resume.
   Example: `default_args = ["--dangerously-skip-permissions", "--verbose"]`
+- `codex.default_args` (array of strings, set under `[resume.codex]`):
+  Arguments to pass to `codex`, before its `resume` or `fork` subcommand, when
+  resuming or forking Codex threads. Example: `default_args = ["--yolo"]`
 
 #### Key bindings
 

@@ -2,6 +2,8 @@
 //! plans it: resume or fork it in that tool, delete it, rename it.
 
 use crate::error::{AppError, Result};
+use crate::history::sources::Registry;
+use crate::history::{Provenance, Source};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -21,6 +23,38 @@ impl Capabilities {
         delete: true,
         rename: true,
     };
+
+    pub const NONE: Self = Self {
+        resume: false,
+        fork: false,
+        delete: false,
+        rename: false,
+    };
+}
+
+/// The actions the adapter of `source` supports for a conversation of
+/// `provenance`: none for an orphaned one, which its tool no longer has.
+pub fn capabilities_of(source: Source, provenance: Provenance) -> Capabilities {
+    if provenance.orphaned {
+        return Capabilities::NONE;
+    }
+    // Capabilities belong to the kind of source, not to an instance.
+    Registry::with_roots(None, None, None)
+        .for_source(source)
+        .capabilities()
+}
+
+/// Why `doing` ("Deleting", ...) is unavailable for a conversation of
+/// `source` and `provenance`.
+pub fn refusal(source: Source, provenance: Provenance, doing: &str) -> String {
+    if provenance.orphaned {
+        format!(
+            "{doing} is unavailable: {} no longer has this conversation's current history",
+            source.list_label()
+        )
+    } else {
+        format!("{doing} {} sessions is not supported", source.list_label())
+    }
 }
 
 /// A conversation to act on.
@@ -85,8 +119,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::Source;
-    use crate::history::sources::Registry;
     use std::fs;
 
     #[test]

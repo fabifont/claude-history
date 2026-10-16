@@ -515,3 +515,61 @@ fn replacing_conversations_removes_deleted_sessions_and_deduplicates_paths() {
     assert_eq!(app.conversations.len(), 1);
     assert_eq!(app.get_selected_path().as_deref(), Some(new.as_path()));
 }
+
+#[test]
+fn orphaned_conversations_refuse_every_action() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abc123.jsonl");
+    write_conversation(&path, None);
+    let mut conversation = test_conversation(path, None);
+    conversation.source = crate::history::Source::Codex;
+    conversation.provenance.orphaned = true;
+    let mut app = App::new(
+        vec![conversation],
+        ToolDisplayMode::Hidden,
+        false,
+        KeyBindings::default(),
+        vec![],
+    );
+
+    for (code, modifiers) in [
+        (KeyCode::Char('r'), KeyModifiers::CONTROL),
+        (KeyCode::Char('f'), KeyModifiers::CONTROL),
+        (KeyCode::Char('x'), KeyModifiers::CONTROL),
+        (KeyCode::F(2), KeyModifiers::NONE),
+    ] {
+        assert!(app.handle_key(code, modifiers, 10).is_none());
+        assert_eq!(app.dialog_mode, DialogMode::None);
+        let (message, _) = app.status_message.take().unwrap();
+        assert!(message.contains("unavailable"), "{message}");
+    }
+}
+
+#[test]
+fn codex_conversations_resume_but_do_not_rename() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abc123.jsonl");
+    write_conversation(&path, None);
+    let mut conversation = test_conversation(path.clone(), None);
+    conversation.source = crate::history::Source::Codex;
+    let mut app = App::new(
+        vec![conversation],
+        ToolDisplayMode::Hidden,
+        false,
+        KeyBindings::default(),
+        vec![],
+    );
+
+    app.handle_key(KeyCode::F(2), KeyModifiers::NONE, 10);
+    assert_eq!(app.dialog_mode, DialogMode::None);
+    let (message, _) = app.status_message.take().unwrap();
+    assert_eq!(message, "Renaming CX sessions is not supported");
+
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::CONTROL, 10);
+    assert_eq!(app.dialog_mode, DialogMode::ConfirmDelete);
+    app.dialog_mode = DialogMode::None;
+    assert!(matches!(
+        app.handle_key(KeyCode::Char('r'), KeyModifiers::CONTROL, 10),
+        Some(Action::Resume(resumed)) if resumed == path
+    ));
+}

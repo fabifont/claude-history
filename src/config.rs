@@ -150,6 +150,33 @@ mode = "vector"
     }
 
     #[test]
+    fn codex_resume_args_are_separate_from_claude_ones() {
+        let config: ConfigFile = toml::from_str(
+            r#"
+[resume]
+default_args = ["--dangerously-skip-permissions"]
+
+[resume.codex]
+default_args = ["--yolo"]
+"#,
+        )
+        .unwrap();
+        let resume = config.resume.unwrap();
+        use crate::history::Source;
+        assert_eq!(
+            resume.default_args(Source::Claude),
+            ["--dangerously-skip-permissions"]
+        );
+        assert_eq!(resume.default_args(Source::Codex), ["--yolo"]);
+        assert!(resume.default_args(Source::Pi).is_empty());
+        assert!(
+            ResumeConfig::default()
+                .default_args(Source::Codex)
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn agent_settings_parse_independently_from_tui() {
         let config: ConfigFile = toml::from_str(
             r#"
@@ -245,7 +272,33 @@ pub struct DisplayConfig {
 #[derive(Deserialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeConfig {
+    /// Arguments Claude Code is resumed with.
     pub default_args: Option<Vec<String>>,
+    pub codex: Option<AgentResumeConfig>,
+}
+
+/// How the conversations of another agent are resumed.
+#[derive(Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AgentResumeConfig {
+    /// Arguments the agent is resumed with, before its own subcommand.
+    pub default_args: Option<Vec<String>>,
+}
+
+impl ResumeConfig {
+    /// The configured arguments for resuming a conversation of `source`.
+    pub fn default_args(&self, source: crate::history::Source) -> &[String] {
+        use crate::history::Source;
+        let args = match source {
+            Source::Claude => self.default_args.as_ref(),
+            Source::Codex => self
+                .codex
+                .as_ref()
+                .and_then(|codex| codex.default_args.as_ref()),
+            Source::Pi | Source::Omp => None,
+        };
+        args.map(Vec::as_slice).unwrap_or(&[])
+    }
 }
 
 #[derive(Deserialize, Debug, Default)]

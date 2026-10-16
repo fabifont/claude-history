@@ -9,6 +9,7 @@ mod decode;
 pub mod discover;
 mod head;
 mod state_db;
+pub mod view;
 
 use crate::error::{AppError, Result};
 use crate::history::actions::{Capabilities, Resume, Target};
@@ -27,29 +28,39 @@ use std::time::SystemTime;
 /// The adapter of a Codex home.
 pub struct CodexAdapter {
     instance: SourceInstance,
-    /// Directory of the state database.
-    sqlite_home: PathBuf,
+    /// Directory of the state database, when not where Codex would look.
+    sqlite_home: Option<PathBuf>,
 }
 
 impl CodexAdapter {
     /// The adapter of the Codex home at `home`, with its state database
-    /// where Codex would look for it: the `sqlite_home` of its
-    /// `config.toml`, else `CODEX_SQLITE_HOME`, else the home itself.
+    /// where Codex would look for it.
     pub fn new(home: PathBuf) -> Self {
-        let sqlite_home = configured_sqlite_home(&home)
-            .or_else(|| env_path("CODEX_SQLITE_HOME"))
-            .unwrap_or_else(|| home.clone());
-        Self::with_sqlite_home(home, sqlite_home)
-    }
-
-    pub fn with_sqlite_home(home: PathBuf, sqlite_home: PathBuf) -> Self {
         Self {
             instance: SourceInstance {
                 kind: SourceKind::Codex,
                 root: home,
             },
-            sqlite_home,
+            sqlite_home: None,
         }
+    }
+
+    pub fn with_sqlite_home(home: PathBuf, sqlite_home: PathBuf) -> Self {
+        Self {
+            sqlite_home: Some(sqlite_home),
+            ..Self::new(home)
+        }
+    }
+
+    /// The directory of the state database: the `sqlite_home` of the
+    /// home's `config.toml`, else `CODEX_SQLITE_HOME`, else the home.
+    fn sqlite_home(&self) -> PathBuf {
+        let home = &self.instance.root;
+        self.sqlite_home
+            .clone()
+            .or_else(|| configured_sqlite_home(home))
+            .or_else(|| env_path("CODEX_SQLITE_HOME"))
+            .unwrap_or_else(|| home.clone())
     }
 
     /// Every rollout of the home with the state that chooses among them,
@@ -57,7 +68,7 @@ impl CodexAdapter {
     /// means the listing or the database could not be read now.
     fn scan(&self, only: Option<&str>) -> std::result::Result<Scan, AppError> {
         let rollouts = discover::list(&self.instance.root)?;
-        let rows = match StateDb::open(&self.sqlite_home).map_err(sqlite_error)? {
+        let rows = match StateDb::open(&self.sqlite_home()).map_err(sqlite_error)? {
             None => HashMap::new(),
             Some(db) => match only {
                 None => db.rows().map_err(sqlite_error)?,

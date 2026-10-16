@@ -446,3 +446,73 @@ fn actions_run_the_codex_cli_on_the_rollouts_home() {
     assert!(!adapter.capabilities().rename);
     assert!(adapter.rename(&path, "x").is_err());
 }
+
+#[test]
+fn viewed_threads_show_the_dialogue_and_where_a_fork_begins() {
+    use crate::claude::{ContentBlock, LogEntry, UserContent};
+    fn text_of(entry: &LogEntry) -> String {
+        let blocks = match entry {
+            LogEntry::User {
+                message:
+                    crate::claude::UserMessage {
+                        content: UserContent::Blocks(blocks),
+                        ..
+                    },
+                ..
+            } => blocks.as_slice(),
+            LogEntry::Assistant { message, .. } => message.content.as_slice(),
+            LogEntry::PiMetadata { label, .. } => return format!("[{label}]"),
+            _ => return String::new(),
+        };
+        blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = home_copy(dir.path());
+    let path_of = |thread: &str| {
+        discover::list(&home)
+            .unwrap()
+            .into_iter()
+            .find(|rollout| rollout.thread_id == thread)
+            .unwrap()
+            .path
+    };
+
+    let fork = view::log_entries(&path_of(FORK)).unwrap().unwrap();
+    let texts: Vec<String> = fork.iter().map(|(_, entry)| text_of(entry)).collect();
+    let walrus = texts.iter().filter(|text| text.contains("walrus")).count();
+    assert_eq!(
+        walrus, 2,
+        "the base's question and answer, once each: {texts:?}"
+    );
+    let boundary = texts.iter().position(|text| text == "[Fork]").unwrap();
+    let ocelot = texts
+        .iter()
+        .position(|text| text.contains("ocelot"))
+        .unwrap();
+    assert!(boundary < ocelot);
+    assert!(
+        texts[..boundary]
+            .iter()
+            .all(|text| !text.contains("ocelot"))
+    );
+    assert!(fork.iter().any(|(_, entry)| matches!(
+        entry,
+        LogEntry::Assistant { agent: Some(agent), .. } if agent == "Codex"
+    )));
+
+    let sub = view::log_entries(&path_of(SUB)).unwrap().unwrap();
+    let texts: Vec<String> = sub.iter().map(|(_, entry)| text_of(entry)).collect();
+    assert!(texts.iter().any(|text| text.contains("armadillo")));
+    assert!(!texts.iter().any(|text| text == "[Fork]"));
+    assert!(!texts.iter().any(|text| text.contains("walrus")));
+
+    let claude = dir.path().join("session.jsonl");
+    std::fs::write(&claude, "{}\n").unwrap();
+    assert!(view::log_entries(&claude).unwrap().is_none());
+}

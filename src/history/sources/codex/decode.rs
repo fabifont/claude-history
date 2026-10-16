@@ -517,18 +517,16 @@ impl Decoder<'_> {
                 Err(_) => EventKind::Other,
             },
             "response_item" => match serde_json::from_str(payload) {
+                // Copies of the dialogue plus injected context, wherever
+                // they were recorded.
                 Ok(ResponseItem::Message { role, content }) => {
-                    let visibility = match visibility {
-                        Visibility::Dialogue => Visibility::Injected,
-                        other => other,
-                    };
                     let role = if role == "assistant" {
                         Role::Assistant
                     } else {
                         Role::User
                     };
                     let parts = content.into_iter().filter_map(content_part).collect();
-                    return vec![(visibility, message(role, None, parts))];
+                    return vec![(Visibility::Injected, message(role, None, parts))];
                 }
                 // A subagent is addressed only through these; its parent
                 // hears back through them.
