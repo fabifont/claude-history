@@ -111,6 +111,15 @@ pub struct Fingerprint {
     pub mtime_ns: i64,
 }
 
+impl From<crate::history::adapter::Stamp> for Fingerprint {
+    fn from(stamp: crate::history::adapter::Stamp) -> Self {
+        Self {
+            size: stamp.size,
+            mtime_ns: stamp.mtime_ns,
+        }
+    }
+}
+
 /// Where a card's document lives in the generation's index segments,
 /// parallel to the card rows.
 #[repr(C)]

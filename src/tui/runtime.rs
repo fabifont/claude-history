@@ -400,7 +400,7 @@ pub fn reconcile() -> Result<()> {
         return Ok(());
     };
     crate::bench::mark("reconcile_start");
-    let sources = crate::store::reconcile::Sources::from_env();
+    let sources = crate::history::sources::Registry::from_env();
     let outcome = crate::store::reconcile::reconcile(&root, &sources)?;
     crate::bench::mark("reconcile_done");
     if outcome.publish == crate::store::generation::Publish::Busy {

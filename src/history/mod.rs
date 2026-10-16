@@ -12,6 +12,7 @@
 //! - `parser` - Parsing individual JSONL files
 //! - `path` - Path encoding/decoding utilities
 
+pub mod adapter;
 mod loader;
 mod messages;
 #[allow(dead_code)]
@@ -23,6 +24,7 @@ pub mod pi;
 pub mod pi_loader;
 mod rename;
 mod session_loader;
+pub mod sources;
 
 pub(crate) use messages::{MessageOrdinals, Placement};
 

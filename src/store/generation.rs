@@ -41,7 +41,8 @@ use std::io::{self, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::time::SystemTime;
 
 const CURRENT: &str = "CURRENT";
 const MANIFEST: &str = "manifest";
@@ -50,8 +51,6 @@ const LOCK: &str = "LOCK";
 const KEEP_BEHIND: u64 = 1;
 /// Files modified this close to the start of loading may have changed after
 /// the loader read them.
-const MTIME_SLACK: Duration = Duration::from_secs(2);
-
 /// A validated, memory-mapped generation manifest.
 pub struct Generation {
     name: String,
@@ -368,31 +367,15 @@ fn generation_number(name: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-/// Fingerprint of the file behind `path`. Files modified after
-/// `loaded_since` (less `MTIME_SLACK`) get an unknown mtime, so a later run
-/// sees them as changed.
+/// Fingerprint of the file behind `path`, as a scan started at
+/// `loaded_since` stamps it.
 #[cfg(test)]
 pub fn fingerprint(path: &Path, loaded_since: SystemTime) -> Fingerprint {
     let Ok(metadata) = fs::metadata(path) else {
         return Fingerprint::default();
     };
-    fingerprint_from(metadata.len(), metadata.modified().ok(), loaded_since)
-}
-
-/// `fingerprint` of a file with `size` and `modified` time.
-pub fn fingerprint_from(
-    size: u64,
-    modified: Option<SystemTime>,
-    loaded_since: SystemTime,
-) -> Fingerprint {
-    let threshold = loaded_since.checked_sub(MTIME_SLACK).unwrap_or(UNIX_EPOCH);
-    let mtime_ns = modified
-        .filter(|modified| *modified < threshold)
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |since_epoch| {
-            i64::try_from(since_epoch.as_nanos()).unwrap_or(0)
-        });
-    Fingerprint { size, mtime_ns }
+    crate::history::adapter::Stamp::of(metadata.len(), metadata.modified().ok(), loaded_since)
+        .into()
 }
 
 /// String heap that stores each distinct string once.
@@ -1636,7 +1619,10 @@ mod tests {
                 mtime_ns: 0
             }
         );
-        let later = fingerprint(&path, SystemTime::now() + Duration::from_secs(60));
+        let later = fingerprint(
+            &path,
+            SystemTime::now() + std::time::Duration::from_secs(60),
+        );
         assert_eq!(later.size, 3);
         assert_ne!(later.mtime_ns, 0);
         assert_eq!(

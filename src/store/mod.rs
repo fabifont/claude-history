@@ -110,7 +110,7 @@ pub fn load_conversations(
 }
 
 fn load_from_store(root: &Path, show_last: bool, contents: Contents) -> Option<Vec<Conversation>> {
-    let sources = reconcile::Sources::from_env();
+    let sources = crate::history::sources::Registry::from_env();
     for _ in 0..2 {
         let outcome = reconcile::reconcile(root, &sources).ok()?;
         if outcome.publish != generation::Publish::Busy {
