@@ -1285,6 +1285,7 @@ mod agent_command_tests {
             retrieval_hits_per_conversation: None,
             all_hits: false,
             budget: None,
+            user_only: false,
         };
         let output = agent::search::run_global_lexical_search(
             &request,

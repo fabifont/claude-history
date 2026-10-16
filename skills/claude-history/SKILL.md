@@ -98,6 +98,12 @@ conversations. `--flat` ranks message hits across conversations. Use
 only when duplicate suppression hides relevant tool-heavy evidence.
 Automated runs (`codex exec`) and subagent threads are left out of search unless
 you pass `--all-kinds`, and semantic modes never find them.
+`--user-only` matches only what the user typed: a conversation qualifies when
+every query word and quoted phrase occurs in the user's own messages, and hits
+come only from those messages, never from assistant replies, tool output,
+injected context, or titles. Use it to find "where did I ask about X". It
+searches lexically; semantic and hybrid modes fall back to lexical with a
+`semantic-unavailable` warning.
 
 Compact records are the only output. Headers identify the `agent-search`,
 `agent-within`, `agent-read`, or `agent-outline` record grammar. Header `chars=`

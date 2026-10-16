@@ -40,7 +40,7 @@ use std::time::SystemTime;
 pub use loader::{
     DeleteEmptyScope, delete_empty_transcripts, delete_session_by_uuid, find_jsonl_by_uuid,
 };
-pub(crate) use messages::{extract_skill_preview, retained_user_text};
+pub(crate) use messages::{authored_text, extract_skill_preview, retained_user_text};
 pub(crate) use parser::process_conversation_file;
 pub use path::{convert_path_to_project_dir_name, format_short_name_from_path, is_same_project};
 pub use rename::append_session_rename;

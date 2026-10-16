@@ -358,7 +358,8 @@ Pressing `Ctrl+V` again searches everything; the query and selection stay
 either way.
 
 Semantic search ranks whole conversations, so it ignores the toggle and the
-status bar says `you only: not in semantic`.
+status bar says `you only: not in semantic`. For agents, `claude-history agent
+search --user-only` does the same, returning hits from your own messages only.
 
 ### Time filtering
 

@@ -43,6 +43,9 @@ pub struct AgentSearchRequest {
     pub retrieval_hits_per_conversation: Option<usize>,
     pub all_hits: bool,
     pub budget: Option<usize>,
+    /// Retrieve hits only from what the person typed; see
+    /// `AgentRetrievalOptions::user_only`.
+    pub user_only: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -439,6 +442,7 @@ pub fn run_within_search(
             resolved,
             transcript,
             mode,
+            false,
         ),
         SearchMode::Semantic => semantic_output_hits(
             semantic_hits,
@@ -459,6 +463,7 @@ pub fn run_within_search(
                     resolved,
                     transcript,
                     SearchMode::Lexical,
+                    false,
                 ),
                 semantic_output_hits(
                     semantic_hits,
@@ -560,6 +565,7 @@ pub fn run_global_lexical_search_reporting(
             resolved,
             &transcript,
             retrieval_mode,
+            request.user_only,
         ));
         if request.retrieval_hits_per_conversation.is_some() && hits.len() >= request.top {
             break;
@@ -728,6 +734,7 @@ fn retrieval_hits(
     resolved: &ResolvedConversation,
     transcript: &AgentTranscript,
     mode: SearchMode,
+    user_only: bool,
 ) -> Vec<AgentOutputHit> {
     let search_query = if mode == SearchMode::Exact && !ParsedQuery::parse(query).is_quoted_only() {
         quote_query(query)
@@ -743,6 +750,7 @@ fn retrieval_hits(
         &search_query,
         AgentRetrievalOptions {
             limit,
+            user_only,
             ..AgentRetrievalOptions::default()
         },
     )
@@ -1372,6 +1380,7 @@ mod tests {
             retrieval_hits_per_conversation: None,
             all_hits: false,
             budget: None,
+            user_only: false,
         }
     }
 
@@ -2453,6 +2462,7 @@ mod tests {
             retrieval_hits_per_conversation: None,
             all_hits: false,
             budget: None,
+            user_only: false,
         };
         let hits = vec![
             semantic_hit_with_source(
@@ -2521,6 +2531,7 @@ mod tests {
             retrieval_hits_per_conversation: None,
             all_hits: false,
             budget: None,
+            user_only: false,
         };
         let mut hits = (1..=20)
             .map(|index| semantic_hit(0, MessageRange::single(index), "first", 1.0))

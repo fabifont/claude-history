@@ -204,7 +204,7 @@ impl AgentService {
             scope,
             current_project_dir_name.as_deref(),
         )?;
-        let request = agent::search::AgentSearchRequest {
+        let mut request = agent::search::AgentSearchRequest {
             query: args.query.clone(),
             top: configured_usize(args.top, DEFAULT_SEARCH_TOP, agent_config.top),
             cli_mode: args.mode_override(),
@@ -219,13 +219,33 @@ impl AgentService {
             retrieval_hits_per_conversation: None,
             all_hits: args.all_hits,
             budget: configured_budget(args.no_budget, args.budget, agent_config.output_chars),
+            user_only: args.user_only,
         };
-        let mode = agent::search::effective_agent_mode(
+        let mut mode = agent::search::effective_agent_mode(
             &request.query,
             request.cli_mode,
             request.config_mode,
             request.tui_semantic_search,
         );
+        let mut user_only_warning = None;
+        if args.user_only && matches!(mode, SearchMode::Semantic | SearchMode::Hybrid) {
+            // Embeddings cover chunks of both sides of a conversation, so
+            // only lexical search can keep to the person's own messages.
+            user_only_warning = Some(AgentWarning::from_error(&AgentError::semantic_unavailable(
+                "semantic and hybrid search cannot be limited to your own messages; \
+                     searched lexically",
+            )));
+            mode = SearchMode::Lexical;
+            request.cli_mode = Some(SearchMode::Lexical);
+        }
+        // Ranks on what the person typed when only that is searched.
+        let own_view;
+        let ranked_conversations = if args.user_only {
+            own_view = search::user_only_view(&conversations);
+            &own_view
+        } else {
+            &conversations
+        };
         let (mut keys, mut base_warnings) = discover_agent_keys(
             current_project_dir_name.as_deref(),
             Some(&conversations),
@@ -249,9 +269,10 @@ impl AgentService {
             &conversations,
             &keys,
         ));
+        base_warnings.extend(user_only_warning);
         match mode {
             SearchMode::Lexical | SearchMode::Exact => {
-                let ranked = lexically_rank_scoped(&conversations, &args.query, &scoped);
+                let ranked = lexically_rank_scoped(ranked_conversations, &args.query, &scoped);
                 let warnings = RefCell::new(base_warnings.clone());
                 let mut output = agent::search::run_global_lexical_search_reporting(
                     &request,

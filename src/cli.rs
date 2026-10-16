@@ -160,6 +160,10 @@ pub struct AgentSearchArgs {
     /// Also search automated (Codex exec) and subagent conversations
     #[arg(long)]
     pub all_kinds: bool,
+    /// Search only your own messages; semantic and hybrid modes search
+    /// lexically instead
+    #[arg(long)]
+    pub user_only: bool,
     #[command(flatten)]
     pub search_mode: AgentSearchModeArgs,
     #[command(flatten)]

@@ -1,9 +1,11 @@
 use crate::agent::refs::MessageRange;
 use crate::agent::sanitize::sanitize_agent_text;
 use crate::agent::transcript::{
-    AgentMessage, AgentMessagePart, AgentTranscript, agent_part_search_text, truncate_chars,
+    AgentMessage, AgentMessagePart, AgentMessageRole, AgentTranscript, agent_part_search_text,
+    truncate_chars,
 };
 use crate::agent::visibility::ContentVisibility;
+use crate::history::authored_text;
 use crate::search::literal::Literal;
 use crate::search::query::ParsedQuery;
 use crate::text_match::{contains_cjk, contains_prefix_match, normalize_for_search};
@@ -36,6 +38,9 @@ pub struct AgentSearchHit {
 pub struct AgentRetrievalOptions {
     pub read_context_radius: usize,
     pub limit: usize,
+    /// Search only what the person typed: the authored text of top-level
+    /// user messages, as `Conversation::own_text` holds it.
+    pub user_only: bool,
 }
 
 impl Default for AgentRetrievalOptions {
@@ -43,6 +48,7 @@ impl Default for AgentRetrievalOptions {
         Self {
             read_context_radius: 1,
             limit: 10,
+            user_only: false,
         }
     }
 }
@@ -151,7 +157,11 @@ fn retrieve_agent_hit_candidates(
         return Vec::new();
     }
 
-    let segments = build_segments(target.transcript);
+    let segments = if options.user_only {
+        build_own_segments(target.transcript)
+    } else {
+        build_segments(target.transcript)
+    };
     if segments.is_empty() {
         return Vec::new();
     }
@@ -351,6 +361,35 @@ fn build_segments(transcript: &AgentTranscript) -> Vec<Segment> {
         .messages
         .iter()
         .flat_map(message_segments)
+        .collect()
+}
+
+/// Segments of the authored text of each top-level user message that is not
+/// a note.
+fn build_own_segments(transcript: &AgentTranscript) -> Vec<Segment> {
+    transcript
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == AgentMessageRole::User
+                && message.parent_tool_use_id.is_none()
+                && transcript.notes.binary_search(&message.ordinal).is_err()
+        })
+        .flat_map(|message| {
+            message.parts.iter().filter_map(|part| match part {
+                AgentMessagePart::Text { text, .. } => {
+                    let text = authored_text(text)?;
+                    Some(Segment {
+                        message_ordinal: message.ordinal,
+                        source: AgentHitSource::Dialogue,
+                        render_options: AgentHitRenderOptions::default(),
+                        normalized: normalize_for_search(&text),
+                        text,
+                    })
+                }
+                _ => None,
+            })
+        })
         .collect()
 }
 
@@ -640,6 +679,39 @@ mod tests {
         assert_eq!(hits[0].focus_range, MessageRange::single(2));
         assert!(hits[0].read_range.contains(&hits[0].focus_range));
         assert!(hits[0].preview.contains("hidden_exact_tool_needle"));
+    }
+
+    #[test]
+    fn user_only_hits_come_from_what_the_person_typed() {
+        let mut subagent = text_message(5, AgentMessageRole::User, "walrus from a parent");
+        subagent.parent_tool_use_id = Some("toolu_1".to_string());
+        let mut transcript = transcript(vec![
+            text_message(1, AgentMessageRole::User, "how does the walrus work"),
+            text_message(2, AgentMessageRole::Assistant, "the walrus assigns"),
+            tool_result_message(3, json!("walrus in tool output")),
+            text_message(4, AgentMessageRole::User, "[hook] walrus note"),
+            subagent,
+            text_message(
+                6,
+                AgentMessageRole::User,
+                "<system-reminder>walrus reminder</system-reminder>thanks",
+            ),
+        ]);
+        transcript.notes = vec![4];
+        let user_only = AgentRetrievalOptions {
+            user_only: true,
+            ..options()
+        };
+
+        let hits = retrieve_agent_hits(&transcript, "walrus", user_only);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].focus_range, MessageRange::single(1));
+        assert_eq!(hits[0].source, AgentHitSource::Dialogue);
+        assert!(retrieve_agent_hits(&transcript, "\"walrus in\"", user_only).is_empty());
+        assert_eq!(
+            retrieve_agent_hits(&transcript, "walrus", options()).len(),
+            6
+        );
     }
 
     #[test]

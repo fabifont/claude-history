@@ -14,6 +14,9 @@ pub struct AgentTranscript {
     pub path: PathBuf,
     pub messages: Vec<AgentMessage>,
     pub malformed_lines: Vec<usize>,
+    /// Ordinals, ascending, of the user messages that render a note (hook
+    /// output, custom messages) rather than something the person said.
+    pub notes: Vec<usize>,
     pub summary: Option<String>,
     pub custom_title: Option<String>,
 }
@@ -92,6 +95,7 @@ impl AgentTranscript {
         let mut summary = None;
         let mut custom_title = None;
         let mut ordinals = MessageOrdinals::new();
+        let mut notes = Vec::new();
         for event in &transcript.events {
             if event.visibility != Visibility::Dialogue {
                 continue;
@@ -125,6 +129,7 @@ impl AgentTranscript {
                     let Placement::Message(ordinal) = placement else {
                         continue;
                     };
+                    notes.push(ordinal);
                     let rendered = if text.is_empty() {
                         format!("[{label}]")
                     } else {
@@ -209,6 +214,7 @@ impl AgentTranscript {
             path,
             messages,
             malformed_lines,
+            notes,
             summary,
             custom_title,
         })
