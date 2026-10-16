@@ -1,5 +1,5 @@
 use crate::history::Conversation;
-use crate::text_match::is_word_start;
+use crate::text_match::{is_word_start, next_lowercase_candidate};
 use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,20 +150,22 @@ fn find_case_insensitive_ranges(text: &str, needle: &str, first_only: bool) -> V
     };
 
     let mut ranges = Vec::new();
-    let mut resume = 0;
-    let mut prev_alnum = false;
-    for (start, ch) in text.char_indices() {
-        let word_start = !prev_alnum;
-        prev_alnum = ch.is_alphanumeric();
-        if start < resume || !word_start || ch.to_lowercase().next() != Some(first) {
-            continue;
-        }
-        if let Some(end) = folded_match_end(&text[start..], &needle_chars) {
-            ranges.push((start, start + end));
-            if first_only {
-                break;
+    let mut from = 0;
+    while let Some(start) = next_lowercase_candidate(text, from, first) {
+        let rest = &text[start..];
+        let end = (is_word_start(text, start)
+            && rest.chars().next().and_then(|ch| ch.to_lowercase().next()) == Some(first))
+        .then(|| folded_match_end(rest, &needle_chars))
+        .flatten();
+        match end {
+            Some(end) => {
+                ranges.push((start, start + end));
+                if first_only {
+                    break;
+                }
+                from = start + end;
             }
-            resume = start + end;
+            None => from = start + rest.chars().next().map_or(1, char::len_utf8),
         }
     }
     ranges
@@ -213,6 +215,55 @@ fn push_part(text: &mut String, part: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Char-by-char reference for `find_case_insensitive_ranges`.
+    fn reference_case_insensitive_ranges(text: &str, needle: &str) -> Vec<(usize, usize)> {
+        let needle_chars: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
+        let Some(&first) = needle_chars.first() else {
+            return Vec::new();
+        };
+        let mut ranges = Vec::new();
+        let mut resume = 0;
+        let mut prev_alnum = false;
+        for (start, ch) in text.char_indices() {
+            let word_start = !prev_alnum;
+            prev_alnum = ch.is_alphanumeric();
+            if start < resume || !word_start || ch.to_lowercase().next() != Some(first) {
+                continue;
+            }
+            if let Some(end) = folded_match_end(&text[start..], &needle_chars) {
+                ranges.push((start, start + end));
+                resume = start + end;
+            }
+        }
+        ranges
+    }
+
+    #[test]
+    fn case_insensitive_ranges_match_the_char_by_char_reference() {
+        const PIECES: &[&str] = &[
+            "a", "A", "b", "ab", "AB", "İ", "i", "I", "K", "\u{212A}", "k", "é", "É", "_", "-",
+            " ", ".", "测", "测试", "ß", "ǅ", "1",
+        ];
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        for _ in 0..3000 {
+            let text: String = (0..next(40)).map(|_| PIECES[next(PIECES.len())]).collect();
+            let needle: String = (0..1 + next(3))
+                .map(|_| PIECES[next(PIECES.len())])
+                .collect();
+            assert_eq!(
+                find_case_insensitive_ranges(&text, &needle, false),
+                reference_case_insensitive_ranges(&text, &needle),
+                "{text:?} {needle:?}"
+            );
+        }
+    }
     use crate::search::test_fixtures::one_message_conversation;
     use chrono::{Duration, Local};
 

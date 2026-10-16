@@ -1,7 +1,7 @@
 use crate::history::Conversation;
 use crate::search::literal::Literal;
 use crate::search::query::ParsedQuery;
-use crate::text_match::normalize_for_search;
+use crate::text_match::{is_word_start, next_lowercase_candidate, normalize_for_search};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LexicalEvidence {
@@ -288,56 +288,44 @@ fn find_first_normalized_match(text: &str, term: &str) -> Option<(usize, usize)>
 
 fn find_normalized_term_ranges(text: &str, term: &str) -> Vec<(usize, usize)> {
     let term_chars: Vec<char> = term.chars().collect();
-    if term_chars.is_empty() {
+    let Some(&first) = term_chars.first() else {
         return Vec::new();
-    }
-
-    let query_starts_alnum = term_chars[0].is_alphanumeric();
+    };
+    // `_`, `-` and `/` normalize to a space, so a term starting with one
+    // can start at any char.
+    let any_start = first == ' ';
+    let query_starts_alnum = first.is_alphanumeric();
     let mut ranges = Vec::new();
-    let mut prev_is_alnum = false;
-    let mut iter = text.char_indices().peekable();
-
-    while let Some(&(byte_start, ch)) = iter.peek() {
-        let norm_ch = normalize_evidence_char(ch);
-        let is_alnum = ch.is_alphanumeric();
-        let valid_start = !query_starts_alnum || !prev_is_alnum;
-
-        if valid_start && norm_ch == term_chars[0] {
-            let mut lookahead = iter.clone();
-            lookahead.next();
-            let mut matched = true;
-            let mut end_byte = byte_start + ch.len_utf8();
-
-            for &query_char in term_chars.iter().skip(1) {
-                if let Some(&(_, next_ch)) = lookahead.peek() {
-                    let next_norm = normalize_evidence_char(next_ch);
-                    end_byte += next_ch.len_utf8();
-                    lookahead.next();
-                    if next_norm != query_char {
-                        matched = false;
-                        break;
-                    }
-                } else {
-                    matched = false;
-                    break;
-                }
+    let mut from = 0;
+    while from < text.len() {
+        let start = if any_start {
+            from
+        } else {
+            match next_lowercase_candidate(text, from, first) {
+                Some(start) => start,
+                None => break,
             }
-
-            if matched {
-                ranges.push((byte_start, end_byte));
-                for _ in 0..term_chars.len().saturating_sub(1) {
-                    iter.next();
-                }
-                prev_is_alnum = term_chars.last().is_some_and(|c| c.is_alphanumeric());
-                iter.next();
-                continue;
+        };
+        let rest = &text[start..];
+        let valid_start = !query_starts_alnum || is_word_start(text, start);
+        let mut chars = rest.char_indices();
+        let end = valid_start
+            .then(|| {
+                term_chars.iter().try_fold(start, |_, &query_char| {
+                    let (offset, ch) = chars.next()?;
+                    (normalize_evidence_char(ch) == query_char)
+                        .then_some(start + offset + ch.len_utf8())
+                })
+            })
+            .flatten();
+        match end {
+            Some(end) => {
+                ranges.push((start, end));
+                from = end;
             }
+            None => from = start + rest.chars().next().map_or(1, char::len_utf8),
         }
-
-        prev_is_alnum = is_alnum;
-        iter.next();
     }
-
     ranges
 }
 
@@ -352,6 +340,91 @@ fn normalize_evidence_char(ch: char) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Char-by-char reference for `find_normalized_term_ranges`.
+    fn reference_term_ranges(text: &str, term: &str) -> Vec<(usize, usize)> {
+        let term_chars: Vec<char> = term.chars().collect();
+        if term_chars.is_empty() {
+            return Vec::new();
+        }
+
+        let query_starts_alnum = term_chars[0].is_alphanumeric();
+        let mut ranges = Vec::new();
+        let mut prev_is_alnum = false;
+        let mut iter = text.char_indices().peekable();
+
+        while let Some(&(byte_start, ch)) = iter.peek() {
+            let norm_ch = normalize_evidence_char(ch);
+            let is_alnum = ch.is_alphanumeric();
+            let valid_start = !query_starts_alnum || !prev_is_alnum;
+
+            if valid_start && norm_ch == term_chars[0] {
+                let mut lookahead = iter.clone();
+                lookahead.next();
+                let mut matched = true;
+                let mut end_byte = byte_start + ch.len_utf8();
+
+                for &query_char in term_chars.iter().skip(1) {
+                    if let Some(&(_, next_ch)) = lookahead.peek() {
+                        let next_norm = normalize_evidence_char(next_ch);
+                        end_byte += next_ch.len_utf8();
+                        lookahead.next();
+                        if next_norm != query_char {
+                            matched = false;
+                            break;
+                        }
+                    } else {
+                        matched = false;
+                        break;
+                    }
+                }
+
+                if matched {
+                    ranges.push((byte_start, end_byte));
+                    for _ in 0..term_chars.len().saturating_sub(1) {
+                        iter.next();
+                    }
+                    prev_is_alnum = term_chars.last().is_some_and(|c| c.is_alphanumeric());
+                    iter.next();
+                    continue;
+                }
+            }
+
+            prev_is_alnum = is_alnum;
+            iter.next();
+        }
+
+        ranges
+    }
+
+    #[test]
+    fn term_ranges_match_the_char_by_char_reference() {
+        const PIECES: &[&str] = &[
+            "a", "A", "b", "ab", "AB", "İ", "i", "I", "K", "\u{212A}", "k", "é", "É", "_", "-",
+            "/", " ", ".", "测", "测试", "ß", "ǅ", "1", "\n",
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        for _ in 0..3000 {
+            let text: String = (0..next(40)).map(|_| PIECES[next(PIECES.len())]).collect();
+            let term: String = (0..1 + next(3))
+                .map(|_| PIECES[next(PIECES.len())])
+                .collect::<String>()
+                .chars()
+                .map(normalize_evidence_char)
+                .collect();
+            assert_eq!(
+                find_normalized_term_ranges(&text, &term),
+                reference_term_ranges(&text, &term),
+                "{text:?} {term:?}"
+            );
+        }
+    }
     use chrono::{Local, TimeZone};
     use std::path::PathBuf;
 

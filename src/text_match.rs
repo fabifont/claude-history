@@ -59,6 +59,33 @@ pub fn is_word_start(text: &str, pos: usize) -> bool {
             .is_some_and(|c| !c.is_alphanumeric())
 }
 
+/// ASCII chars that a non-ASCII char lowercases to, with that char's first
+/// UTF-8 byte: `İ` (U+0130) and the Kelvin sign (U+212A).
+const ASCII_FROM_NON_ASCII: [(char, u8); 2] = [('i', 0xC4), ('k', 0xE2)];
+
+/// Byte offset of the first char at or after `from` whose lowercase form
+/// may start with `first`, a lowercase char. Every char whose
+/// `to_lowercase()` starts with `first` is found; some others are too, so
+/// callers check each one. Offsets are char boundaries.
+pub fn next_lowercase_candidate(text: &str, from: usize, first: char) -> Option<usize> {
+    let haystack = &text.as_bytes()[from..];
+    let found = if first.is_ascii() {
+        let lower = first as u8;
+        let upper = first.to_ascii_uppercase() as u8;
+        match ASCII_FROM_NON_ASCII
+            .iter()
+            .find(|(ascii, _)| *ascii == first)
+        {
+            Some(&(_, lead)) => memchr::memchr3(lower, upper, lead, haystack),
+            None => memchr::memchr2(lower, upper, haystack),
+        }
+    } else {
+        // Only non-ASCII chars lowercase to non-ASCII ones.
+        haystack.iter().position(|&byte| byte >= 0xC0)
+    };
+    found.map(|offset| from + offset)
+}
+
 pub fn contains_prefix_match(text: &str, word: &str) -> bool {
     let mut start = 0;
     while let Some(pos) = text[start..].find(word) {
@@ -90,6 +117,39 @@ pub fn contains_cjk(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_listed_non_ascii_chars_lowercase_to_ascii() {
+        for c in (0x80..=0x10FFFF).filter_map(char::from_u32) {
+            let Some(lower) = c.to_lowercase().next().filter(char::is_ascii) else {
+                continue;
+            };
+            let mut utf8 = [0; 4];
+            c.encode_utf8(&mut utf8);
+            assert!(
+                ASCII_FROM_NON_ASCII.contains(&(lower, utf8[0])),
+                "{c:?} lowercases to {lower:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lowercase_candidates_include_every_char_folding_to_first() {
+        let text = "aİbKcIkéÉ_x测\u{212A}i";
+        for first in ['i', 'k', 'é', 'x', '测', '_'] {
+            let mut from = 0;
+            let mut found = Vec::new();
+            while let Some(at) = next_lowercase_candidate(text, from, first) {
+                found.push(at);
+                from = at + text[at..].chars().next().unwrap().len_utf8();
+            }
+            for (at, c) in text.char_indices() {
+                if c.to_lowercase().next() == Some(first) {
+                    assert!(found.contains(&at), "{first:?} misses {c:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn normalizes_search_separators_and_case() {
