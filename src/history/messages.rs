@@ -1,26 +1,24 @@
-//! Shared message ordinal assignment for history and agent transcript readers.
+//! Shared message ordinal assignment for the indexer and agent transcripts.
 //!
-//! The history parser and agent transcript reader use the same placement rules
+//! The indexer and the agent transcript reader use the same placement rules
 //! so semantic evidence ranges resolve to the same `mN` messages as reads.
 
-use crate::claude::{
-    AgentContent, AgentProgressData, AssistantMessage, ContentBlock, LogEntry, UserContent,
-    UserMessage,
-};
+use super::model::{Event, EventKind, Message, Part, Role};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
-/// Where a transcript record lands in the message sequence.
+/// Where a transcript event lands in the message sequence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Placement {
     /// A new message with this ordinal.
     Message(usize),
-    /// A streamed assistant record replacing an earlier message.
+    /// A streamed assistant message replacing an earlier message.
     Replaces(usize),
-    /// A control record or filtered message.
+    /// A control event or filtered message.
     Control,
 }
 
-/// Assigns message ordinals to transcript records in file order.
+/// Assigns message ordinals to transcript events in order.
 #[derive(Debug, Default)]
 pub(crate) struct MessageOrdinals {
     count: usize,
@@ -37,39 +35,39 @@ impl MessageOrdinals {
         self.count
     }
 
-    /// Places user, assistant, and Pi/OMP metadata records. Progress records
-    /// are parsed by each caller and placed with [`Self::place_subagent`].
-    pub(crate) fn place(&mut self, entry: &LogEntry) -> Placement {
-        match entry {
-            LogEntry::User { message, .. } => self.place_user(message),
-            LogEntry::Assistant { message, .. } => self.place_assistant(message),
-            LogEntry::PiMetadata { searchable, .. } => {
+    /// Places messages, searchable notes and subagent messages; everything
+    /// else is control.
+    pub(crate) fn place(&mut self, event: &Event) -> Placement {
+        match &event.kind {
+            EventKind::Message(message) => match message.role {
+                Role::User => self.place_user(&message.parts),
+                Role::Assistant => self.place_assistant(message),
+            },
+            EventKind::Note { searchable, .. } => {
                 if *searchable {
                     self.next()
                 } else {
                     Placement::Control
                 }
             }
-            _ => Placement::Control,
+            EventKind::Subagent { message, .. } => {
+                if parts_count_as_message(&message.parts) {
+                    self.next()
+                } else {
+                    Placement::Control
+                }
+            }
+            EventKind::Title { .. } | EventKind::Other => Placement::Control,
         }
     }
 
-    pub(crate) fn place_subagent(&mut self, progress: &AgentProgressData) -> Placement {
-        if !matches!(progress.message.message_type.as_str(), "user" | "assistant") {
-            return Placement::Control;
-        }
-        let AgentContent::Blocks(blocks) = &progress.message.message.content;
-        if blocks_count_as_message(blocks) {
-            self.next()
-        } else {
-            Placement::Control
-        }
-    }
-
-    fn place_user(&mut self, message: &UserMessage) -> Placement {
-        // This mirrors blocks_to_parts in agent/transcript.rs: clear and
+    fn place_user(&mut self, parts: &[Part]) -> Placement {
+        // This mirrors parts_to_agent in agent/transcript.rs: clear and
         // warmup checks see the first retained text part, not joined raw text.
-        let first_text = first_retained_user_text(message);
+        let first_text = parts.iter().find_map(|part| match part {
+            Part::Text(text) => retained_user_text_ref(text),
+            _ => None,
+        });
         if first_text.as_deref().is_some_and(is_clear_metadata_message) {
             return Placement::Control;
         }
@@ -80,12 +78,7 @@ impl MessageOrdinals {
         {
             return Placement::Control;
         }
-
-        let counts = match &message.content {
-            UserContent::String(_) => first_text.is_some(),
-            UserContent::Blocks(blocks) => blocks_count_as_message(blocks),
-        };
-        if !counts {
+        if !parts_count_as_message(parts) {
             return Placement::Control;
         }
 
@@ -93,8 +86,8 @@ impl MessageOrdinals {
         self.next()
     }
 
-    fn place_assistant(&mut self, message: &AssistantMessage) -> Placement {
-        if !self.seen_real_user || !blocks_count_as_message(&message.content) {
+    fn place_assistant(&mut self, message: &Message) -> Placement {
+        if !self.seen_real_user || !parts_count_as_message(&message.parts) {
             return Placement::Control;
         }
         let Some(id) = &message.id else {
@@ -114,14 +107,13 @@ impl MessageOrdinals {
     }
 }
 
-/// Content blocks give a message substance when any carries visible text, a
-/// tool call, a tool result, or non-empty thinking content.
-pub(crate) fn blocks_count_as_message(blocks: &[ContentBlock]) -> bool {
-    blocks.iter().any(|block| match block {
-        ContentBlock::Text { text } => !text.trim().is_empty(),
-        ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => true,
-        ContentBlock::Thinking { thinking, .. } => !thinking.trim().is_empty(),
-        ContentBlock::Image { .. } | ContentBlock::Other => false,
+/// Parts give a message substance when any carries visible text, a tool
+/// call, a tool result, or non-empty thinking content.
+pub(crate) fn parts_count_as_message(parts: &[Part]) -> bool {
+    parts.iter().any(|part| match part {
+        Part::Text(text) | Part::Thinking(text) => !text.trim().is_empty(),
+        Part::ToolCall { .. } | Part::ToolResult { .. } => true,
+        Part::Image | Part::Other => false,
     })
 }
 
@@ -130,16 +122,12 @@ pub(crate) fn retained_user_text(text: String) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
-fn first_retained_user_text(message: &UserMessage) -> Option<String> {
-    match &message.content {
-        UserContent::String(text) => retained_user_text(text.clone()),
-        UserContent::Blocks(blocks) => blocks.iter().find_map(|block| {
-            let ContentBlock::Text { text } = block else {
-                return None;
-            };
-            retained_user_text(text.clone())
-        }),
-    }
+fn retained_user_text_ref(text: &str) -> Option<Cow<'_, str>> {
+    let text = match extract_skill_preview(text) {
+        Some(preview) => Cow::Owned(preview),
+        None => Cow::Borrowed(text),
+    };
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// Detects metadata emitted by the /clear command wrapper messages and other
@@ -193,10 +181,18 @@ pub(crate) fn extract_skill_preview(message: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude::LogEntry;
+    use crate::history::model::Origin;
     use serde_json::json;
 
     fn entry(value: serde_json::Value) -> LogEntry {
         serde_json::from_value(value).expect("valid log entry")
+    }
+
+    fn event(entry: LogEntry) -> Event {
+        let mut records = crate::history::sources::claude::Records::default();
+        records.push(entry, Origin::default());
+        records.events.pop().unwrap()
     }
 
     fn user(text: &str) -> LogEntry {
@@ -216,7 +212,10 @@ mod tests {
 
     fn placements(entries: &[LogEntry]) -> Vec<Placement> {
         let mut ordinals = MessageOrdinals::new();
-        entries.iter().map(|entry| ordinals.place(entry)).collect()
+        entries
+            .iter()
+            .map(|entry| ordinals.place(&event(entry.clone())))
+            .collect()
     }
 
     #[test]
@@ -337,16 +336,15 @@ mod tests {
 
     #[test]
     fn progress_uses_separate_placement() {
-        let progress: AgentProgressData = serde_json::from_value(json!({
+        let progress = entry(json!({"type":"progress","data":{
             "type":"agent_progress","agentId":"a1","message":{
                 "type":"assistant","message":{"role":"assistant","content":[
                     {"type":"text","text":"subagent"}
                 ]}
             }
-        }))
-        .unwrap();
+        }}));
         let mut ordinals = MessageOrdinals::new();
-        assert_eq!(ordinals.place_subagent(&progress), Placement::Message(1));
+        assert_eq!(ordinals.place(&event(progress)), Placement::Message(1));
         assert_eq!(ordinals.count(), 1);
     }
 }

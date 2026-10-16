@@ -3,7 +3,6 @@
 //! This module handles loading conversations from Claude project directories,
 //! both synchronously and via streaming for the TUI.
 
-use super::messages::blocks_count_as_message;
 use super::parser::process_conversation_file;
 use super::path::{
     decode_project_dir_name, decode_project_dir_name_to_path, format_short_name_from_path,
@@ -303,6 +302,16 @@ fn find_empty_transcripts(scope: DeleteEmptyScope) -> Result<Vec<EmptyTranscript
 
     candidates.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(candidates)
+}
+
+fn blocks_count_as_message(blocks: &[crate::claude::ContentBlock]) -> bool {
+    use crate::claude::ContentBlock;
+    blocks.iter().any(|block| match block {
+        ContentBlock::Text { text } => !text.trim().is_empty(),
+        ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => true,
+        ContentBlock::Thinking { thinking, .. } => !thinking.trim().is_empty(),
+        ContentBlock::Image { .. } | ContentBlock::Other => false,
+    })
 }
 
 fn empty_transcript_from_path(path: &Path, project_name: &str) -> Result<Option<EmptyTranscript>> {

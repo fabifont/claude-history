@@ -71,7 +71,7 @@ pub fn is_omp_file(path: &Path) -> bool {
     parse_omp_file(path).ok().flatten().is_some()
 }
 
-fn parse_reader(
+pub(crate) fn parse_reader(
     reader: impl BufRead,
     expected_source: Option<Source>,
 ) -> Result<Option<PiProjection>> {

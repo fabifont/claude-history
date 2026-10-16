@@ -9,7 +9,7 @@
 //! say when it is incomplete: a conversation that a partial or degraded
 //! listing did not report may still exist, and its stored state is kept.
 
-use super::model::{ConversationKey, SourceInstance};
+use super::model::{ConversationKey, SourceInstance, Transcript};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -116,6 +116,10 @@ pub trait Adapter: Send + Sync {
     /// Lists every conversation of the instance, with one `stat` per
     /// artifact. `scan_started` dates the pass for `Stamp::of`.
     fn discover(&self, scan_started: SystemTime) -> Discovery;
+
+    /// Decodes the history `located` selects; `None` when its artifacts
+    /// hold no conversation.
+    fn decode(&self, located: &Located) -> crate::error::Result<Option<Transcript>>;
 }
 
 #[cfg(test)]

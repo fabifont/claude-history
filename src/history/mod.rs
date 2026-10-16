@@ -13,9 +13,9 @@
 //! - `path` - Path encoding/decoding utilities
 
 pub mod adapter;
+pub mod index;
 mod loader;
 mod messages;
-#[allow(dead_code)]
 pub mod model;
 pub mod omp_loader;
 pub mod parser;

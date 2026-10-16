@@ -179,18 +179,6 @@ pub enum ContentBlock {
     Other,
 }
 
-/// Extract only Text blocks (for previews and user-facing display)
-pub fn extract_text_from_blocks(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// Extract Text blocks plus ToolResult content (for search indexing)
 pub fn extract_search_text_from_blocks(blocks: &[ContentBlock]) -> String {
     let mut parts = Vec::new();
@@ -215,26 +203,11 @@ pub fn extract_search_text_from_blocks(blocks: &[ContentBlock]) -> String {
     parts.join(" ")
 }
 
-pub fn extract_text_from_user(message: &UserMessage) -> String {
-    match &message.content {
-        UserContent::String(text) => text.clone(),
-        UserContent::Blocks(blocks) => extract_text_from_blocks(blocks),
-    }
-}
-
 pub fn extract_search_text_from_user(message: &UserMessage) -> String {
     match &message.content {
         UserContent::String(text) => text.clone(),
         UserContent::Blocks(blocks) => extract_search_text_from_blocks(blocks),
     }
-}
-
-pub fn extract_text_from_assistant(message: &AssistantMessage) -> String {
-    extract_text_from_blocks(&message.content)
-}
-
-pub fn extract_search_text_from_assistant(message: &AssistantMessage) -> String {
-    extract_search_text_from_blocks(&message.content)
 }
 
 /// Agent progress data from subagent conversations
@@ -295,20 +268,6 @@ pub fn parse_agent_progress(data: &serde_json::Value) -> Option<AgentProgressDat
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn extract_text_from_blocks_only_text() {
-        let blocks = vec![
-            ContentBlock::Text {
-                text: "hello".into(),
-            },
-            ContentBlock::ToolResult {
-                tool_use_id: "id".into(),
-                content: Some(json!("tool output")),
-            },
-        ];
-        assert_eq!(extract_text_from_blocks(&blocks), "hello");
-    }
 
     #[test]
     fn extract_search_text_includes_tool_result_string() {
@@ -409,9 +368,11 @@ mod tests {
             UserContent::Blocks(blocks) => {
                 assert_eq!(blocks.len(), 2);
                 assert!(matches!(blocks[0], ContentBlock::Other));
+                assert!(
+                    matches!(&blocks[1], ContentBlock::Text { text } if text == "summarize this")
+                );
             }
             other => panic!("expected blocks, got {other:?}"),
         }
-        assert_eq!(extract_text_from_user(&message), "summarize this");
     }
 }

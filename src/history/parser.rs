@@ -1,28 +1,13 @@
-//! JSONL conversation file parsing.
-//!
-//! This module handles parsing Claude conversation JSONL files and extracting
-//! conversation metadata like preview text, message counts, and working directory.
+//! Conversation file parsing: decodes a session file into a transcript and
+//! indexes it into the conversation the list shows.
 
+use super::Conversation;
+use super::index::Skipped;
 #[cfg(test)]
 use super::messages::is_clear_metadata_message;
-use super::messages::{MessageOrdinals, Placement, extract_skill_preview};
-use super::{Conversation, ParseError};
-use crate::agent::refs::MessageRange;
-use crate::agent::transcript::{AgentMessageRole, agent_search_text_from_blocks};
-use crate::claude::{
-    AgentContent, LogEntry, TokenUsage, extract_search_text_from_assistant,
-    extract_search_text_from_user, extract_text_from_assistant, extract_text_from_user,
-    parse_agent_progress,
-};
 use crate::cli::DebugLevel;
 use crate::debug;
 use crate::error::Result;
-use crate::semantic::filter::{SemanticTurnRole, filter_turn};
-use chrono::{DateTime, Local};
-use std::collections::{HashMap, VecDeque};
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -32,7 +17,8 @@ pub fn process_conversation_file(
     modified: Option<SystemTime>,
     debug_level: Option<DebugLevel>,
 ) -> Result<Option<Conversation>> {
-    process_conversation_file_with_source(path, modified, debug_level, None)
+    let transcript = super::sources::decode_path(&path, modified, false)?;
+    Ok(index_transcript(&transcript, debug_level))
 }
 
 pub fn process_omp_conversation_file(
@@ -40,524 +26,79 @@ pub fn process_omp_conversation_file(
     modified: Option<SystemTime>,
     debug_level: Option<DebugLevel>,
 ) -> Result<Option<Conversation>> {
-    process_conversation_file_with_source(path, modified, debug_level, Some(super::Source::Omp))
+    let transcript = super::sources::decode_path(&path, modified, true)?;
+    Ok(index_transcript(&transcript, debug_level))
 }
 
-fn process_conversation_file_with_source(
-    path: PathBuf,
-    modified: Option<SystemTime>,
-    debug_level: Option<DebugLevel>,
-    source: Option<super::Source>,
-) -> Result<Option<Conversation>> {
-    let projection = match source {
-        Some(super::Source::Omp) => super::pi::parse_omp_file(&path)?,
-        _ => super::pi::parse_file(&path)?,
-    };
-    if let Some(projection) = projection {
-        let normalized = projection
-            .entries
-            .iter()
-            .filter_map(|(_, entry)| serde_json::to_string(entry).ok())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut conversation = process_conversation_reader(
-            path.clone(),
-            std::io::Cursor::new(normalized),
-            modified,
-            debug_level,
-        )?;
-        if let Some(conversation) = conversation.as_mut() {
-            conversation.source = projection.source;
-            conversation.session_id = projection.header.id;
-            conversation.cwd = Some(projection.header.cwd.clone());
-            conversation.project_path = Some(projection.header.cwd.clone());
-            conversation.project_name =
-                Some(super::format_short_name_from_path(&projection.header.cwd));
-            conversation
-                .parse_errors
-                .extend(
-                    projection
-                        .malformed_lines
-                        .into_iter()
-                        .map(|line_number| ParseError {
-                            line_number,
-                            line_content: String::new(),
-                            error_message: format!(
-                                "malformed {} JSONL record",
-                                projection.source.label()
-                            ),
-                            context_before: Vec::new(),
-                            context_after: Vec::new(),
-                        }),
-                );
-            conversation.timestamp = latest_activity_timestamp(&projection.entries)
-                .or_else(|| {
-                    DateTime::parse_from_rfc3339(&projection.header.timestamp)
-                        .ok()
-                        .map(|timestamp| timestamp.with_timezone(&Local))
-                })
-                .or_else(|| modified.map(DateTime::<Local>::from))
-                .unwrap_or_else(Local::now);
-        }
-        return Ok(conversation);
-    }
-
-    let file = File::open(&path)?;
-    let reader = BufReader::new(file);
-    process_conversation_reader(path, reader, modified, debug_level)
-}
-
-fn latest_activity_timestamp(entries: &[(usize, LogEntry)]) -> Option<DateTime<Local>> {
-    entries
-        .iter()
-        .filter_map(|(_, entry)| match entry {
-            LogEntry::User { timestamp, .. } | LogEntry::Assistant { timestamp, .. } => {
-                timestamp.as_deref()
-            }
-            _ => None,
-        })
-        .filter_map(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
-        .map(|timestamp| timestamp.with_timezone(&Local))
-        .max()
-}
-
-/// Process a conversation from any BufRead source (for testability)
-pub fn process_conversation_reader<R: BufRead>(
+/// Process a Claude conversation from any BufRead source (for testability)
+#[cfg(test)]
+pub fn process_conversation_reader<R: std::io::BufRead>(
     path: PathBuf,
     reader: R,
     modified: Option<SystemTime>,
     debug_level: Option<DebugLevel>,
 ) -> Result<Option<Conversation>> {
-    let filename = path
+    let key = super::model::ConversationKey {
+        instance: super::model::SourceInstance {
+            kind: super::Source::Claude,
+            root: PathBuf::new(),
+        },
+        native_id: path.to_string_lossy().into_owned(),
+    };
+    let transcript = super::sources::claude::decode_reader(key, &path, reader, modified)?;
+    Ok(index_transcript(&transcript, debug_level))
+}
+
+/// Indexes `transcript`, logging its parse errors and why it was skipped.
+/// Claude conversations are left without a project: callers list them under
+/// the project directory they found the file in.
+pub(crate) fn index_transcript(
+    transcript: &super::model::Transcript,
+    debug_level: Option<DebugLevel>,
+) -> Option<Conversation> {
+    let filename = transcript
+        .path()
         .file_name()
         .and_then(|f| f.to_str())
         .unwrap_or("unknown");
-
-    // Stream lines with a sliding window for parse error context.
-    // A VecDeque lookahead holds the current line + up to 2 context_after lines,
-    // and a context_before deque holds the last 2 lines for error diagnostics.
-    let mut lines_iter = reader.lines();
-    let mut context_window: VecDeque<String> = VecDeque::with_capacity(2);
-    let mut context_before: VecDeque<String> = VecDeque::with_capacity(2);
-
-    // Pre-fill the lookahead window (current line + 1 lookahead;
-    // a second lookahead line is added when the current line is popped)
-    for _ in 0..2 {
-        match lines_iter.next() {
-            Some(Ok(line)) => context_window.push_back(line),
-            Some(Err(e)) => return Err(e.into()),
-            None => break,
-        }
-    }
-
-    let mut all_parts = Vec::new();
-    let mut agent_search_parts = Vec::new();
-    let mut semantic_turns = Vec::new();
-    let mut semantic_turn_ranges = Vec::new();
-    let mut preview_parts = Vec::new();
-    let mut user_messages = Vec::new();
-    let mut extracted_cwd: Option<PathBuf> = None;
-    let mut ordinals = MessageOrdinals::new();
-    let mut parse_errors: Vec<ParseError> = Vec::new();
-    let mut extracted_summary: Option<String> = None;
-    let mut extracted_custom_title: Option<String> = None;
-    let mut extracted_model: Option<String> = None;
-    // Track token usage per message ID to avoid double-counting streaming entries
-    let mut token_usage_by_msg: HashMap<String, TokenUsage> = HashMap::new();
-    let mut assistant_id_semantic_indices: HashMap<String, usize> = HashMap::new();
-    let mut assistant_id_preview_indices: HashMap<String, usize> = HashMap::new();
-    let mut anonymous_token_count: u64 = 0;
-    // Track first and last message timestamps for conversation duration
-    let mut first_timestamp: Option<chrono::DateTime<chrono::FixedOffset>> = None;
-    let mut last_timestamp: Option<chrono::DateTime<chrono::FixedOffset>> = None;
-
-    let mut line_idx: usize = 0;
-
-    while let Some(line) = context_window.pop_front() {
-        // Top up the lookahead window from the iterator
-        match lines_iter.next() {
-            Some(Ok(next_line)) => context_window.push_back(next_line),
-            Some(Err(e)) => return Err(e.into()),
-            None => {}
-        }
-
-        if line.trim().is_empty() {
-            // Blank lines participate in context buffers but are not parsed
-            context_before.push_back(line);
-            if context_before.len() > 2 {
-                context_before.pop_front();
-            }
-            line_idx += 1;
-            continue;
-        }
-
-        match serde_json::from_str::<LogEntry>(&line) {
-            Ok(entry) => {
-                let placement = ordinals.place(&entry);
-                match entry {
-                    LogEntry::User {
-                        message,
-                        cwd,
-                        timestamp,
-                        usage,
-                        ..
-                    } => {
-                        if let Some(usage) = usage {
-                            anonymous_token_count += usage.input_tokens
-                                + usage.output_tokens
-                                + usage.cache_creation_input_tokens
-                                + usage.cache_read_input_tokens;
-                        }
-                        // Track timestamps for conversation duration
-                        if let Some(ref ts_str) = timestamp
-                            && let Ok(ts) = chrono::DateTime::parse_from_rfc3339(ts_str)
-                        {
-                            if first_timestamp.is_none() {
-                                first_timestamp = Some(ts);
-                            }
-                            last_timestamp = Some(ts);
-                        }
-
-                        // Extract cwd from the first user message that has it
-                        if extracted_cwd.is_none()
-                            && let Some(cwd_str) = cwd
-                        {
-                            extracted_cwd = Some(PathBuf::from(cwd_str));
-                        }
-
-                        let preview_text = extract_text_from_user(&message);
-                        let search_text = extract_search_text_from_user(&message);
-
-                        if !preview_text.is_empty() {
-                            user_messages.push(preview_text.clone());
-                        }
-                        if !search_text.is_empty() {
-                            all_parts.push(search_text);
-                        }
-
-                        let Placement::Message(ordinal) = placement else {
-                            continue;
-                        };
-                        // Check for skill invocations first - extract clean preview
-                        // (e.g. "/consult how to do X?" from command XML tags)
-                        let semantic_input = preview_text.clone();
-                        let effective_preview =
-                            extract_skill_preview(&preview_text).unwrap_or(preview_text);
-                        if !effective_preview.is_empty() {
-                            if let Some(turn) = filter_turn(SemanticTurnRole::User, &semantic_input)
-                            {
-                                semantic_turns.push(turn);
-                                semantic_turn_ranges.push(MessageRange::single(ordinal));
-                            }
-                            preview_parts.push(effective_preview);
-                        }
-                    }
-                    LogEntry::Assistant {
-                        message, timestamp, ..
-                    } => {
-                        let assistant_message_id = message.id.clone();
-                        // Track timestamps for conversation duration
-                        if let Some(ref ts_str) = timestamp
-                            && let Ok(ts) = chrono::DateTime::parse_from_rfc3339(ts_str)
-                        {
-                            if first_timestamp.is_none() {
-                                first_timestamp = Some(ts);
-                            }
-                            last_timestamp = Some(ts);
-                        }
-
-                        // Extract model name from first assistant message that has it
-                        if extracted_model.is_none()
-                            && let Some(model) = &message.model
-                        {
-                            extracted_model = Some(model.clone());
-                        }
-
-                        // Track token usage by message ID to avoid double-counting
-                        // Multiple JSONL entries can exist for the same message (streaming)
-                        if let Some(usage) = &message.usage {
-                            if let Some(msg_id) = &message.id {
-                                // Store/update usage for this message ID (last one wins)
-                                token_usage_by_msg.insert(msg_id.clone(), usage.clone());
-                            } else {
-                                // No message ID - accumulate directly (legacy format)
-                                anonymous_token_count += usage.input_tokens
-                                    + usage.output_tokens
-                                    + usage.cache_creation_input_tokens
-                                    + usage.cache_read_input_tokens;
-                            }
-                        }
-
-                        let preview_text = extract_text_from_assistant(&message);
-                        let search_text = extract_search_text_from_assistant(&message);
-
-                        if !search_text.is_empty() {
-                            all_parts.push(search_text);
-                        }
-
-                        if let Placement::Message(ordinal) | Placement::Replaces(ordinal) =
-                            placement
-                        {
-                            let message_range = MessageRange::single(ordinal);
-                            let semantic_turn =
-                                filter_turn(SemanticTurnRole::Assistant, &preview_text);
-                            if let Some(id) = assistant_message_id.as_ref() {
-                                if let Some(existing_index) =
-                                    assistant_id_semantic_indices.get(id).copied()
-                                {
-                                    if let Some(turn) = semantic_turn {
-                                        semantic_turns[existing_index] = turn;
-                                        semantic_turn_ranges[existing_index] = message_range;
-                                    } else {
-                                        semantic_turns[existing_index].clear();
-                                    }
-                                } else if let Some(turn) = semantic_turn {
-                                    assistant_id_semantic_indices
-                                        .insert(id.clone(), semantic_turns.len());
-                                    semantic_turns.push(turn);
-                                    semantic_turn_ranges.push(message_range);
-                                }
-
-                                if !preview_text.is_empty() {
-                                    if let Some(existing_index) =
-                                        assistant_id_preview_indices.get(id).copied()
-                                    {
-                                        preview_parts[existing_index] = preview_text;
-                                    } else {
-                                        assistant_id_preview_indices
-                                            .insert(id.clone(), preview_parts.len());
-                                        preview_parts.push(preview_text);
-                                    }
-                                }
-                            } else if !preview_text.is_empty() {
-                                if let Some(turn) = semantic_turn {
-                                    semantic_turns.push(turn);
-                                    semantic_turn_ranges.push(message_range);
-                                }
-                                preview_parts.push(preview_text);
-                            }
-                        }
-                    }
-                    LogEntry::Summary { summary } => {
-                        if extracted_summary.is_none() {
-                            extracted_summary = Some(summary.clone());
-                        }
-                    }
-                    LogEntry::AiTitle { ai_title } => {
-                        let trimmed = ai_title.trim();
-                        if !trimmed.is_empty() {
-                            extracted_summary = Some(trimmed.to_owned());
-                        }
-                    }
-                    LogEntry::CustomTitle { custom_title } => {
-                        let trimmed = custom_title.trim();
-                        extracted_custom_title = if trimmed.is_empty() {
-                            None
-                        } else {
-                            Some(trimmed.to_owned())
-                        };
-                    }
-                    LogEntry::PiMetadata {
-                        label,
-                        text,
-                        searchable: _,
-                        usage,
-                        ..
-                    } => {
-                        if let Some(usage) = usage {
-                            anonymous_token_count += usage.input_tokens
-                                + usage.output_tokens
-                                + usage.cache_creation_input_tokens
-                                + usage.cache_read_input_tokens;
-                        }
-                        if label == "Model" && !text.is_empty() {
-                            extracted_model = Some(text.clone());
-                        }
-                        if let Placement::Message(ordinal) = placement
-                            && !text.is_empty()
-                        {
-                            all_parts.push(text.clone());
-                            if let Some(turn) = filter_turn(SemanticTurnRole::User, &text) {
-                                semantic_turns.push(turn);
-                                semantic_turn_ranges.push(MessageRange::single(ordinal));
-                            }
-                        }
-                    }
-                    LogEntry::Progress { data, .. } => {
-                        if let Some(progress) = parse_agent_progress(&data) {
-                            let progress_placement = ordinals.place_subagent(&progress);
-                            if let Placement::Message(_) = progress_placement {
-                                let AgentContent::Blocks(blocks) = progress.message.message.content;
-                                let role = match progress.message.message_type.as_str() {
-                                    "user" => AgentMessageRole::User,
-                                    "assistant" => AgentMessageRole::Assistant,
-                                    _ => unreachable!("progress placement was checked above"),
-                                };
-                                let agent_search_text =
-                                    agent_search_text_from_blocks(role, &blocks);
-                                if !agent_search_text.is_empty() {
-                                    agent_search_parts.push(agent_search_text);
-                                }
-                            }
-                        }
-                    }
-                    LogEntry::AgentName { .. } => {}
-                    LogEntry::System { .. } => {}
-                    _ => {}
-                }
-            }
-            Err(e) => {
-                // Capture parse error with surrounding context from the sliding window
-                parse_errors.push(ParseError {
-                    line_number: line_idx + 1, // 1-indexed for display
-                    line_content: line.clone(),
-                    error_message: e.to_string(),
-                    context_before: context_before.iter().cloned().collect(),
-                    context_after: context_window.iter().cloned().collect(),
-                });
-
-                debug::warn(
-                    debug_level,
-                    &format!(
-                        "Parse error in {} at line {}: {}",
-                        filename,
-                        line_idx + 1,
-                        e
-                    ),
-                );
-            }
-        }
-
-        // Update the trailing context window
-        context_before.push_back(line);
-        if context_before.len() > 2 {
-            context_before.pop_front();
-        }
-        line_idx += 1;
-    }
-
-    // Check if this is a clear-only conversation or if preview is empty after filtering
-    if is_clear_only_conversation(&user_messages) {
-        debug::debug(
-            debug_level,
-            &format!("Filtered {}: clear-only conversation", filename),
-        );
-        return Ok(None);
-    }
-
-    if all_parts.is_empty() || preview_parts.is_empty() {
-        debug::debug(
+    for error in &transcript.diagnostics {
+        debug::warn(
             debug_level,
             &format!(
-                "Filtered {}: empty conversation (all_parts={}, preview_parts={})",
-                filename,
-                all_parts.len(),
-                preview_parts.len()
+                "Parse error in {} at line {}: {}",
+                filename, error.line_number, error.error_message
             ),
         );
-        return Ok(None);
     }
-
-    // Use file modification time, falling back to current time if unavailable
-    let timestamp = modified
-        .map(DateTime::<Local>::from)
-        .unwrap_or_else(Local::now);
-
-    // Create both preview variants (first and last 3 messages)
-    // Skip leading assistant messages by using preview_parts instead of all_parts
-    let preview_first = preview_parts
-        .iter()
-        .take(3)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ... ");
-    let preview_last = preview_parts
-        .iter()
-        .rev()
-        .take(3)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ... ");
-
-    // Create full text for searching (all messages + summary + custom title)
-    let mut full_text = all_parts.join(" ");
-    if let Some(ref summary) = extracted_summary {
-        full_text = format!("{} {}", summary, full_text);
-    }
-    if let Some(ref custom_title) = extracted_custom_title {
-        full_text = format!("{} {}", custom_title, full_text);
-    }
-
-    // Normalize whitespace
-    let preview_first: std::sync::Arc<str> = normalize_whitespace(&preview_first).into();
-    let preview_last = normalize_whitespace(&preview_last);
-    let full_text = normalize_whitespace(&full_text);
-    let agent_search_text = normalize_whitespace(&agent_search_parts.join(" "));
-    let semantic_route_text = super::semantic_route_text(&full_text, &agent_search_text);
-
-    let semantic_pairs = semantic_turns
-        .into_iter()
-        .zip(semantic_turn_ranges)
-        .filter(|(turn, _)| !turn.is_empty())
-        .collect::<Vec<_>>();
-    let (semantic_turns, semantic_turn_ranges): (Vec<_>, Vec<_>) =
-        semantic_pairs.into_iter().unzip();
-
-    // Sum token usage from deduplicated messages (all token types)
-    let total_tokens: u64 = token_usage_by_msg
-        .values()
-        .map(|u| {
-            u.input_tokens
-                + u.output_tokens
-                + u.cache_creation_input_tokens
-                + u.cache_read_input_tokens
-        })
-        .sum::<u64>()
-        + anonymous_token_count;
-
-    // Calculate conversation duration in minutes
-    let duration_minutes = match (first_timestamp, last_timestamp) {
-        (Some(first), Some(last)) => {
-            let duration = last.signed_duration_since(first);
-            let minutes = duration.num_minutes();
-            if minutes > 0 {
-                Some(minutes as u64)
-            } else {
-                None
+    match super::index::index(transcript) {
+        Ok(mut conversation) => {
+            if conversation.source == super::Source::Claude {
+                conversation.project_name = None;
+                conversation.project_path = None;
             }
+            Some(conversation)
         }
-        _ => None,
-    };
-
-    Ok(Some(Conversation {
-        source: super::Source::Claude,
-        session_id: path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_owned(),
-        path,
-        index: 0,
-        timestamp,
-        preview: preview_first.clone(),
-        preview_first,
-        preview_last: preview_last.into(),
-        full_text: full_text.into(),
-        agent_search_text: agent_search_text.into(),
-        semantic_route_text: semantic_route_text.into(),
-        semantic_turns: semantic_turns.into(),
-        semantic_turn_ranges,
-        project_name: None,
-        project_path: None,
-        cwd: extracted_cwd,
-        message_count: ordinals.count(),
-        parse_errors,
-        summary: extracted_summary,
-        custom_title: extracted_custom_title,
-        model: extracted_model,
-        total_tokens,
-        duration_minutes,
-    }))
+        Err(Skipped::ClearOnly) => {
+            debug::debug(
+                debug_level,
+                &format!("Filtered {}: clear-only conversation", filename),
+            );
+            None
+        }
+        Err(Skipped::Empty {
+            search_parts,
+            preview_parts,
+        }) => {
+            debug::debug(
+                debug_level,
+                &format!(
+                    "Filtered {}: empty conversation (all_parts={}, preview_parts={})",
+                    filename, search_parts, preview_parts
+                ),
+            );
+            None
+        }
+    }
 }
 
 pub(crate) fn is_clear_only_conversation(user_messages: &[String]) -> bool {
@@ -608,8 +149,10 @@ pub(crate) fn normalize_whitespace(s: &str) -> String {
 /// Truncate a string to at most `max` bytes, on a char boundary
 #[cfg(test)]
 mod tests {
+    use super::super::messages::extract_skill_preview;
     use super::*;
-    use crate::agent::transcript::AgentTranscript;
+    use crate::agent::refs::MessageRange;
+    use crate::agent::transcript::{AgentMessageRole, AgentTranscript};
     use std::io::Cursor;
 
     /// Helper to create a user message JSON line
@@ -868,6 +411,22 @@ mod tests {
             2,
             "context_after should have at most 2 lines"
         );
+    }
+
+    #[test]
+    fn parse_errors_after_filtered_user_records_keep_their_line() {
+        let content = [
+            user_msg("Warmup", None),
+            "invalid json".to_string(),
+            user_msg("Question", None),
+            assistant_msg("Answer"),
+        ]
+        .join("\n");
+
+        let conv = parse_jsonl(&content).unwrap().unwrap();
+        assert_eq!(conv.parse_errors.len(), 1);
+        assert_eq!(conv.parse_errors[0].line_number, 2);
+        assert_eq!(conv.parse_errors[0].context_before.len(), 1);
     }
 
     // === Preview order ===

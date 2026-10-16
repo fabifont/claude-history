@@ -83,6 +83,7 @@ impl Revision {
 
 /// How the history was chosen among the source's candidates for the
 /// conversation.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeadStatus {
     /// The source names this history as the current one.
@@ -94,6 +95,7 @@ pub enum HeadStatus {
     Orphaned,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecutionMode {
     Interactive,
@@ -102,6 +104,7 @@ pub enum ExecutionMode {
     Unknown,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Relationship {
     Root,
@@ -140,6 +143,7 @@ pub enum Role {
 }
 
 /// Who an event is meant for.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Visibility {
     /// Part of the conversation.
@@ -260,6 +264,7 @@ pub struct SessionMeta {
 }
 
 /// The selected history of one conversation.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Transcript {
     pub key: ConversationKey,

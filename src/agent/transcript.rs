@@ -2,15 +2,11 @@ use crate::agent::diagnostic::{AgentError, AgentErrorKind};
 use crate::agent::refs::ResolvedConversation;
 use crate::agent::sanitize::sanitize_agent_text;
 use crate::agent::visibility::ContentVisibility;
-use crate::claude::{
-    AgentContent, AgentMessage as ProgressMessage, AgentProgressData, AssistantMessage,
-    ContentBlock, LogEntry, UserContent, UserMessage, parse_agent_progress,
-};
 use crate::error::Result;
+use crate::history::model::{EventKind, Message, Part, Role, TitleKind, Transcript, Visibility};
 use crate::history::{MessageOrdinals, Placement, extract_skill_preview, retained_user_text};
+use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -26,7 +22,7 @@ pub struct AgentTranscript {
 pub struct AgentMessage {
     pub ordinal: usize,
     pub role: AgentMessageRole,
-    pub timestamp: Option<String>,
+    pub timestamp: Option<DateTime<Utc>>,
     pub jsonl_line: usize,
     pub assistant_message_id: Option<String>,
     pub parent_tool_use_id: Option<String>,
@@ -65,7 +61,7 @@ pub enum AgentMessagePart {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentPartSource {
     pub role: AgentMessageRole,
-    pub timestamp: Option<String>,
+    pub timestamp: Option<DateTime<Utc>>,
     pub jsonl_line: usize,
     pub part_index: usize,
     pub assistant_message_id: Option<String>,
@@ -76,99 +72,42 @@ pub struct AgentPartSource {
 impl AgentTranscript {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let reference = path.to_string_lossy();
-        if let Some(projection) = crate::history::pi::parse_file(path).map_err(|error| {
-            AgentError::malformed_transcript(Some(&reference), error.to_string())
-        })? {
-            let normalized = projection
-                .entries
-                .iter()
-                .filter_map(|(_, entry)| serde_json::to_string(entry).ok())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let mut transcript =
-                Self::from_reader(path.to_path_buf(), std::io::Cursor::new(normalized))?;
-            transcript.malformed_lines = projection.malformed_lines;
-            return Ok(transcript);
-        }
-        let file = File::open(path).map_err(|error| {
-            AgentError::io(
-                Some(&reference),
-                format!("failed to open transcript: {error}"),
-            )
-        })?;
-        Self::from_reader(path.to_path_buf(), BufReader::new(file)).map_err(|error| match error {
-            crate::error::AppError::Io(error) => AgentError::io(
-                Some(&reference),
-                format!("failed to read transcript: {error}"),
-            )
-            .into(),
-            crate::error::AppError::Json(error) => AgentError::malformed_transcript(
-                Some(&reference),
-                format!("failed to parse transcript JSONL: {error}"),
-            )
-            .into(),
-            error => error,
-        })
+        let transcript =
+            crate::history::sources::decode_path(path, None, false).map_err(|error| {
+                AgentError::malformed_transcript(Some(&path.to_string_lossy()), error.to_string())
+            })?;
+        Self::from_transcript(&transcript)
     }
 
-    pub(crate) fn from_reader(path: PathBuf, reader: impl BufRead) -> Result<Self> {
+    #[cfg(test)]
+    pub(crate) fn from_reader(path: PathBuf, reader: impl std::io::BufRead) -> Result<Self> {
+        let transcript = crate::history::sources::claude::decode_test_reader(&path, reader)?;
+        Self::from_transcript(&transcript)
+    }
+
+    pub(crate) fn from_transcript(transcript: &Transcript) -> Result<Self> {
+        let path = transcript.path().to_path_buf();
         let mut messages = Vec::new();
-        let mut malformed_lines = Vec::new();
-        let mut valid_records = 0usize;
         let mut summary = None;
         let mut custom_title = None;
         let mut ordinals = MessageOrdinals::new();
-        for (line_index, line) in reader.lines().enumerate() {
-            let line = line?;
-            if line.trim().is_empty() {
+        for event in &transcript.events {
+            if event.visibility != Visibility::Dialogue {
                 continue;
             }
-            let jsonl_line = line_index + 1;
-            let entry = match serde_json::from_str::<LogEntry>(&line) {
-                Ok(entry) => {
-                    valid_records += 1;
-                    entry
-                }
-                Err(_) => {
-                    malformed_lines.push(jsonl_line);
-                    continue;
-                }
-            };
-            let placement = ordinals.place(&entry);
-            match entry {
-                LogEntry::User {
-                    message,
-                    timestamp,
-                    parent_tool_use_id,
-                    ..
-                } => {
-                    let Placement::Message(ordinal) = placement else {
-                        continue;
-                    };
-                    messages.push(user_message_to_agent(
-                        message,
-                        timestamp,
-                        jsonl_line,
-                        parent_tool_use_id,
-                        ordinal,
-                    ));
-                }
-                LogEntry::Assistant {
-                    message,
-                    timestamp,
-                    parent_tool_use_id,
-                    ..
-                } => {
+            let placement = ordinals.place(event);
+            let jsonl_line = event.origin.line as usize;
+            match &event.kind {
+                EventKind::Message(message) => {
                     let ordinal = match placement {
                         Placement::Message(ordinal) | Placement::Replaces(ordinal) => ordinal,
                         Placement::Control => continue,
                     };
-                    let agent_message = assistant_message_to_agent(
+                    let agent_message = message_to_agent(
                         message,
-                        timestamp,
+                        event.timestamp,
                         jsonl_line,
-                        parent_tool_use_id,
+                        message.parent_tool_use_id.clone(),
                         ordinal,
                     );
                     match placement {
@@ -178,15 +117,10 @@ impl AgentTranscript {
                                 *existing = agent_message;
                             }
                         }
-                        Placement::Control => unreachable!("assistant placement was matched above"),
+                        Placement::Control => unreachable!("message placement was matched above"),
                     }
                 }
-                LogEntry::PiMetadata {
-                    label,
-                    text,
-                    timestamp,
-                    ..
-                } => {
+                EventKind::Note { label, text, .. } => {
                     let Placement::Message(ordinal) = placement else {
                         continue;
                     };
@@ -198,7 +132,7 @@ impl AgentTranscript {
                     messages.push(AgentMessage {
                         ordinal,
                         role: AgentMessageRole::User,
-                        timestamp: timestamp.clone(),
+                        timestamp: event.timestamp,
                         jsonl_line,
                         assistant_message_id: None,
                         parent_tool_use_id: None,
@@ -206,7 +140,7 @@ impl AgentTranscript {
                             text: rendered,
                             source: AgentPartSource {
                                 role: AgentMessageRole::User,
-                                timestamp,
+                                timestamp: event.timestamp,
                                 jsonl_line,
                                 part_index: 0,
                                 assistant_message_id: None,
@@ -216,33 +150,33 @@ impl AgentTranscript {
                         }],
                     });
                 }
-                LogEntry::Progress { data, .. } => {
-                    if let Some(progress) = parse_agent_progress(&data)
-                        && let Placement::Message(ordinal) = ordinals.place_subagent(&progress)
-                    {
-                        messages.push(progress_message_to_agent(progress, jsonl_line, ordinal));
+                EventKind::Subagent { agent_id, message } => {
+                    if let Placement::Message(ordinal) = placement {
+                        messages.push(message_to_agent(
+                            message,
+                            None,
+                            jsonl_line,
+                            Some(agent_id.clone()),
+                            ordinal,
+                        ));
                     }
                 }
-                LogEntry::Summary { summary: value } => {
-                    if summary.is_none() && !value.trim().is_empty() {
-                        summary = Some(value);
+                EventKind::Title { kind, text } => match kind {
+                    TitleKind::Summary => {
+                        if summary.is_none() && !text.trim().is_empty() {
+                            summary = Some(text.clone());
+                        }
                     }
-                }
-                LogEntry::AiTitle { ai_title } => {
-                    if !ai_title.trim().is_empty() {
-                        summary = Some(ai_title);
+                    TitleKind::Generated => {
+                        if !text.trim().is_empty() {
+                            summary = Some(text.clone());
+                        }
                     }
-                }
-                LogEntry::CustomTitle {
-                    custom_title: value,
-                } => {
-                    custom_title = (!value.trim().is_empty()).then_some(value);
-                }
-                LogEntry::FileHistorySnapshot { .. }
-                | LogEntry::System { .. }
-                | LogEntry::AgentName { .. }
-                | LogEntry::PermissionMode { .. }
-                | LogEntry::Unknown => {}
+                    TitleKind::Custom => {
+                        custom_title = (!text.trim().is_empty()).then(|| text.clone());
+                    }
+                },
+                EventKind::Other => {}
             }
         }
 
@@ -254,7 +188,12 @@ impl AgentTranscript {
                 .all(|(index, message)| message.ordinal == index + 1)
         );
 
-        if valid_records == 0 && !malformed_lines.is_empty() {
+        let malformed_lines = transcript
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.line_number)
+            .collect::<Vec<_>>();
+        if transcript.records == 0 && !malformed_lines.is_empty() {
             return Err(AgentError::malformed_transcript(
                 Some(&path.to_string_lossy()),
                 format!(
@@ -394,71 +333,29 @@ fn line_number_list(lines: &[usize]) -> String {
     output
 }
 
-fn user_message_to_agent(
-    message: UserMessage,
-    timestamp: Option<String>,
+fn message_to_agent(
+    message: &Message,
+    timestamp: Option<DateTime<Utc>>,
     jsonl_line: usize,
     parent_tool_use_id: Option<String>,
     ordinal: usize,
 ) -> AgentMessage {
-    let parts = match message.content {
-        UserContent::String(text) => {
-            if let Some(text) = retained_user_text(text) {
-                vec![AgentMessagePart::Text {
-                    text,
-                    source: source(
-                        AgentMessageRole::User,
-                        timestamp.clone(),
-                        jsonl_line,
-                        0,
-                        None,
-                        parent_tool_use_id.clone(),
-                        None,
-                    ),
-                }]
-            } else {
-                Vec::new()
-            }
-        }
-        UserContent::Blocks(blocks) => blocks_to_parts(
-            AgentMessageRole::User,
-            blocks,
-            timestamp.clone(),
-            jsonl_line,
-            None,
-            parent_tool_use_id.clone(),
-        ),
+    let role = match message.role {
+        Role::User => AgentMessageRole::User,
+        Role::Assistant => AgentMessageRole::Assistant,
     };
-    AgentMessage {
-        ordinal,
-        role: AgentMessageRole::User,
+    let assistant_message_id = message.id.clone();
+    let parts = parts_to_agent(
+        role,
+        &message.parts,
         timestamp,
-        jsonl_line,
-        assistant_message_id: None,
-        parent_tool_use_id,
-        parts,
-    }
-}
-
-fn assistant_message_to_agent(
-    message: AssistantMessage,
-    timestamp: Option<String>,
-    jsonl_line: usize,
-    parent_tool_use_id: Option<String>,
-    ordinal: usize,
-) -> AgentMessage {
-    let assistant_message_id = message.id;
-    let parts = blocks_to_parts(
-        AgentMessageRole::Assistant,
-        message.content,
-        timestamp.clone(),
         jsonl_line,
         assistant_message_id.clone(),
         parent_tool_use_id.clone(),
     );
     AgentMessage {
         ordinal,
-        role: AgentMessageRole::Assistant,
+        role,
         timestamp,
         jsonl_line,
         assistant_message_id,
@@ -467,114 +364,56 @@ fn assistant_message_to_agent(
     }
 }
 
-fn progress_message_to_agent(
-    progress: AgentProgressData,
-    jsonl_line: usize,
-    ordinal: usize,
-) -> AgentMessage {
-    let role = match progress.message.message_type.as_str() {
-        "user" => AgentMessageRole::User,
-        "assistant" => AgentMessageRole::Assistant,
-        _ => unreachable!("progress placement was checked above"),
-    };
-    let ProgressMessage { message, .. } = progress.message;
-    let AgentContent::Blocks(blocks) = message.content;
-    let parent_tool_use_id = Some(progress.agent_id);
-    let parts = blocks_to_parts(
-        role,
-        blocks,
-        None,
-        jsonl_line,
-        None,
-        parent_tool_use_id.clone(),
-    );
-    AgentMessage {
-        ordinal,
-        role,
-        timestamp: None,
-        jsonl_line,
-        assistant_message_id: None,
-        parent_tool_use_id,
-        parts,
-    }
-}
-
-fn blocks_to_parts(
+fn parts_to_agent(
     role: AgentMessageRole,
-    blocks: Vec<ContentBlock>,
-    timestamp: Option<String>,
+    parts: &[Part],
+    timestamp: Option<DateTime<Utc>>,
     jsonl_line: usize,
     assistant_message_id: Option<String>,
     parent_tool_use_id: Option<String>,
 ) -> Vec<AgentMessagePart> {
-    blocks
-        .into_iter()
+    let source = |part_index, tool_name| AgentPartSource {
+        role,
+        timestamp,
+        jsonl_line,
+        part_index,
+        assistant_message_id: assistant_message_id.clone(),
+        parent_tool_use_id: parent_tool_use_id.clone(),
+        tool_name,
+    };
+    parts
+        .iter()
         .enumerate()
-        .filter_map(|(part_index, block)| match block {
-            ContentBlock::Text { text } => {
+        .filter_map(|(part_index, part)| match part {
+            Part::Text(text) => {
                 let text = if role == AgentMessageRole::User {
-                    retained_user_text(text)
+                    retained_user_text(text.clone())
                 } else {
-                    (!text.trim().is_empty()).then_some(text)
+                    (!text.trim().is_empty()).then(|| text.clone())
                 }?;
                 Some(AgentMessagePart::Text {
                     text,
-                    source: source(
-                        role,
-                        timestamp.clone(),
-                        jsonl_line,
-                        part_index,
-                        assistant_message_id.clone(),
-                        parent_tool_use_id.clone(),
-                        None,
-                    ),
+                    source: source(part_index, None),
                 })
             }
-            ContentBlock::ToolUse { id, name, input } => Some(AgentMessagePart::ToolUse {
-                id,
+            Part::ToolCall { id, name, input } => Some(AgentMessagePart::ToolUse {
+                id: id.clone(),
                 name: name.clone(),
-                input,
-                source: source(
-                    role,
-                    timestamp.clone(),
-                    jsonl_line,
-                    part_index,
-                    assistant_message_id.clone(),
-                    parent_tool_use_id.clone(),
-                    Some(name),
-                ),
+                input: input.clone(),
+                source: source(part_index, Some(name.clone())),
             }),
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-            } => Some(AgentMessagePart::ToolResult {
-                tool_use_id,
-                content,
-                source: source(
-                    role,
-                    timestamp.clone(),
-                    jsonl_line,
-                    part_index,
-                    assistant_message_id.clone(),
-                    parent_tool_use_id.clone(),
-                    None,
-                ),
+            Part::ToolResult { call_id, output } => Some(AgentMessagePart::ToolResult {
+                tool_use_id: call_id.clone(),
+                content: output.clone(),
+                source: source(part_index, None),
             }),
-            ContentBlock::Thinking { thinking, .. } => {
+            Part::Thinking(thinking) => {
                 (!thinking.trim().is_empty()).then(|| AgentMessagePart::Thinking {
-                    thinking,
-                    source: source(
-                        role,
-                        timestamp.clone(),
-                        jsonl_line,
-                        part_index,
-                        assistant_message_id.clone(),
-                        parent_tool_use_id.clone(),
-                        None,
-                    ),
+                    thinking: thinking.clone(),
+                    source: source(part_index, None),
                 })
             }
-            ContentBlock::Image { .. } | ContentBlock::Other => None,
+            Part::Image | Part::Other => None,
         })
         .collect()
 }
@@ -598,21 +437,18 @@ pub(crate) fn agent_part_search_text(part: &AgentMessagePart) -> Option<String> 
 
 pub(crate) const MAX_AGENT_SEGMENT_CHARS: usize = 16 * 1024;
 
-pub(crate) fn agent_search_text_from_blocks(
-    role: AgentMessageRole,
-    blocks: &[ContentBlock],
-) -> String {
-    let mut acc = BoundedHeadTail::new(MAX_AGENT_SEGMENT_CHARS * blocks.len().max(1));
+pub(crate) fn agent_search_text_from_parts(role: AgentMessageRole, parts: &[Part]) -> String {
+    let mut acc = BoundedHeadTail::new(MAX_AGENT_SEGMENT_CHARS * parts.len().max(1));
     let visibility = ContentVisibility::SEARCH;
-    for block in blocks {
-        let visible = match block {
-            ContentBlock::Text { .. } => true,
-            ContentBlock::ToolUse { .. } => visibility.tools,
-            ContentBlock::ToolResult { .. } => visibility.tool_results,
-            ContentBlock::Thinking { .. } => visibility.thinking,
-            ContentBlock::Image { .. } | ContentBlock::Other => false,
+    for part in parts {
+        let visible = match part {
+            Part::Text(_) => true,
+            Part::ToolCall { .. } => visibility.tools,
+            Part::ToolResult { .. } => visibility.tool_results,
+            Part::Thinking(_) => visibility.thinking,
+            Part::Image | Part::Other => false,
         };
-        if visible && let Some(text) = agent_search_text_from_block(role, block) {
+        if visible && let Some(text) = agent_search_text_from_part(role, part) {
             acc.push_separator(' ');
             acc.push_str(&sanitize_agent_text(&text));
         }
@@ -620,9 +456,9 @@ pub(crate) fn agent_search_text_from_blocks(
     acc.finish()
 }
 
-fn agent_search_text_from_block(role: AgentMessageRole, block: &ContentBlock) -> Option<String> {
-    match block {
-        ContentBlock::Text { text } => {
+fn agent_search_text_from_part(role: AgentMessageRole, part: &Part) -> Option<String> {
+    match part {
+        Part::Text(text) => {
             if role == AgentMessageRole::User
                 && let Some(preview) = extract_skill_preview(text)
             {
@@ -630,16 +466,14 @@ fn agent_search_text_from_block(role: AgentMessageRole, block: &ContentBlock) ->
             }
             non_empty_text(&truncate_chars(text, MAX_AGENT_SEGMENT_CHARS))
         }
-        ContentBlock::ToolUse { name, input, .. } => {
+        Part::ToolCall { name, input, .. } => {
             non_empty_text(&format_tool_summary(name, input, MAX_AGENT_SEGMENT_CHARS))
         }
-        ContentBlock::ToolResult { content, .. } => {
-            content.as_ref().and_then(bounded_tool_result_text)
-        }
-        ContentBlock::Thinking { thinking, .. } => {
+        Part::ToolResult { output, .. } => output.as_ref().and_then(bounded_tool_result_text),
+        Part::Thinking(thinking) => {
             non_empty_text(&truncate_chars(thinking, MAX_AGENT_SEGMENT_CHARS))
         }
-        ContentBlock::Image { .. } | ContentBlock::Other => None,
+        Part::Image | Part::Other => None,
     }
 }
 
@@ -828,26 +662,6 @@ impl BoundedHeadTail {
         let mut output = self.head.clone();
         output.extend(self.tail.iter().copied());
         output
-    }
-}
-
-fn source(
-    role: AgentMessageRole,
-    timestamp: Option<String>,
-    jsonl_line: usize,
-    part_index: usize,
-    assistant_message_id: Option<String>,
-    parent_tool_use_id: Option<String>,
-    tool_name: Option<String>,
-) -> AgentPartSource {
-    AgentPartSource {
-        role,
-        timestamp,
-        jsonl_line,
-        part_index,
-        assistant_message_id,
-        parent_tool_use_id,
-        tool_name,
     }
 }
 
@@ -1068,12 +882,12 @@ mod tests {
 
     #[test]
     fn agent_search_text_ignores_non_text_tool_result_json() {
-        let blocks = vec![ContentBlock::ToolResult {
-            tool_use_id: "toolu_1".to_string(),
-            content: Some(serde_json::json!({"secret":"object_needle"})),
+        let blocks = vec![Part::ToolResult {
+            call_id: "toolu_1".to_string(),
+            output: Some(serde_json::json!({"secret":"object_needle"})),
         }];
 
-        let text = agent_search_text_from_blocks(AgentMessageRole::User, &blocks);
+        let text = agent_search_text_from_parts(AgentMessageRole::User, &blocks);
 
         assert!(text.is_empty());
     }
@@ -1084,13 +898,13 @@ mod tests {
         for index in 0..MAX_AGENT_SEGMENT_CHARS {
             input.insert(format!("long_key_{index}"), Value::Bool(true));
         }
-        let blocks = vec![ContentBlock::ToolUse {
+        let blocks = vec![Part::ToolCall {
             id: "toolu_1".to_string(),
             name: "Bash".to_string(),
             input: Value::Object(input),
         }];
 
-        let text = agent_search_text_from_blocks(AgentMessageRole::Assistant, &blocks);
+        let text = agent_search_text_from_parts(AgentMessageRole::Assistant, &blocks);
 
         assert!(text.chars().count() <= MAX_AGENT_SEGMENT_CHARS);
         assert!(text.starts_with("tool Bash input_keys="));
@@ -1099,12 +913,12 @@ mod tests {
     #[test]
     fn agent_search_text_caps_long_tool_results_with_head_and_tail() {
         let long = format!("HEAD{}TAIL", "x".repeat(MAX_AGENT_SEGMENT_CHARS * 2));
-        let blocks = vec![ContentBlock::ToolResult {
-            tool_use_id: "toolu_1".to_string(),
-            content: Some(Value::String(long.clone())),
+        let blocks = vec![Part::ToolResult {
+            call_id: "toolu_1".to_string(),
+            output: Some(Value::String(long.clone())),
         }];
 
-        let text = agent_search_text_from_blocks(AgentMessageRole::User, &blocks);
+        let text = agent_search_text_from_parts(AgentMessageRole::User, &blocks);
 
         assert!(text.len() < long.len());
         assert!(text.starts_with("HEAD"));
@@ -1114,16 +928,16 @@ mod tests {
 
     #[test]
     fn agent_search_text_caps_tool_result_arrays_without_joining_full_payload() {
-        let blocks = vec![ContentBlock::ToolResult {
-            tool_use_id: "toolu_1".to_string(),
-            content: Some(Value::Array(vec![
+        let blocks = vec![Part::ToolResult {
+            call_id: "toolu_1".to_string(),
+            output: Some(Value::Array(vec![
                 Value::String("HEAD".to_string()),
                 Value::String("x".repeat(MAX_AGENT_SEGMENT_CHARS * 2)),
                 serde_json::json!({"type":"text","text":"TAIL"}),
             ])),
         }];
 
-        let text = agent_search_text_from_blocks(AgentMessageRole::User, &blocks);
+        let text = agent_search_text_from_parts(AgentMessageRole::User, &blocks);
 
         assert!(text.chars().count() <= MAX_AGENT_SEGMENT_CHARS);
         assert!(text.starts_with("HEAD"));
@@ -1235,7 +1049,10 @@ mod tests {
         let transcript = parse(&content);
         let assistant = &transcript.messages[1];
         assert_eq!(assistant.role, AgentMessageRole::Assistant);
-        assert_eq!(assistant.timestamp.as_deref(), Some("2024-01-01T00:00:01Z"));
+        assert_eq!(
+            assistant.timestamp.map(|timestamp| timestamp.to_rfc3339()),
+            Some("2024-01-01T00:00:01+00:00".to_string())
+        );
         assert_eq!(
             assistant.parent_tool_use_id.as_deref(),
             Some("toolu_parent")

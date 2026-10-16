@@ -5,11 +5,13 @@ pub mod claude;
 pub mod pi;
 
 use super::adapter::{Adapter, FileId, Located, Stamp};
-use super::model::{ConversationKey, SourceInstance, SourceKind};
+use super::model::{ConversationKey, SourceInstance, SourceKind, Transcript};
 use super::omp_loader::{self, OmpSessionRoot};
 use super::pi_loader::{self, PiSessionRoot};
+use crate::error::Result;
 use rayon::prelude::*;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -56,11 +58,11 @@ impl Registry {
         &self.adapters
     }
 
-    /// Adapters of `kind`.
-    pub fn of_kind(&self, kind: SourceKind) -> impl Iterator<Item = &Arc<dyn Adapter>> {
+    /// The adapter of `instance`.
+    pub fn get(&self, instance: &SourceInstance) -> Option<&Arc<dyn Adapter>> {
         self.adapters
             .iter()
-            .filter(move |adapter| adapter.instance().kind == kind)
+            .find(|adapter| adapter.instance() == instance)
     }
 }
 
@@ -105,6 +107,83 @@ fn native_id(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .into_owned()
+}
+
+/// Decodes a session file outside any configured root, recognizing its
+/// source from its contents (as OMP when it starts with a session header and
+/// `omp` is set). `modified` dates a session that records no activity time.
+pub fn decode_path(path: &Path, modified: Option<SystemTime>, omp: bool) -> Result<Transcript> {
+    let instance = SourceInstance {
+        kind: SourceKind::Claude,
+        root: path.parent().map(Path::to_path_buf).unwrap_or_default(),
+    };
+    let located = Located {
+        key: ConversationKey {
+            native_id: native_id(&instance.root, path),
+            instance,
+        },
+        path: path.to_path_buf(),
+        size: 0,
+        modified,
+        file_id: None,
+        stamp: Stamp::default(),
+    };
+    decode_file(&located, omp).map(|transcript| {
+        transcript.expect("a file that is not a Pi session decodes as a Claude session")
+    })
+}
+
+/// Decodes the session file `located` names: as a Pi or OMP session when it
+/// starts with a session header (always as OMP when `omp` is set), else as
+/// a Claude session. `None` when it holds neither.
+fn decode_file(located: &Located, omp: bool) -> Result<Option<Transcript>> {
+    let path = &located.path;
+    if super::pi::detect_source(path)?.is_some() {
+        let mut reader = Counted::new(BufReader::new(File::open(path)?));
+        let expected = omp.then_some(SourceKind::Omp);
+        if let Some(projection) = super::pi::parse_reader(&mut reader, expected)? {
+            return Ok(Some(pi::transcript_of(
+                located.key.clone(),
+                path,
+                projection,
+                reader.bytes,
+                located.modified,
+            )));
+        }
+    }
+    let reader = BufReader::new(File::open(path)?);
+    claude::decode_reader(located.key.clone(), path, reader, located.modified).map(Some)
+}
+
+/// A reader that counts the bytes consumed through it.
+struct Counted<R> {
+    inner: R,
+    bytes: u64,
+}
+
+impl<R> Counted<R> {
+    fn new(inner: R) -> Self {
+        Self { inner, bytes: 0 }
+    }
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.bytes += read as u64;
+        Ok(read)
+    }
+}
+
+impl<R: BufRead> BufRead for Counted<R> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.inner.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.bytes += amount as u64;
+        self.inner.consume(amount);
+    }
 }
 
 #[cfg(unix)]
