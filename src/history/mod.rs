@@ -120,6 +120,27 @@ pub struct Conversation {
     pub total_tokens: u64,
     /// Conversation duration in minutes (from first to last message)
     pub duration_minutes: Option<u64>,
+    pub provenance: Provenance,
+}
+
+/// How a conversation came about, as its source records it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Provenance {
+    /// Run by a tool or script rather than a person.
+    pub automated: bool,
+    /// Started by another conversation, such as a subagent.
+    pub child: bool,
+    /// The source names a current history that no longer exists, so the
+    /// source's own tool cannot act on this one.
+    pub orphaned: bool,
+}
+
+impl Provenance {
+    /// Whether the conversation stays out of the list and of semantic
+    /// search unless asked for.
+    pub fn hidden_by_default(&self) -> bool {
+        self.automated || self.child
+    }
 }
 
 pub(crate) fn semantic_route_text(full_text: &str, agent_search_text: &str) -> String {

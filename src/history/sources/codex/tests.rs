@@ -23,8 +23,35 @@ fn fixture_home() -> PathBuf {
 /// The fixture home with a state database in `db_dir` that names the
 /// threads' rollouts the way Codex does.
 fn adapter(db_dir: &Path) -> CodexAdapter {
-    let home = fixture_home();
-    let rollouts = discover::list(&home).unwrap();
+    create_state_db(&fixture_home(), db_dir);
+    CodexAdapter::with_sqlite_home(fixture_home(), db_dir.to_path_buf())
+}
+
+/// A copy of the fixture home in `dir`, with its state database, for
+/// tests that change it.
+pub(crate) fn home_copy(dir: &Path) -> PathBuf {
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let path = entry.unwrap().path();
+            let target = to.join(path.file_name().unwrap());
+            if path.is_dir() {
+                copy(&path, &target);
+            } else {
+                std::fs::copy(&path, &target).unwrap();
+            }
+        }
+    }
+    let home = dir.join("codex");
+    copy(&fixture_home(), &home);
+    create_state_db(&home, &home);
+    home
+}
+
+/// Writes `state_5.sqlite` in `db_dir` with a row of every paginated
+/// thread of `home`; the orphaned one names a rollout that is gone.
+fn create_state_db(home: &Path, db_dir: &Path) {
+    let rollouts = discover::list(home).unwrap();
     let path_of = |thread: &str| {
         rollouts
             .iter()
@@ -57,7 +84,6 @@ fn adapter(db_dir: &Path) -> CodexAdapter {
         })
         .collect();
     state_db::tests::create(db_dir, 5, &rows);
-    CodexAdapter::with_sqlite_home(home, db_dir.to_path_buf())
 }
 
 fn decoded(adapter: &CodexAdapter, thread: &str) -> Transcript {
@@ -298,6 +324,17 @@ fn exec_runs_are_automated_and_subagents_children() {
     let exec = decoded(&adapter, EXEC);
     assert_eq!(exec.mode, ExecutionMode::Automated);
     assert_eq!(exec.relationship, Relationship::Root);
+    let conversation = index::index(&exec).unwrap();
+    assert!(conversation.provenance.automated);
+    // A subagent's report reaches its parent as a subagent message.
+    assert!(
+        conversation
+            .agent_search_text
+            .contains("iguana check passed")
+    );
+    // Lexically searchable, but not embedded.
+    assert!(conversation.full_text.contains("iguana"));
+    assert!(conversation.semantic_turns.is_empty());
 
     let sub = decoded(&adapter, SUB);
     assert_eq!(
@@ -310,6 +347,15 @@ fn exec_runs_are_automated_and_subagents_children() {
     assert!(mentions(&sub, Visibility::Inherited, "walrus"));
     assert!(!mentions(&sub, Visibility::Dialogue, "walrus"));
     assert!(mentions(&sub, Visibility::Dialogue, "armadillo"));
+    // The task from the parent is the subagent's prompt.
+    assert!(mentions(
+        &sub,
+        Visibility::Dialogue,
+        "Task name: /root/armadillo_search"
+    ));
+    let conversation = index::index(&sub).unwrap();
+    assert!(conversation.provenance.child && conversation.provenance.hidden_by_default());
+    assert!(conversation.semantic_turns.is_empty());
 
     let archived = adapter.resolve(ARCH, far_future()).unwrap();
     assert!(adapter.thread_of(&archived).unwrap().archived);

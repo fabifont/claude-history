@@ -236,23 +236,23 @@ impl Snapshot {
         self.generation.rows().len()
     }
 
-    /// Ids of the newest `n` cards inside the time filter whose project
-    /// passes `project_visible`.
+    /// Ids of the newest `n` listed cards inside the time filter whose
+    /// project passes `project_visible`.
     pub fn head(&self, n: usize, project_visible: impl FnMut(&ProjectView) -> bool) -> Vec<u32> {
         let visible = self.project_visibility(project_visible);
         self.generation.head(n, |row| {
-            visible[row.project_id as usize] && in_time(&self.time, row)
+            listed(row) && visible[row.project_id as usize] && in_time(&self.time, row)
         })
     }
 
-    /// For every card, whether it is inside the time filter and its project
-    /// passes `project_visible`.
+    /// For every card, whether it is listed, inside the time filter and its
+    /// project passes `project_visible`.
     pub fn scope(&self, project_visible: impl FnMut(&ProjectView) -> bool) -> Vec<bool> {
         let visible = self.project_visibility(project_visible);
         self.generation
             .rows()
             .iter()
-            .map(|row| visible[row.project_id as usize] && in_time(&self.time, row))
+            .map(|row| listed(row) && visible[row.project_id as usize] && in_time(&self.time, row))
             .collect()
     }
 
@@ -279,6 +279,12 @@ impl Snapshot {
             row.preview_first
         })
     }
+}
+
+/// Whether the list shows the card: automated and child conversations stay
+/// out of it.
+fn listed(row: &card::CardRow) -> bool {
+    row.flags & card::card_flags::HIDDEN == 0
 }
 
 fn in_time(time: &TimeFilter, row: &card::CardRow) -> bool {
@@ -537,6 +543,7 @@ pub(crate) mod test_support {
             model: None,
             total_tokens: 42,
             duration_minutes: None,
+            provenance: Default::default(),
         }
     }
 }

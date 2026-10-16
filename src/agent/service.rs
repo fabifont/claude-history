@@ -742,6 +742,7 @@ fn conversation_from_agent_transcript(
         model: None,
         total_tokens: 0,
         duration_minutes: None,
+        provenance: Default::default(),
     }
 }
 
@@ -942,6 +943,7 @@ fn stripped_semantic_conversation(
         model: None,
         total_tokens: 0,
         duration_minutes: None,
+        provenance: Default::default(),
     }
 }
 

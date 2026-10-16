@@ -354,6 +354,7 @@ impl Generation {
             total_tokens: row.total_tokens,
             duration_minutes: (row.duration_minutes != NO_DURATION)
                 .then_some(u64::from(row.duration_minutes)),
+            provenance: card_flags::provenance(row.flags),
         }
     }
 }
@@ -477,6 +478,8 @@ pub struct CardData {
     message_count: u32,
     duration_minutes: u32,
     source: u8,
+    /// `card_flags::PROVENANCE` bits.
+    provenance: u8,
 }
 
 impl CardData {
@@ -520,6 +523,7 @@ impl CardData {
                     u32::try_from(minutes).unwrap_or(NO_DURATION - 1)
                 }),
             source: source_to_u8(conversation.source),
+            provenance: card_flags::of_provenance(conversation.provenance),
         }
     }
 
@@ -551,6 +555,7 @@ impl CardData {
             message_count: row.message_count,
             duration_minutes: row.duration_minutes,
             source: row.source,
+            provenance: row.flags & card_flags::PROVENANCE,
         }
     }
 }
@@ -617,7 +622,7 @@ fn build_manifest(
 
     let mut rows: Vec<CardRow> = Vec::with_capacity(entries.len());
     for Entry { card, text, .. } in entries.iter() {
-        let mut flags = 0;
+        let mut flags = card.provenance;
         let custom_title = heap.push_optional(
             card.custom_title.as_deref(),
             card_flags::CUSTOM_TITLE,

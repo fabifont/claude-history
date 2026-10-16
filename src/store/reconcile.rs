@@ -714,6 +714,82 @@ mod tests {
     }
 
     #[test]
+    fn codex_threads_are_indexed_with_their_provenance() {
+        use crate::store::card::{self, card_flags};
+        let fixture = Fixture::new();
+        let codex = crate::history::sources::codex::tests::home_copy(fixture._dir.path());
+        settle_all(fixture._dir.path());
+        let sources = Registry::with_roots(
+            Some(fixture.projects.clone()),
+            Some(fixture.pi.clone()),
+            Some(fixture.omp.clone()),
+        )
+        .with_codex(Some(codex.clone()));
+        reconcile(&fixture.root, &sources).unwrap();
+
+        let generation = fixture.current();
+        let codex_rows: Vec<usize> = (0..generation.rows().len())
+            .filter(|&row| generation.rows()[row].source == card::source_to_u8(Source::Codex))
+            .collect();
+        assert_eq!(codex_rows.len(), 9);
+        let flags_of = |thread: &str| {
+            let row = codex_rows
+                .iter()
+                .map(|&row| &generation.rows()[row])
+                .find(|row| generation.str(row.session_id) == thread)
+                .unwrap();
+            row.flags & card_flags::PROVENANCE
+        };
+        assert_eq!(
+            flags_of("01a00000-0000-7000-8000-000000000006"),
+            card_flags::AUTOMATED
+        );
+        assert_eq!(
+            flags_of("01a00000-0000-7000-8000-000000000007"),
+            card_flags::CHILD
+        );
+        assert_eq!(
+            flags_of("01a00000-0000-7000-8000-000000000009"),
+            card_flags::ORPHANED
+        );
+        assert_eq!(flags_of("01a00000-0000-7000-8000-000000000002"), 0);
+        let snapshot =
+            crate::store::Snapshot::open(&fixture.root, false, Default::default()).unwrap();
+        assert_eq!(
+            snapshot.head(usize::MAX, |_| true).len(),
+            generation.rows().len() - 2
+        );
+
+        let unchanged = reconcile(&fixture.root, &sources).unwrap();
+        assert_eq!(unchanged.publish, Publish::Unchanged);
+        assert_eq!(unchanged.parsed, 0);
+        assert_eq!(unchanged.written.bytes, 0);
+
+        // A name set in Codex reaches the card through the state database.
+        let db = rusqlite::Connection::open(codex.join("state_5.sqlite")).unwrap();
+        db.execute(
+            "UPDATE threads SET name = 'Renamed walrus' WHERE id = ?1",
+            ["01a00000-0000-7000-8000-000000000002"],
+        )
+        .unwrap();
+        let renamed = reconcile(&fixture.root, &sources).unwrap();
+        assert_eq!(renamed.parsed, 1);
+        let generation = fixture.current();
+        assert!(generation.rows().iter().any(|row| {
+            row.flags & card_flags::CUSTOM_TITLE != 0
+                && generation.str(row.custom_title) == "Renamed walrus"
+        }));
+
+        // A locked database keeps every Codex card as it is.
+        db.execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;")
+            .unwrap();
+        let locked = reconcile(&fixture.root, &sources).unwrap();
+        assert_eq!(locked.publish, Publish::Unchanged);
+        assert_eq!(fixture.current().rows().len(), generation.rows().len());
+        db.execute_batch("COMMIT;").unwrap();
+    }
+
+    #[test]
     fn a_held_lock_skips_the_pass() {
         let fixture = Fixture::new();
         fixture.claude("-tmp-work", "a.jsonl", "hello alpha");

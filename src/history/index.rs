@@ -2,10 +2,13 @@
 //! index store: previews, full text, semantic turns and their message
 //! ranges, route text, token totals and duration.
 
-use super::Conversation;
 use super::messages::{MessageOrdinals, Placement, extract_skill_preview};
-use super::model::{Event, EventKind, Message, Part, Role, Transcript, Usage, Visibility};
+use super::model::{
+    Event, EventKind, ExecutionMode, HeadStatus, Message, Part, Relationship, Role, Transcript,
+    Usage, Visibility,
+};
 use super::parser::{is_clear_only_conversation, normalize_whitespace};
+use super::{Conversation, Provenance};
 use crate::agent::refs::MessageRange;
 use crate::agent::transcript::{
     AgentMessageRole, agent_search_text_from_parts, bounded_tool_result_text,
@@ -235,10 +238,16 @@ impl Indexer {
         let agent_search_text = normalize_whitespace(&agent_search_parts.join(" "));
         let semantic_route_text = super::semantic_route_text(&full_text, &agent_search_text);
 
+        let provenance = Provenance {
+            automated: transcript.mode == ExecutionMode::Automated,
+            child: matches!(transcript.relationship, Relationship::Child { .. }),
+            orphaned: transcript.head == HeadStatus::Orphaned,
+        };
+        // Conversations hidden by default are not embedded.
         let (semantic_turns, semantic_turn_ranges): (Vec<_>, Vec<_>) = semantic_turns
             .into_iter()
             .zip(semantic_turn_ranges)
-            .filter(|(turn, _)| !turn.is_empty())
+            .filter(|(turn, _)| !turn.is_empty() && !provenance.hidden_by_default())
             .unzip();
 
         let total_tokens =
@@ -280,6 +289,7 @@ impl Indexer {
             model: meta.model.clone(),
             total_tokens,
             duration_minutes,
+            provenance,
         })
     }
 }

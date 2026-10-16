@@ -76,6 +76,28 @@ pub mod card_flags {
     pub const SUMMARY: u8 = 1 << 1;
     pub const MODEL: u8 = 1 << 2;
     pub const CWD: u8 = 1 << 3;
+    /// `Provenance` bits.
+    pub const AUTOMATED: u8 = 1 << 4;
+    pub const CHILD: u8 = 1 << 5;
+    pub const ORPHANED: u8 = 1 << 6;
+    pub const PROVENANCE: u8 = AUTOMATED | CHILD | ORPHANED;
+    /// Cards the list leaves out unless asked for.
+    pub const HIDDEN: u8 = AUTOMATED | CHILD;
+
+    pub fn of_provenance(provenance: crate::history::Provenance) -> u8 {
+        let bit = |set: bool, flag: u8| if set { flag } else { 0 };
+        bit(provenance.automated, AUTOMATED)
+            | bit(provenance.child, CHILD)
+            | bit(provenance.orphaned, ORPHANED)
+    }
+
+    pub fn provenance(flags: u8) -> crate::history::Provenance {
+        crate::history::Provenance {
+            automated: flags & AUTOMATED != 0,
+            child: flags & CHILD != 0,
+            orphaned: flags & ORPHANED != 0,
+        }
+    }
 }
 
 /// Project shared by any number of cards.

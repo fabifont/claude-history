@@ -58,6 +58,12 @@ impl Meta {
     fn paginated(&self) -> bool {
         self.history_mode.as_deref() == Some("paginated")
     }
+
+    fn subagent(&self) -> bool {
+        self.source
+            .as_ref()
+            .is_some_and(|source| source.get("subagent").is_some())
+    }
 }
 
 #[derive(Deserialize)]
@@ -257,6 +263,14 @@ enum ResponseItem {
         call_id: Option<String>,
         #[serde(default)]
         tools: Value,
+    },
+    /// A message between agents of one multi-agent run: a task for a
+    /// subagent, or a subagent's report to the agent that spawned it.
+    AgentMessage {
+        #[serde(default)]
+        author: String,
+        #[serde(default)]
+        content: Vec<ContentItem>,
     },
     #[serde(other)]
     Other,
@@ -466,8 +480,8 @@ impl Decoder<'_> {
                 Visibility::Dialogue
             };
             let timestamp = record.timestamp.as_deref().and_then(parse_timestamp);
-            let paginated = file_meta.paginated();
-            for (visibility, kind) in self.kinds(&record, paginated, visibility) {
+            let (paginated, subagent) = (file_meta.paginated(), file_meta.subagent());
+            for (visibility, kind) in self.kinds(&record, paginated, subagent, visibility) {
                 (self.events)(Event {
                     origin,
                     timestamp,
@@ -493,6 +507,7 @@ impl Decoder<'_> {
         &mut self,
         record: &Line<'_>,
         paginated: bool,
+        subagent: bool,
         visibility: Visibility,
     ) -> Vec<(Visibility, EventKind)> {
         let payload = record.payload.get();
@@ -514,6 +529,19 @@ impl Decoder<'_> {
                     };
                     let parts = content.into_iter().filter_map(content_part).collect();
                     return vec![(visibility, message(role, None, parts))];
+                }
+                // A subagent is addressed only through these; its parent
+                // hears back through them.
+                Ok(ResponseItem::AgentMessage { author, content }) => {
+                    let parts = content.into_iter().filter_map(content_part).collect();
+                    if subagent {
+                        message(Role::User, None, parts)
+                    } else {
+                        EventKind::Subagent {
+                            agent_id: author,
+                            message: plain_message(Role::Assistant, None, parts),
+                        }
+                    }
                 }
                 Ok(item) => response_item(item),
                 Err(_) => EventKind::Other,
@@ -685,7 +713,9 @@ fn response_item(item: ResponseItem) -> EventKind {
         ResponseItem::FunctionCallOutput { call_id, output }
         | ResponseItem::CustomToolCallOutput { call_id, output } => result(call_id, output),
         ResponseItem::ToolSearchOutput { call_id, tools } => result(call_id, tools),
-        ResponseItem::Message { .. } | ResponseItem::Other => EventKind::Other,
+        ResponseItem::Message { .. } | ResponseItem::AgentMessage { .. } | ResponseItem::Other => {
+            EventKind::Other
+        }
     }
 }
 
@@ -721,14 +751,18 @@ fn content_part(item: ContentItem) -> Option<Part> {
 }
 
 fn message(role: Role, id: Option<String>, parts: Vec<Part>) -> EventKind {
-    EventKind::Message(Message {
+    EventKind::Message(plain_message(role, id, parts))
+}
+
+fn plain_message(role: Role, id: Option<String>, parts: Vec<Part>) -> Message {
+    Message {
         role,
         id,
         parts,
         model: None,
         usage: None,
         parent_tool_use_id: None,
-    })
+    }
 }
 
 fn diagnostic(line_number: usize, line_content: String, error_message: String) -> ParseError {

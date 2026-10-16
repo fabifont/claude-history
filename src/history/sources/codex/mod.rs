@@ -269,4 +269,4 @@ impl Adapter for CodexAdapter {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -197,6 +197,7 @@ where
 {
     indices
         .into_iter()
+        .filter(|&idx| !conversations[idx].borrow().provenance.hidden_by_default())
         .filter(|&idx| {
             conversations[idx]
                 .borrow()
