@@ -290,6 +290,7 @@ impl DocTerms {
 }
 
 /// Sizes and counts of a built index.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Default, Clone)]
 pub struct BuildStats {
     pub docs: usize,
@@ -308,6 +309,7 @@ pub struct Built {
     pub fst: Vec<u8>,
     pub post: Vec<u8>,
     pub short: Vec<u8>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub stats: BuildStats,
 }
 

@@ -118,6 +118,7 @@ pub struct Hit {
 }
 
 /// Work done by one query.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct QueryStats {
     /// Documents that passed the index filter.
@@ -497,6 +498,7 @@ impl Ranking<'_> {
         &self.hits
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn stats(&self) -> QueryStats {
         QueryStats {
             candidates: self.candidates,
@@ -772,14 +774,25 @@ pub(crate) mod oracle {
     use super::*;
     use crate::history::Conversation;
     use crate::search::{SearchableConversation, debug_search, precompute_search_text};
+    use crate::store::card::{BlobRef, CardRow};
     use crate::store::lexindex;
+    use crate::store::text::{self, TextSegments};
+    use bytemuck::Zeroable;
     use chrono::TimeZone;
 
-    pub(crate) struct Texts<'a>(pub &'a [Conversation]);
+    /// Texts read from a zstd text segment, as from a generation.
+    pub(crate) struct Frames {
+        pub segments: TextSegments,
+        pub refs: Vec<BlobRef>,
+    }
 
-    impl TextSource for Texts<'_> {
+    impl TextSource for Frames {
         fn full_text(&self, doc: u32) -> Cow<'_, str> {
-            Cow::Borrowed(&self.0[doc as usize].full_text)
+            Cow::Owned(
+                self.segments
+                    .read(self.refs[doc as usize])
+                    .unwrap_or_default(),
+            )
         }
     }
 
@@ -806,6 +819,7 @@ pub(crate) mod oracle {
         pub searchable: Vec<SearchableConversation>,
         pub docs: SearchDocs,
         pub index: LexIndex,
+        pub frames: Frames,
         pub build: lexindex::BuildStats,
         pub build_time: std::time::Duration,
         _dir: tempfile::TempDir,
@@ -822,10 +836,21 @@ pub(crate) mod oracle {
             built.write(dir.path()).unwrap();
             let build_time = started.elapsed();
             let index = LexIndex::open(dir.path(), conversations.len() as u32).unwrap();
+            let texts: Vec<&str> = conversations.iter().map(|c| &*c.full_text).collect();
+            let refs = text::write_segment(&text::segment_path(dir.path(), 0), 0, &texts).unwrap();
+            let rows: Vec<CardRow> = refs
+                .iter()
+                .map(|&text| CardRow {
+                    text,
+                    ..CardRow::zeroed()
+                })
+                .collect();
+            let segments = TextSegments::open(dir.path(), &rows).unwrap();
             Self {
                 searchable: precompute_search_text(&conversations),
                 docs: SearchDocs::from_conversations(&conversations),
                 index,
+                frames: Frames { segments, refs },
                 build: built.stats,
                 build_time,
                 conversations,
@@ -849,12 +874,12 @@ pub(crate) mod oracle {
             hits
         }
 
-        /// Asserts that index search returns exactly the in-memory results,
-        /// and that its top page is a prefix of them. Returns the stats.
+        /// Asserts that index search, reading text from zstd frames, returns
+        /// exactly the in-memory results, and that its top page is a prefix of
+        /// them. Returns the stats.
         pub(crate) fn check(&self, query: &str, now: DateTime<Local>, page: usize) -> QueryStats {
             let expected = self.expected(query, now);
-            let texts = Texts(&self.conversations);
-            let mut ranking = search(&self.index, &self.docs, &texts, query, now, &|_| true);
+            let mut ranking = search(&self.index, &self.docs, &self.frames, query, now, &|_| true);
             let top = ranking.top(page).to_vec();
             let all = ranking.complete().to_vec();
             assert_eq!(top[..], all[..top.len()], "query {query:?}: top page");
@@ -1044,8 +1069,8 @@ mod tests {
             corpus.check(query, now, 10);
         }
         // The index alone overcounts these, so their candidates are read.
-        let texts = super::oracle::Texts(&corpus.conversations);
-        let mut ranking = search(&corpus.index, &corpus.docs, &texts, "x.x", now, &|_| true);
+        let texts = &corpus.frames;
+        let mut ranking = search(&corpus.index, &corpus.docs, texts, "x.x", now, &|_| true);
         ranking.complete();
         assert_eq!(ranking.stats().texts_read, 1);
     }
@@ -1080,8 +1105,8 @@ mod tests {
         let query = "alpha \"beta filler\"";
         let stats = corpus.check(query, now, 5);
         assert_eq!((stats.candidates, stats.texts_read), (100, 100));
-        let texts = super::oracle::Texts(&corpus.conversations);
-        let mut ranking = search(&corpus.index, &corpus.docs, &texts, query, now, &|_| true);
+        let texts = &corpus.frames;
+        let mut ranking = search(&corpus.index, &corpus.docs, texts, query, now, &|_| true);
         assert_eq!(ranking.top(5).len(), 5);
         let threads = rayon::current_num_threads();
         let read = ranking.stats().texts_read;
@@ -1115,8 +1140,8 @@ mod tests {
         let corpus = Corpus::new(conversations);
         let docs = |query: &str| -> Vec<u32> {
             corpus.check(query, now, 10);
-            let texts = super::oracle::Texts(&corpus.conversations);
-            let mut ranking = search(&corpus.index, &corpus.docs, &texts, query, now, &|_| true);
+            let texts = &corpus.frames;
+            let mut ranking = search(&corpus.index, &corpus.docs, texts, query, now, &|_| true);
             ranking.complete().iter().map(|hit| hit.doc).collect()
         };
 
@@ -1161,11 +1186,11 @@ mod tests {
         let now = Local.timestamp_opt(1_760_000_000, 0).unwrap();
         let conversations = super::oracle::into_doc_order(golden_corpus(now));
         let root = tempfile::tempdir().unwrap();
-        let manifest = crate::store::generation::build_manifest(
+        let corpus = crate::store::generation::Corpus::new(
             &conversations,
-            &crate::store::test_support::unknown_fingerprints(conversations.len()),
+            crate::store::test_support::unknown_fingerprints(conversations.len()),
         );
-        crate::store::generation::publish(root.path(), &manifest).unwrap();
+        crate::store::generation::publish(root.path(), &corpus).unwrap();
         let generation = Generation::open(root.path()).unwrap();
 
         let from_cards = SearchDocs::from_generation(&generation);
@@ -1185,7 +1210,7 @@ mod tests {
     fn scope_restricts_results() {
         let now = Local.timestamp_opt(1_760_000_000, 0).unwrap();
         let corpus = Corpus::new(golden_corpus(now));
-        let texts = super::oracle::Texts(&corpus.conversations);
+        let texts = &corpus.frames;
         for query in [
             "cache",
             "\"cache\"",
@@ -1193,7 +1218,7 @@ mod tests {
             "\u{9879}\u{76EE}",
             "\"cache layer\"",
         ] {
-            let mut ranking = search(&corpus.index, &corpus.docs, &texts, query, now, &|doc| {
+            let mut ranking = search(&corpus.index, &corpus.docs, texts, query, now, &|doc| {
                 doc % 2 == 0
             });
             let scoped: Vec<Hit> = ranking.complete().to_vec();
@@ -1535,11 +1560,13 @@ mod tests {
             stats.parts
         );
         eprintln!(
-            "sizes: base.fst {:.1} MB, base.post {:.1} MB, base.short {:.1} MB, total {:.1} MB",
+            "sizes: base.fst {:.1} MB, base.post {:.1} MB, base.short {:.1} MB, total {:.1} MB, \
+             text-0000.zst {:.1} MB",
             stats.fst_bytes as f64 / 1e6,
             stats.post_bytes as f64 / 1e6,
             stats.short_bytes as f64 / 1e6,
-            (stats.fst_bytes + stats.post_bytes + stats.short_bytes) as f64 / 1e6
+            (stats.fst_bytes + stats.post_bytes + stats.short_bytes) as f64 / 1e6,
+            corpus.frames.segments.disk_bytes() as f64 / 1e6
         );
         corpus
     }
@@ -1563,16 +1590,16 @@ mod tests {
 
     /// Counts the text bytes handed out.
     struct CountingTexts<'a> {
-        conversations: &'a [Conversation],
+        texts: &'a dyn TextSource,
         bytes: std::sync::atomic::AtomicUsize,
     }
 
     impl TextSource for CountingTexts<'_> {
         fn full_text(&self, doc: u32) -> Cow<'_, str> {
-            let text = &self.conversations[doc as usize].full_text;
+            let text = self.texts.full_text(doc);
             self.bytes
                 .fetch_add(text.len(), std::sync::atomic::Ordering::Relaxed);
-            Cow::Borrowed(text)
+            text
         }
     }
 
@@ -1582,7 +1609,7 @@ mod tests {
 
     /// Times index queries (first page of 50, and the complete ranking)
     /// against the in-memory search on the user's conversations, with text
-    /// read from memory. Run with
+    /// decompressed from zstd frames. Run with
     /// `cargo test --release --bin claude-history real_corpus_query_latency -- --ignored --nocapture`.
     #[test]
     #[ignore]
@@ -1602,7 +1629,7 @@ mod tests {
         let mut complete_reads = Vec::new();
         for query in REAL_QUERIES {
             let texts = CountingTexts {
-                conversations: &corpus.conversations,
+                texts: &corpus.frames,
                 bytes: Default::default(),
             };
             let run = |complete: bool| {

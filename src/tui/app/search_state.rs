@@ -3,11 +3,13 @@ use crate::history::{Conversation, format_short_name_from_path};
 use crate::search::query::ParsedQuery;
 use crate::search::{self, SearchableConversation};
 use crate::semantic::types::SemanticCancellationToken;
+use crate::store;
 use crate::tui::semantic_worker::{
     SemanticSearchMessage, SemanticWorkerCommand, spawn_semantic_worker,
 };
 use chrono::Local;
-use std::collections::HashMap;
+use rayon::prelude::*;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::mpsc;
 
@@ -28,10 +30,13 @@ pub(super) struct SemanticSearchState {
 }
 
 pub(super) enum SearchCommand {
+    /// Search these loaded conversations when there is no index.
     UpdateData {
         conversations: Arc<Vec<Conversation>>,
-        searchable: Arc<Vec<SearchableConversation>>,
     },
+    /// Search this generation index instead of the loaded conversations, or
+    /// stop using one.
+    UseIndex(Option<IndexScope>),
     Search {
         query: String,
         generation: u64,
@@ -39,28 +44,224 @@ pub(super) enum SearchCommand {
     },
 }
 
+/// A generation index and the documents a query may return.
+#[derive(Clone)]
+pub(super) struct IndexScope {
+    pub(super) index: Arc<store::SearchIndex>,
+    /// Whether each document is in scope, by doc id.
+    pub(super) docs: Arc<Vec<bool>>,
+}
+
 pub(super) struct SearchResponse {
+    /// Conversation indices in rank order, or doc ids of `index` when it is
+    /// set.
     pub(super) filtered: Vec<usize>,
+    /// The index the doc ids belong to.
+    pub(super) index: Option<Arc<store::SearchIndex>>,
+    /// Whether `filtered` holds every result rather than the first page.
+    pub(super) complete: bool,
     pub(super) generation: u64,
     pub(super) mode: ListSearchMode,
+    /// Evidence keyed like `filtered`.
     pub(super) evidence: HashMap<usize, search::LexicalEvidence>,
 }
+
+/// Results ranked before the first response of an index search: more than
+/// a screen holds.
+const TOP_PAGE: usize = 50;
+/// Results ranked between checks for a newer command while completing.
+const COMPLETE_STEP: usize = 256;
+const MAX_EVIDENCE_ROWS: usize = 200;
 
 fn build_search_evidence(
     conversations: &[Conversation],
     filtered: &[usize],
     parsed: &ParsedQuery,
 ) -> HashMap<usize, search::LexicalEvidence> {
-    const MAX_EVIDENCE_ROWS: usize = 200;
-
     filtered
         .iter()
         .take(MAX_EVIDENCE_ROWS)
         .filter_map(|&index| {
-            search::build_lexical_evidence(&conversations[index], parsed)
+            let conversation = &conversations[index];
+            search::build_lexical_evidence(&conversation.full_text, &conversation.preview, parsed)
                 .map(|evidence| (index, evidence))
         })
         .collect()
+}
+
+/// Evidence for `docs` that `evidence` does not hold yet, read from their
+/// text frames in parallel.
+fn add_index_evidence(
+    index: &store::SearchIndex,
+    docs: &[u32],
+    parsed: &ParsedQuery,
+    evidence: &mut HashMap<usize, search::LexicalEvidence>,
+) {
+    let missing: Vec<u32> = docs
+        .iter()
+        .copied()
+        .filter(|&doc| !evidence.contains_key(&(doc as usize)))
+        .collect();
+    let found: Vec<(usize, search::LexicalEvidence)> = missing
+        .par_iter()
+        .filter_map(|&doc| {
+            let text = index.text(doc);
+            search::build_lexical_evidence(&text, index.cards().preview(doc), parsed)
+                .map(|evidence| (doc as usize, evidence))
+        })
+        .collect();
+    evidence.extend(found);
+}
+
+struct SearchWorker {
+    commands: mpsc::Receiver<SearchCommand>,
+    responses: mpsc::Sender<SearchResponse>,
+    /// Commands received while a search ran, handled before new ones.
+    queued: VecDeque<SearchCommand>,
+    conversations: Arc<Vec<Conversation>>,
+    searchable: Arc<Vec<SearchableConversation>>,
+    index: Option<IndexScope>,
+    /// Ranks loaded conversations one query at a time, leaving the other
+    /// cores to the UI and loader.
+    memory_pool: rayon::ThreadPool,
+    /// Ranks index queries and prepares search data.
+    index_pool: rayon::ThreadPool,
+}
+
+impl SearchWorker {
+    fn next_command(&mut self) -> Option<SearchCommand> {
+        self.queued
+            .pop_front()
+            .or_else(|| self.commands.recv().ok())
+    }
+
+    fn run(mut self) {
+        while let Some(command) = self.next_command() {
+            match command {
+                SearchCommand::Search {
+                    mut query,
+                    mut generation,
+                    mut mode,
+                } => {
+                    // Only the newest query matters; apply everything sent
+                    // before it.
+                    let pending: Vec<SearchCommand> = self
+                        .queued
+                        .drain(..)
+                        .chain(self.commands.try_iter())
+                        .collect();
+                    for pending in pending {
+                        match pending {
+                            SearchCommand::Search {
+                                query: q,
+                                generation: g,
+                                mode: m,
+                            } => {
+                                query = q;
+                                generation = g;
+                                mode = m;
+                            }
+                            other => self.apply(other),
+                        }
+                    }
+                    match self.index.clone() {
+                        Some(scope) => self.search_index(&scope, &query, generation, mode),
+                        None => self.search_memory(&query, generation, mode),
+                    }
+                }
+                other => self.apply(other),
+            }
+        }
+    }
+
+    fn apply(&mut self, command: SearchCommand) {
+        match command {
+            SearchCommand::UpdateData { conversations } => {
+                self.searchable = Arc::new(
+                    self.index_pool
+                        .install(|| search::precompute_search_text(&conversations)),
+                );
+                self.conversations = conversations;
+            }
+            SearchCommand::UseIndex(index) => self.index = index,
+            SearchCommand::Search { .. } => unreachable!("searches are not applied"),
+        }
+    }
+
+    fn search_memory(&self, query: &str, generation: u64, mode: ListSearchMode) {
+        let (conversations, searchable) = (&self.conversations, &self.searchable);
+        let (filtered, evidence) = self.memory_pool.install(|| {
+            let now = chrono::Local::now();
+            let filtered = search::search(conversations, searchable, query, now);
+            let parsed = ParsedQuery::parse(query);
+            let evidence = build_search_evidence(conversations, &filtered, &parsed);
+            (filtered, evidence)
+        });
+        let _ = self.responses.send(SearchResponse {
+            filtered,
+            index: None,
+            complete: true,
+            generation,
+            mode,
+            evidence,
+        });
+    }
+
+    /// Sends the first page as soon as it is final, then every result,
+    /// unless a newer search arrives first.
+    fn search_index(
+        &mut self,
+        scope: &IndexScope,
+        query: &str,
+        generation: u64,
+        mode: ListSearchMode,
+    ) {
+        let index = &scope.index;
+        let in_scope = |doc: u32| scope.docs[doc as usize];
+        let parsed = ParsedQuery::parse(query);
+        let send = |docs: &[u32], complete, evidence: &HashMap<_, _>| {
+            let _ = self.responses.send(SearchResponse {
+                filtered: docs.iter().map(|&doc| doc as usize).collect(),
+                index: Some(index.clone()),
+                complete,
+                generation,
+                mode,
+                evidence: HashMap::clone(evidence),
+            });
+        };
+        let pool = &self.index_pool;
+        let mut evidence = HashMap::new();
+        let mut ranking = pool.install(|| index.search(query, chrono::Local::now(), &in_scope));
+
+        let top: Vec<u32> =
+            pool.install(|| ranking.top(TOP_PAGE).iter().map(|hit| hit.doc).collect());
+        pool.install(|| add_index_evidence(index, &top, &parsed, &mut evidence));
+        if top.len() < TOP_PAGE {
+            send(&top, true, &evidence);
+            return;
+        }
+        send(&top, false, &evidence);
+
+        let mut ranked = TOP_PAGE;
+        loop {
+            for command in self.commands.try_iter() {
+                let newer = matches!(command, SearchCommand::Search { .. });
+                self.queued.push_back(command);
+                if newer {
+                    return;
+                }
+            }
+            ranked += COMPLETE_STEP;
+            if pool.install(|| ranking.top(ranked).len()) < ranked {
+                break;
+            }
+        }
+        let docs: Vec<u32> =
+            pool.install(|| ranking.complete().iter().map(|hit| hit.doc).collect());
+        let shown = &docs[..docs.len().min(MAX_EVIDENCE_ROWS)];
+        pool.install(|| add_index_evidence(index, shown, &parsed, &mut evidence));
+        send(&docs, true, &evidence);
+    }
 }
 
 pub(super) fn spawn_search_worker() -> (mpsc::Sender<SearchCommand>, mpsc::Receiver<SearchResponse>)
@@ -71,66 +272,28 @@ pub(super) fn spawn_search_worker() -> (mpsc::Sender<SearchCommand>, mpsc::Recei
     std::thread::Builder::new()
         .name("search-worker".into())
         .spawn(move || {
-            let pool = rayon::ThreadPoolBuilder::new()
+            let memory_pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(1)
                 .thread_name(|_| "lexical-rank-worker".to_string())
                 .build()
                 .expect("failed to create lexical ranking thread pool");
-            pool.install(move || {
-                let mut conversations: Arc<Vec<Conversation>> = Arc::new(Vec::new());
-                let mut searchable: Arc<Vec<SearchableConversation>> = Arc::new(Vec::new());
-
-                while let Ok(cmd) = cmd_rx.recv() {
-                    match cmd {
-                        SearchCommand::UpdateData {
-                            conversations: c,
-                            searchable: s,
-                        } => {
-                            conversations = c;
-                            searchable = s;
-                        }
-                        SearchCommand::Search {
-                            mut query,
-                            mut generation,
-                            mut mode,
-                        } => {
-                            while let Ok(pending) = cmd_rx.try_recv() {
-                                match pending {
-                                    SearchCommand::UpdateData {
-                                        conversations: c,
-                                        searchable: s,
-                                    } => {
-                                        conversations = c;
-                                        searchable = s;
-                                    }
-                                    SearchCommand::Search {
-                                        query: q,
-                                        generation: g,
-                                        mode: m,
-                                    } => {
-                                        query = q;
-                                        generation = g;
-                                        mode = m;
-                                    }
-                                }
-                            }
-
-                            let now = chrono::Local::now();
-                            let filtered = search::search(&conversations, &searchable, &query, now);
-                            let parsed = ParsedQuery::parse(&query);
-                            let evidence =
-                                build_search_evidence(&conversations, &filtered, &parsed);
-
-                            let _ = res_tx.send(SearchResponse {
-                                filtered,
-                                generation,
-                                mode,
-                                evidence,
-                            });
-                        }
-                    }
-                }
-            });
+            let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
+            let index_pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(|i| format!("index-search-{i}"))
+                .build()
+                .expect("failed to create index search thread pool");
+            SearchWorker {
+                commands: cmd_rx,
+                responses: res_tx,
+                queued: VecDeque::new(),
+                conversations: Arc::default(),
+                searchable: Arc::default(),
+                index: None,
+                memory_pool,
+                index_pool,
+            }
+            .run();
         })
         .expect("failed to spawn search worker thread");
 
@@ -141,6 +304,7 @@ impl App {
     pub(super) fn invalidate_search_generation(&mut self) {
         self.search_generation += 1;
         self.search_in_flight = false;
+        self.search_page_shown = false;
         self.lexical_evidence.clear();
         self.semantic_search.pending_generation = None;
         self.semantic_search.pending_status = None;
@@ -269,6 +433,7 @@ impl App {
         self.semantic_search.results.clear();
         self.search_generation += 1;
         self.search_in_flight = true;
+        self.search_page_shown = false;
         self.semantic_search.error = None;
         let _ = self.search_tx.send(SearchCommand::Search {
             query,
@@ -279,6 +444,7 @@ impl App {
 
     fn dispatch_semantic_search(&mut self, query: String, prewarm: bool) {
         self.search_generation += 1;
+        self.search_page_shown = false;
         self.search_in_flight = !prewarm;
         self.semantic_search.pending_generation = Some(self.search_generation);
         // Embedding activity remains visible while a replacement query waits for the worker.
@@ -360,21 +526,50 @@ impl App {
         while let Ok(response) = self.search_rx.try_recv() {
             let semantic_fallback_pending = response.mode == ListSearchMode::Semantic
                 && self.semantic_search.pending_generation == Some(response.generation);
+            let index_current = match (&response.index, &self.search_index) {
+                (None, _) => true,
+                (Some(answered), Some(current)) => Arc::ptr_eq(answered, current),
+                (Some(_), None) => false,
+            };
             if response.generation == self.search_generation
                 && response.mode == self.list_search_mode
                 && (response.mode == ListSearchMode::Lexical || semantic_fallback_pending)
+                && index_current
             {
-                let filtered = self.filter_indices(response.filtered);
+                let (filtered, evidence) = if response.index.is_some() {
+                    let filtered = self.rows_of_docs(&response.filtered);
+                    let evidence = response
+                        .evidence
+                        .into_iter()
+                        .filter_map(|(doc, evidence)| {
+                            let row = *self.doc_rows.get(doc)?;
+                            Some((row?, evidence))
+                        })
+                        .collect();
+                    (filtered, evidence)
+                } else {
+                    (self.filter_indices(response.filtered), response.evidence)
+                };
                 if response.mode == ListSearchMode::Semantic && filtered.is_empty() {
-                    self.search_in_flight = false;
+                    self.search_in_flight = !response.complete;
                     continue;
                 }
-                self.lexical_evidence = response.evidence;
+                self.lexical_evidence = evidence;
                 if response.mode == ListSearchMode::Semantic {
                     self.semantic_search.results.clear();
                 }
+                if self.search_in_flight
+                    && !self.filtered.is_empty()
+                    && self.selection_anchor.is_none()
+                    && self.search_page_shown
+                {
+                    // The complete ranking extends the page already shown;
+                    // keep what the user selected on it.
+                    self.selection_anchor = self.get_selected_path();
+                }
                 self.apply_filtered(filtered);
-                self.search_in_flight = false;
+                self.search_page_shown = !response.complete;
+                self.search_in_flight = !response.complete;
                 applied = true;
             }
         }
@@ -569,14 +764,11 @@ impl App {
             self.workspace_filter = !self.workspace_filter;
             self.semantic_sent_scope_signature = None;
             self.invalidate_search_generation();
-            if self.snapshot.is_some() {
-                self.show_snapshot_cards();
-            } else if self.list_search_mode == ListSearchMode::Semantic
-                && !self.query.trim().is_empty()
-            {
-                self.dispatch_search();
-            } else {
+            self.send_index_scope();
+            if self.query.trim().is_empty() || !self.readiness.lexical {
                 self.update_filter();
+            } else {
+                self.dispatch_search();
             }
         }
     }
@@ -607,9 +799,14 @@ impl App {
         }
     }
 
-    pub(super) fn apply_lexical_filter(&mut self) {
+    /// Lists every conversation in scope, newest first.
+    fn apply_browse_filter(&mut self) {
+        if self.snapshot.is_some() {
+            self.show_snapshot_cards();
+            return;
+        }
         let now = Local::now();
-        let filtered = search::search(&self.conversations, &self.searchable, &self.query, now);
+        let filtered = search::search(&self.conversations, &[], "", now);
         let filtered = self.filter_indices(filtered);
         self.apply_filtered(filtered);
     }
@@ -617,9 +814,9 @@ impl App {
     pub(super) fn update_filter(&mut self) {
         let query = self.query.trim().to_string();
 
-        if ParsedQuery::parse(&query).is_effectively_empty() {
+        if ParsedQuery::parse(&query).is_effectively_empty() || !self.readiness.lexical {
             self.semantic_search.error = None;
-            self.apply_lexical_filter();
+            self.apply_browse_filter();
             return;
         }
 
@@ -633,9 +830,7 @@ impl App {
             return;
         }
 
-        self.semantic_search.error = None;
-        self.semantic_search.results.clear();
-        self.apply_lexical_filter();
+        self.dispatch_search();
     }
 
     pub(super) fn find_or_load_uuid(&mut self, uuid: &str) -> Option<usize> {
@@ -671,14 +866,20 @@ impl App {
         self.invalidate_search_generation();
     }
 
-    /// Rebuilds search data for the current corpus and shares it with the
-    /// background workers.
+    /// Shares the loaded corpus with the background workers. Lexical queries
+    /// run on the index when there is one, and otherwise over the corpus.
     fn send_search_data(&mut self) {
+        if self.pending.is_some() {
+            return;
+        }
         self.rebuild_semantic_conversations_snapshot();
-        self.searchable = Arc::new(search::precompute_search_text(&self.conversations));
-        let _ = self.search_tx.send(SearchCommand::UpdateData {
-            conversations: self.conversations.clone(),
-            searchable: self.searchable.clone(),
-        });
+        if self.search_index.is_some() {
+            self.locate_docs();
+            self.send_index_scope();
+        } else {
+            let _ = self.search_tx.send(SearchCommand::UpdateData {
+                conversations: self.conversations.clone(),
+            });
+        }
     }
 }

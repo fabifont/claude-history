@@ -23,6 +23,18 @@ impl StrRef {
     }
 }
 
+/// Frame of a conversation's text in a generation's text segments (see
+/// `text`). An empty ref stands for empty text.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
+pub struct BlobRef {
+    /// Segment number, `text-NNNN.zst`.
+    pub seg: u32,
+    /// Compressed length in bytes.
+    pub len: u32,
+    pub off: u64,
+}
+
 /// One conversation in the list, pre-sorted newest first.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -32,6 +44,11 @@ pub struct CardRow {
     /// `Conversation::timestamp` in epoch milliseconds; the sort key.
     pub timestamp_ms: i64,
     pub total_tokens: u64,
+    /// Hash of `Conversation::full_text`, so an identical manifest implies
+    /// identical text.
+    pub text_hash: u64,
+    /// `Conversation::full_text`.
+    pub text: BlobRef,
     pub path: StrRef,
     pub session_id: StrRef,
     pub custom_title: StrRef,
@@ -111,7 +128,7 @@ pub struct Header {
 }
 
 pub const MAGIC: [u8; 8] = *b"CHGEN\0\0\0";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 pub fn source_to_u8(source: crate::history::Source) -> u8 {
     match source {
@@ -148,7 +165,7 @@ mod tests {
 
     #[test]
     fn records_have_no_implicit_padding() {
-        assert_eq!(std::mem::size_of::<CardRow>(), 104);
+        assert_eq!(std::mem::size_of::<CardRow>(), 128);
         assert_eq!(std::mem::size_of::<ProjectRow>(), 32);
         assert_eq!(std::mem::size_of::<Fingerprint>(), 16);
         assert_eq!(std::mem::size_of::<Header>(), 64);

@@ -226,15 +226,11 @@ impl App {
                 self.dialog_mode = DialogMode::None;
                 self.status_message =
                     Some(("Session renamed".to_string(), std::time::Instant::now()));
+                // The index holds the old title.
+                self.drop_search_index();
                 self.refresh_search_data();
+                self.selection_anchor = Some(path);
                 self.update_filter();
-                if let Some(new_selected) = self
-                    .filtered
-                    .iter()
-                    .position(|&i| self.conversations[i].path == path)
-                {
-                    self.selected = Some(new_selected);
-                }
             }
             Ok(None) => {
                 self.status_message = Some((

@@ -1,12 +1,24 @@
-use crate::history::Conversation;
 use crate::search::literal::Literal;
 use crate::search::query::ParsedQuery;
 use crate::text_match::{is_word_start, next_lowercase_candidate, normalize_for_search};
 
+/// Where a conversation's text matches a query beyond its preview.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LexicalEvidence {
+    /// The text around the ranges: windows of `CONTEXT_WINDOW_CHARS` chars on
+    /// each side of every range, cut from the conversation text, with each
+    /// left-out stretch replaced by `ELIDED`. Any context a list row shows
+    /// around a range is the same as in the whole text.
+    pub text: String,
+    /// Byte ranges of the matches in `text`, in order.
     pub context_ranges: Vec<(usize, usize)>,
 }
+
+/// Characters kept on each side of a context range, more than half of any
+/// list row.
+const CONTEXT_WINDOW_CHARS: usize = 1024;
+/// Stands in for text left out of `LexicalEvidence::text`.
+const ELIDED: &str = "\u{2026}";
 
 #[derive(Clone, Copy, Debug)]
 struct TermHit {
@@ -69,8 +81,11 @@ impl EvidenceSpec {
     }
 }
 
+/// Evidence that `full_text` matches `parsed` beyond `preview`, or `None`
+/// when the preview already shows every match.
 pub fn build_lexical_evidence(
-    conversation: &Conversation,
+    full_text: &str,
+    preview: &str,
     parsed: &ParsedQuery,
 ) -> Option<LexicalEvidence> {
     let specs = evidence_specs(parsed);
@@ -78,10 +93,71 @@ pub fn build_lexical_evidence(
         return None;
     }
 
-    let ranges = select_context_ranges(&conversation.full_text, &conversation.preview, &specs)?;
-    Some(LexicalEvidence {
-        context_ranges: ranges,
-    })
+    let ranges = select_context_ranges(full_text, preview, &specs)?;
+    Some(excerpt(full_text, &ranges))
+}
+
+/// The ranges `build_lexical_evidence` selects, in `full_text`.
+#[cfg(test)]
+pub(crate) fn full_text_context_ranges(
+    full_text: &str,
+    preview: &str,
+    parsed: &ParsedQuery,
+) -> Option<Vec<(usize, usize)>> {
+    select_context_ranges(full_text, preview, &evidence_specs(parsed))
+}
+
+/// Cuts the windows around `ranges` out of `full_text`.
+fn excerpt(full_text: &str, ranges: &[(usize, usize)]) -> LexicalEvidence {
+    let back = |at: usize| {
+        full_text[..at]
+            .char_indices()
+            .rev()
+            .nth(CONTEXT_WINDOW_CHARS - 1)
+            .map_or(0, |(index, _)| index)
+    };
+    let forward = |at: usize| {
+        full_text[at..]
+            .char_indices()
+            .nth(CONTEXT_WINDOW_CHARS)
+            .map_or(full_text.len(), |(index, _)| at + index)
+    };
+    // Windows that overlap or touch are merged, so text between two of them
+    // is always left out.
+    let mut windows: Vec<(usize, usize)> = Vec::new();
+    for &(start, end) in ranges {
+        let (from, to) = (back(start), forward(end));
+        match windows.last_mut() {
+            Some(last) if from <= last.1 => last.1 = last.1.max(to),
+            _ => windows.push((from, to)),
+        }
+    }
+
+    let mut text = String::new();
+    let mut context_ranges = Vec::with_capacity(ranges.len());
+    let mut copied_to = 0;
+    let mut ranges = ranges.iter().peekable();
+    for (from, to) in windows {
+        if from > copied_to {
+            text.push_str(ELIDED);
+        }
+        let offset = text.len();
+        text.push_str(&full_text[from..to]);
+        while let Some(&&(start, end)) = ranges.peek()
+            && end <= to
+        {
+            context_ranges.push((start - from + offset, end - from + offset));
+            ranges.next();
+        }
+        copied_to = to;
+    }
+    if copied_to < full_text.len() {
+        text.push_str(ELIDED);
+    }
+    LexicalEvidence {
+        text,
+        context_ranges,
+    }
 }
 
 fn evidence_specs(parsed: &ParsedQuery) -> Vec<EvidenceSpec> {
@@ -340,6 +416,7 @@ fn normalize_evidence_char(ch: char) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::Conversation;
 
     /// Char-by-char reference for `find_normalized_term_ranges`.
     fn reference_term_ranges(text: &str, term: &str) -> Vec<(usize, usize)> {
@@ -465,11 +542,13 @@ mod tests {
             "unrelated preview followed by hidden deepgram evidence",
         );
 
-        let evidence = build_lexical_evidence(&conversation, &parsed).unwrap();
+        let evidence =
+            build_lexical_evidence(&conversation.full_text, &conversation.preview, &parsed)
+                .unwrap();
 
         assert_eq!(evidence.context_ranges.len(), 1);
         let (start, end) = evidence.context_ranges[0];
-        assert!(conversation.full_text[start..end].contains("deepgram"));
+        assert!(evidence.text[start..end].contains("deepgram"));
     }
 
     #[test]
@@ -480,10 +559,12 @@ mod tests {
             "audio generation normalized preview and exact audio_generation evidence",
         );
 
-        let evidence = build_lexical_evidence(&conversation, &parsed).unwrap();
+        let evidence =
+            build_lexical_evidence(&conversation.full_text, &conversation.preview, &parsed)
+                .unwrap();
 
         let (start, end) = evidence.context_ranges[0];
-        assert_eq!(&conversation.full_text[start..end], "audio_generation");
+        assert_eq!(&evidence.text[start..end], "audio_generation");
     }
 
     #[test]
@@ -494,12 +575,14 @@ mod tests {
             "api key normalized preview and exact api_key evidence",
         );
 
-        let evidence = build_lexical_evidence(&conversation, &parsed).unwrap();
+        let evidence =
+            build_lexical_evidence(&conversation.full_text, &conversation.preview, &parsed)
+                .unwrap();
 
         let snippets = evidence
             .context_ranges
             .iter()
-            .map(|(start, end)| &conversation.full_text[*start..*end])
+            .map(|(start, end)| &evidence.text[*start..*end])
             .collect::<Vec<_>>();
         assert!(snippets.iter().any(|snippet| snippet.contains("api_key")));
     }
@@ -510,11 +593,13 @@ mod tests {
         let full_text = format!("hidden_unquoted {} exact_literal", "x ".repeat(120));
         let conversation = conversation("visible preview", &full_text);
 
-        let evidence = build_lexical_evidence(&conversation, &parsed).unwrap();
+        let evidence =
+            build_lexical_evidence(&conversation.full_text, &conversation.preview, &parsed)
+                .unwrap();
         let snippets = evidence
             .context_ranges
             .iter()
-            .map(|(start, end)| &conversation.full_text[*start..*end])
+            .map(|(start, end)| &evidence.text[*start..*end])
             .collect::<Vec<_>>();
 
         assert!(

@@ -1,6 +1,6 @@
 use crate::config::KeyBindings;
 use crate::history::{Conversation, format_short_name_from_path, process_conversation_file};
-use crate::search::{self, SearchableConversation};
+use crate::search;
 #[cfg(test)]
 use crate::semantic::types::{SemanticExplanation, SemanticScoreBreakdown};
 #[cfg(test)]
@@ -27,7 +27,9 @@ mod search_state;
 mod types;
 mod view_state;
 #[allow(unused_imports)]
-use search_state::{SearchCommand, SearchResponse, SemanticSearchState, spawn_search_worker};
+use search_state::{
+    IndexScope, SearchCommand, SearchResponse, SemanticSearchState, spawn_search_worker,
+};
 #[allow(unused_imports)]
 pub use types::{
     Action, AppMode, DialogMode, LIST_LINES_PER_ITEM, ListSearchMode, Readiness, ReconcileState,
@@ -53,8 +55,6 @@ pub struct App {
     semantic_sent_corpus_version: u64,
     /// Last scope signature sent to the semantic worker
     semantic_sent_scope_signature: Option<(u64, Arc<Vec<usize>>)>,
-    /// Precomputed search data, shared with the search worker
-    searchable: Arc<Vec<SearchableConversation>>,
     /// Indices into conversations, sorted by current score
     filtered: Vec<usize>,
     /// Currently selected index into filtered (None if no results)
@@ -69,6 +69,10 @@ pub struct App {
     readiness: Readiness,
     /// Snapshot whose cards are shown while loading
     snapshot: Option<crate::store::Snapshot>,
+    /// Generation index lexical queries run against, when there is one
+    search_index: Option<Arc<crate::store::SearchIndex>>,
+    /// For each card of the snapshot or index, its index in `conversations`
+    doc_rows: Vec<Option<usize>>,
     /// Loaded conversations held back while snapshot cards are shown
     pending: Option<Vec<Conversation>>,
     /// Current dialog overlay (confirm, menu)
@@ -101,6 +105,9 @@ pub struct App {
     search_generation: u64,
     /// Whether a search is currently in-flight on the worker thread
     search_in_flight: bool,
+    /// Whether `filtered` is the first page of an index search still being
+    /// completed
+    search_page_shown: bool,
     /// Current list search mode
     list_search_mode: ListSearchMode,
     /// Semantic TUI state
@@ -112,7 +119,6 @@ pub struct App {
 struct AppParts {
     conversations: Arc<Vec<Conversation>>,
     semantic_conversations_snapshot: Arc<Vec<Arc<Conversation>>>,
-    searchable: Arc<Vec<SearchableConversation>>,
     filtered: Vec<usize>,
     selected: Option<usize>,
     readiness: Readiness,
@@ -139,7 +145,6 @@ impl App {
             semantic_sent_corpus_version: 0,
             semantic_sent_scope_signature: None,
             conversations: parts.conversations,
-            searchable: parts.searchable,
             filtered: parts.filtered,
             selected: parts.selected,
             selection_anchor: None,
@@ -147,6 +152,8 @@ impl App {
             cursor_pos: 0,
             readiness: parts.readiness,
             snapshot: None,
+            search_index: None,
+            doc_rows: Vec::new(),
             pending: None,
             dialog_mode: DialogMode::None,
             app_mode: parts.app_mode,
@@ -163,6 +170,7 @@ impl App {
             search_rx: parts.search_rx,
             search_generation: 0,
             search_in_flight: false,
+            search_page_shown: false,
             list_search_mode: parts.list_search_mode,
             semantic_search: parts.semantic_search,
             lexical_evidence: HashMap::new(),
@@ -212,7 +220,6 @@ impl App {
         exclude_projects: Vec<String>,
         search_options: TuiSearchOptions,
     ) -> Self {
-        let searchable = Arc::new(search::precompute_search_text(&conversations));
         let excluded_projects = exclude_projects.into_iter().collect();
         let filtered = list_state::filter_conversation_indices(
             0..conversations.len(),
@@ -227,13 +234,11 @@ impl App {
         let conversations = Arc::new(conversations);
         let _ = search_tx.send(SearchCommand::UpdateData {
             conversations: conversations.clone(),
-            searchable: searchable.clone(),
         });
 
         Self::from_parts(AppParts {
             semantic_conversations_snapshot,
             conversations,
-            searchable,
             filtered,
             selected,
             readiness: Readiness::ready(),
@@ -267,7 +272,6 @@ impl App {
         Self::from_parts(AppParts {
             semantic_conversations_snapshot: Arc::default(),
             conversations: Arc::default(),
-            searchable: Arc::default(),
             filtered: Vec::new(),
             selected: None,
             readiness: Readiness::default(),
@@ -315,7 +319,6 @@ impl App {
         Self::from_parts(AppParts {
             semantic_conversations_snapshot: Self::semantic_snapshot(&conversations),
             conversations: Arc::new(conversations),
-            searchable: Arc::default(),
             filtered,
             selected,
             readiness: Readiness::ready(),
@@ -347,6 +350,8 @@ impl App {
     /// Shows the newest cards of `snapshot` until loading finishes. Loaded
     /// batches are held back meanwhile and swapped in by `finish_loading`.
     pub fn show_snapshot(&mut self, snapshot: crate::store::Snapshot) {
+        self.doc_rows = vec![None; snapshot.len()];
+        self.conversations = Arc::default();
         self.snapshot = Some(snapshot);
         self.pending = Some(Vec::new());
         self.show_snapshot_cards();
@@ -357,18 +362,132 @@ impl App {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        let workspace = list_state::WorkspaceScope::new(
+        let workspace = self.workspace_scope();
+        let docs = snapshot.head(SNAPSHOT_ROWS, |project| {
+            list_state::card_project_visible(project, &self.excluded_projects, &workspace)
+        });
+        let filtered = docs.into_iter().map(|doc| self.card_row(doc)).collect();
+        self.apply_filtered(filtered);
+        self.readiness.list = true;
+    }
+
+    fn workspace_scope(&self) -> list_state::WorkspaceScope<'_> {
+        list_state::WorkspaceScope::new(
             self.current_project_dir_name
                 .as_deref()
                 .filter(|_| self.workspace_filter),
-        );
-        let cards = snapshot.conversations(SNAPSHOT_ROWS, |project| {
+        )
+    }
+
+    /// Index in `conversations` of snapshot card `doc`, materializing it on
+    /// first use.
+    fn card_row(&mut self, doc: u32) -> usize {
+        if let Some(row) = self.doc_rows[doc as usize] {
+            return row;
+        }
+        let snapshot = self.snapshot.as_ref().expect("cards come from a snapshot");
+        let mut card = snapshot.card(doc);
+        let row = self.conversations.len();
+        card.index = row;
+        Arc::make_mut(&mut self.conversations).push(card);
+        self.doc_rows[doc as usize] = Some(row);
+        row
+    }
+
+    /// Opens the index of the snapshot being shown, so lexical queries run
+    /// before loading finishes. Returns whether one was opened.
+    pub fn open_search_index(&mut self) -> bool {
+        let Some(snapshot) = &self.snapshot else {
+            return false;
+        };
+        let Some(index) = crate::store::SearchIndex::open(snapshot.clone()) else {
+            return false;
+        };
+        self.search_index = Some(Arc::new(index));
+        self.send_index_scope();
+        self.readiness.lexical = true;
+        if !self.query.trim().is_empty() {
+            self.dispatch_search();
+        }
+        true
+    }
+
+    /// Switches to the index of `snapshot` if it is a newer generation than
+    /// the one in use, and reruns the query on it keeping the selection.
+    /// Only applies once loading has finished; until then the snapshot shown
+    /// stays in use.
+    pub fn swap_search_index(&mut self, snapshot: crate::store::Snapshot) -> bool {
+        if self.pending.is_some()
+            || self
+                .search_index
+                .as_ref()
+                .is_some_and(|index| index.cards().generation_name() == snapshot.generation_name())
+        {
+            return false;
+        }
+        let Some(index) = crate::store::SearchIndex::open(snapshot) else {
+            return false;
+        };
+        self.search_index = Some(Arc::new(index));
+        self.locate_docs();
+        self.send_index_scope();
+        self.readiness.lexical = true;
+        if !self.query.trim().is_empty() {
+            self.selection_anchor = self.get_selected_path();
+            self.dispatch_search();
+        }
+        true
+    }
+
+    /// Maps the index's cards to the loaded conversations.
+    fn locate_docs(&mut self) {
+        self.doc_rows = match &self.search_index {
+            Some(index) => index.cards().locate(&self.conversations),
+            None => Vec::new(),
+        };
+    }
+
+    /// Sends the index and the cards in scope to the search worker.
+    pub(super) fn send_index_scope(&mut self) {
+        let Some(index) = &self.search_index else {
+            return;
+        };
+        let workspace = self.workspace_scope();
+        let mut docs = index.cards().scope(|project| {
             list_state::card_project_visible(project, &self.excluded_projects, &workspace)
         });
-        let filtered = (0..cards.len()).collect();
-        self.conversations = Arc::new(cards);
-        self.apply_filtered(filtered);
-        self.readiness.list = true;
+        if self.pending.is_none() {
+            for (doc, row) in docs.iter_mut().zip(&self.doc_rows) {
+                *doc &= row.is_some();
+            }
+        }
+        let _ = self
+            .search_tx
+            .send(SearchCommand::UseIndex(Some(IndexScope {
+                index: index.clone(),
+                docs: Arc::new(docs),
+            })));
+    }
+
+    /// Conversation rows of index cards `docs`, in order. Cards without a
+    /// loaded conversation are dropped.
+    pub(super) fn rows_of_docs(&mut self, docs: &[usize]) -> Vec<usize> {
+        if self.pending.is_some() {
+            docs.iter().map(|&doc| self.card_row(doc as u32)).collect()
+        } else {
+            docs.iter()
+                .filter_map(|&doc| self.doc_rows.get(doc).copied().flatten())
+                .collect()
+        }
+    }
+
+    /// Stops searching the index; queries then run over the loaded
+    /// conversations, which must be loaded.
+    pub(super) fn drop_search_index(&mut self) {
+        if self.search_index.take().is_some() {
+            self.doc_rows.clear();
+            let _ = self.search_tx.send(SearchCommand::UseIndex(None));
+        }
     }
 
     /// Append a batch of conversations during loading
@@ -398,8 +517,9 @@ impl App {
         };
     }
 
-    /// Mark loading as complete: sort, precompute search, and transition to
-    /// ready. Replaces any snapshot cards, keeping the selected session.
+    /// Mark loading as complete: sort, share the corpus with the search
+    /// workers, and transition to ready. Replaces any snapshot cards, keeping
+    /// the selected session.
     pub fn finish_loading(&mut self) {
         if let Some(loaded) = self.pending.take() {
             self.snapshot = None;
@@ -420,7 +540,6 @@ impl App {
             conv.index = idx;
         }
 
-        // Precompute search text and share it with the background workers
         self.refresh_search_data();
 
         self.readiness = Readiness::ready();
@@ -457,6 +576,8 @@ impl App {
         self.conversations = Arc::new(conversations);
         self.filtered.clear();
         self.selected = None;
+        // The index holds the corpus before the refresh.
+        self.drop_search_index();
         self.refresh_search_data();
 
         if self.query.trim().is_empty() {
@@ -480,9 +601,9 @@ impl App {
         &self.readiness
     }
 
-    /// Whether the full corpus is still loading, so queries and edits wait.
+    /// Whether the full corpus is still loading, so edits wait.
     pub fn is_loading(&self) -> bool {
-        !self.readiness.lexical
+        self.readiness.reconcile != ReconcileState::Done
     }
 
     pub(crate) fn shared_conversations(&self) -> Arc<Vec<Conversation>> {

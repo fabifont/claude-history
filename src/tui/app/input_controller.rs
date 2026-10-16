@@ -451,7 +451,9 @@ impl App {
                     return self.get_selected_path().map(Action::Select);
                 }
             }
-            return self.handle_common_list_key(code, modifiers, false);
+            let dispatch_search =
+                self.readiness.lexical && self.list_search_mode == ListSearchMode::Lexical;
+            return self.handle_common_list_key(code, modifiers, dispatch_search);
         }
 
         if self.keys.delete.matches(code, modifiers) {

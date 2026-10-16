@@ -1,22 +1,26 @@
-//! Disk snapshot of the conversation list, readable before any history is
-//! loaded.
+//! Disk snapshot of the conversation list and its lexical index, readable
+//! before any history is loaded.
 //!
 //! The snapshot is a generation directory under `v3/roots-<hash>/` in the
-//! cache dir (see `default_root` and `generation`). The TUI renders its first frame from the newest cards and
-//! replaces them with fully loaded conversations once loading finishes.
+//! cache dir (see `default_root` and `generation`). The TUI renders its first
+//! frame from the newest cards, searches the generation's index, and replaces
+//! the cards with fully loaded conversations once loading finishes.
 
 pub mod card;
 pub mod generation;
-#[cfg_attr(not(test), allow(dead_code))]
 pub mod lexindex;
-#[cfg_attr(not(test), allow(dead_code))]
 pub mod search;
+pub mod text;
 
 pub use generation::{Generation, ProjectView, Publish};
 
 use crate::history::Conversation;
 use crate::time_filter::TimeFilter;
+use chrono::{DateTime, Local};
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 /// Store root: `v3/roots-<hash>/` beside the other caches. The cache dir is
@@ -59,8 +63,9 @@ fn source_roots_namespace(pi: Option<&Path>, omp: Option<&Path>) -> String {
 }
 
 /// Cards of the current generation, shown until the full corpus is loaded.
+#[derive(Clone)]
 pub struct Snapshot {
-    generation: Generation,
+    generation: Arc<Generation>,
     show_last: bool,
     time: TimeFilter,
 }
@@ -70,7 +75,7 @@ impl Snapshot {
     /// usable one.
     pub fn open(root: &Path, show_last: bool, time: TimeFilter) -> Option<Self> {
         Some(Self {
-            generation: Generation::open(root)?,
+            generation: Arc::new(Generation::open(root)?),
             show_last,
             time,
         })
@@ -80,34 +85,138 @@ impl Snapshot {
         self.generation.name()
     }
 
-    /// The newest `n` cards inside the time filter whose project passes
-    /// `project_visible`, as list-only conversations indexed from 0.
-    pub fn conversations(
+    /// Number of cards; doc ids are `0..len()`.
+    pub fn len(&self) -> usize {
+        self.generation.rows().len()
+    }
+
+    /// Ids of the newest `n` cards inside the time filter whose project
+    /// passes `project_visible`.
+    pub fn head(&self, n: usize, project_visible: impl FnMut(&ProjectView) -> bool) -> Vec<u32> {
+        let visible = self.project_visibility(project_visible);
+        self.generation.head(n, |row| {
+            visible[row.project_id as usize] && in_time(&self.time, row)
+        })
+    }
+
+    /// For every card, whether it is inside the time filter and its project
+    /// passes `project_visible`.
+    pub fn scope(&self, project_visible: impl FnMut(&ProjectView) -> bool) -> Vec<bool> {
+        let visible = self.project_visibility(project_visible);
+        self.generation
+            .rows()
+            .iter()
+            .map(|row| visible[row.project_id as usize] && in_time(&self.time, row))
+            .collect()
+    }
+
+    fn project_visibility(
         &self,
-        n: usize,
         mut project_visible: impl FnMut(&ProjectView) -> bool,
-    ) -> Vec<Conversation> {
-        let generation = &self.generation;
-        let visible: Vec<bool> = (0..generation.projects().len() as u32)
-            .map(|id| project_visible(&generation.project(id)))
-            .collect();
-        let time = &self.time;
-        generation
-            .head(n, |row| {
-                visible[row.project_id as usize]
-                    && (!time.is_active()
-                        || chrono::DateTime::from_timestamp_millis(row.timestamp_ms)
-                            .is_some_and(|timestamp| time.matches(timestamp)))
-            })
-            .into_iter()
+    ) -> Vec<bool> {
+        (0..self.generation.projects().len() as u32)
+            .map(|id| project_visible(&self.generation.project(id)))
+            .collect()
+    }
+
+    /// Card `doc` as a list-only conversation.
+    pub fn card(&self, doc: u32) -> Conversation {
+        self.generation.conversation(doc, self.show_last)
+    }
+
+    /// The preview card `doc` shows.
+    pub fn preview(&self, doc: u32) -> &str {
+        let row = &self.generation.rows()[doc as usize];
+        self.generation.str(if self.show_last {
+            row.preview_last
+        } else {
+            row.preview_first
+        })
+    }
+
+    /// For every card, the index in `conversations` of the conversation
+    /// stored at the same path, if any.
+    pub fn locate(&self, conversations: &[Conversation]) -> Vec<Option<usize>> {
+        let by_path: HashMap<&Path, usize> = conversations
+            .iter()
             .enumerate()
-            .map(|(index, row)| {
-                let mut conversation = generation.conversation(row, self.show_last);
-                conversation.index = index;
-                conversation
+            .map(|(index, conversation)| (conversation.path.as_path(), index))
+            .collect();
+        self.generation
+            .rows()
+            .iter()
+            .map(|row| {
+                by_path
+                    .get(Path::new(self.generation.str(row.path)))
+                    .copied()
             })
             .collect()
     }
+}
+
+fn in_time(time: &TimeFilter, row: &card::CardRow) -> bool {
+    !time.is_active()
+        || chrono::DateTime::from_timestamp_millis(row.timestamp_ms)
+            .is_some_and(|timestamp| time.matches(timestamp))
+}
+
+/// A generation's cards, suffix index and text, ready for lexical search.
+pub struct SearchIndex {
+    cards: Snapshot,
+    index: lexindex::LexIndex,
+    text: text::TextSegments,
+    docs: search::SearchDocs,
+}
+
+impl SearchIndex {
+    /// Opens the index and text of the generation behind `cards`; `None`
+    /// when it has none usable.
+    pub fn open(cards: Snapshot) -> Option<Self> {
+        let (index, text) = cards.generation.open_search_files()?;
+        Some(Self {
+            docs: search::SearchDocs::from_generation(&cards.generation),
+            cards,
+            index,
+            text,
+        })
+    }
+
+    pub fn cards(&self) -> &Snapshot {
+        &self.cards
+    }
+
+    /// Starts `query` over the documents for which `scope` holds.
+    pub fn search<'a>(
+        &'a self,
+        query: &str,
+        now: DateTime<Local>,
+        scope: &(dyn Fn(u32) -> bool + Sync),
+    ) -> search::Ranking<'a> {
+        search::search(&self.index, &self.docs, self, query, now, scope)
+    }
+
+    /// `Conversation::full_text` of card `doc`, decompressed from its frame.
+    pub fn text(&self, doc: u32) -> String {
+        let row = &self.cards.generation.rows()[doc as usize];
+        self.text.read(row.text).unwrap_or_default()
+    }
+}
+
+impl search::TextSource for SearchIndex {
+    fn full_text(&self, doc: u32) -> Cow<'_, str> {
+        Cow::Owned(self.text(doc))
+    }
+}
+
+/// Whether `CURRENT` under `root` already holds `conversations` (the
+/// complete corpus, loaded starting at `loaded_since`) with its index, so
+/// `write_snapshot` would write nothing.
+pub fn snapshot_is_current(
+    root: &Path,
+    conversations: &[Conversation],
+    loaded_since: SystemTime,
+) -> bool {
+    generation::is_current(root, &corpus(conversations, loaded_since))
 }
 
 /// Writes a generation for `conversations` (the complete corpus, loaded
@@ -117,12 +226,15 @@ pub fn write_snapshot(
     conversations: &[Conversation],
     loaded_since: SystemTime,
 ) -> std::io::Result<Publish> {
-    let fingerprints: Vec<_> = conversations
+    generation::publish(root, &corpus(conversations, loaded_since))
+}
+
+fn corpus(conversations: &[Conversation], loaded_since: SystemTime) -> generation::Corpus<'_> {
+    let fingerprints = conversations
         .iter()
         .map(|conversation| generation::fingerprint(&conversation.path, loaded_since))
         .collect();
-    let manifest = generation::build_manifest(conversations, &fingerprints);
-    generation::publish(root, &manifest)
+    generation::Corpus::new(conversations, fingerprints)
 }
 
 #[cfg(test)]

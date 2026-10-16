@@ -91,6 +91,8 @@ enum RuntimeEvent {
     InputError(io::Error),
     Loader(LoaderMessage),
     LoaderDisconnected,
+    /// The snapshot builder finished; `CURRENT` may name a new generation.
+    SnapshotBuilt,
 }
 
 /// How long the input thread waits for terminal input before checking
@@ -326,17 +328,25 @@ impl LoadState {
                     }
                 }
             }
-            RuntimeEvent::Input(_) | RuntimeEvent::InputError(_) => {}
+            RuntimeEvent::Input(_) | RuntimeEvent::InputError(_) | RuntimeEvent::SnapshotBuilt => {}
         }
         Ok(false)
     }
 }
 
-/// Snapshot of the list on disk: read for the first frame, rewritten from
-/// the loaded corpus.
+/// Snapshot of the list on disk: read for the first frame, rebuilt from the
+/// loaded corpus.
 struct SnapshotStore {
     root: Option<PathBuf>,
-    writer: Option<JoinHandle<io::Result<crate::store::Publish>>>,
+    writer: Option<JoinHandle<io::Result<SnapshotWrite>>>,
+}
+
+#[derive(Debug)]
+enum SnapshotWrite {
+    /// `CURRENT` already holds the loaded corpus; nothing was written.
+    Unchanged,
+    /// A builder process ran and exited with this status.
+    Built(std::process::ExitStatus),
 }
 
 impl SnapshotStore {
@@ -351,15 +361,22 @@ impl SnapshotStore {
         crate::store::Snapshot::open(self.root.as_deref()?, show_last, time_filter)
     }
 
-    /// Writes the loaded corpus in the background. Only a complete load
-    /// outside any time window is the whole corpus, so nothing else is
-    /// written.
+    /// Rebuilds the snapshot in the background unless it already holds the
+    /// loaded corpus, and calls `built` once a builder process has exited.
+    /// Only a complete load outside any time window is the whole corpus, so
+    /// nothing else is compared or written.
+    ///
+    /// Building the index takes many seconds, longer than many sessions
+    /// last, so it runs in a separate process (`publish_snapshot`) that
+    /// outlives the TUI. Writing nothing on an unchanged corpus is decided
+    /// here, from the loaded conversations, without starting it.
     fn write(
         &mut self,
         app: &App,
         load: &LoadState,
         time_filter: TimeFilter,
         loaded_since: SystemTime,
+        built: impl FnOnce() + Send + 'static,
     ) {
         let Some(root) = self.root.clone() else {
             return;
@@ -371,30 +388,97 @@ impl SnapshotStore {
         self.writer = std::thread::Builder::new()
             .name("snapshot-writer".into())
             .spawn(move || {
-                let result = crate::store::write_snapshot(&root, &conversations, loaded_since);
-                crate::bench::mark("snapshot_write");
-                result
+                let current =
+                    crate::store::snapshot_is_current(&root, &conversations, loaded_since);
+                drop(conversations);
+                crate::bench::mark("snapshot_checked");
+                if current {
+                    return Ok(SnapshotWrite::Unchanged);
+                }
+                let status = spawn_snapshot_builder()?.wait()?;
+                crate::bench::mark("snapshot_built");
+                built();
+                Ok(SnapshotWrite::Built(status))
             })
             .ok();
     }
 
-    /// Waits for a pending write so it is not cut short by exiting.
-    fn finish(&mut self) -> Option<crate::store::Publish> {
-        self.writer
-            .take()?
-            .join()
-            .ok()?
-            .map_err(|err| {
-                let _ = debug_log::log_debug(&format!("Failed to write list snapshot: {err}"));
-            })
-            .ok()
+    /// Waits for the check and any builder process to finish.
+    fn finish(&mut self) -> Option<SnapshotWrite> {
+        let outcome = self.writer.take()?.join().ok()?;
+        match &outcome {
+            Ok(SnapshotWrite::Built(status)) if !status.success() => {
+                let _ = debug_log::log_debug(&format!("List snapshot builder failed: {status}"));
+            }
+            Err(err) => {
+                let _ = debug_log::log_debug(&format!("Failed to build list snapshot: {err}"));
+            }
+            Ok(_) => {}
+        }
+        outcome.ok()
     }
 }
 
-impl Drop for SnapshotStore {
-    fn drop(&mut self) {
-        self.finish();
+/// Starts `claude-history --publish-snapshot` in its own session, so it keeps
+/// running when the TUI exits or replaces itself with an agent.
+fn spawn_snapshot_builder() -> io::Result<std::process::Child> {
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("--publish-snapshot")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null());
+    if crate::bench::enabled() {
+        command
+            .env("CLAUDE_HISTORY_BENCH", "1")
+            .stderr(Stdio::inherit());
+    } else {
+        command.stderr(Stdio::null());
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid is async-signal-safe and touches no Rust state.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    command.spawn()
+}
+
+/// Entry point of the snapshot builder process: loads the whole history and
+/// publishes it with its index and text, at low priority. Publishes nothing
+/// when any project fails to load.
+pub fn publish_snapshot() -> Result<()> {
+    #[cfg(unix)]
+    // SAFETY: lowers this process's own scheduling priority.
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+    }
+    let Some(root) = crate::store::default_root() else {
+        return Ok(());
+    };
+    let loaded_since = SystemTime::now();
+    let mut conversations = Vec::new();
+    for message in
+        crate::history::load_all_conversations_streaming(false, None, TimeFilter::default())
+    {
+        match message {
+            LoaderMessage::Batch(batch) => conversations.extend(batch),
+            LoaderMessage::Done => break,
+            LoaderMessage::ProjectError => return Ok(()),
+            LoaderMessage::Fatal(err) => return Err(err),
+        }
+    }
+    crate::bench::mark("publish_loaded");
+    let outcome = crate::store::write_snapshot(&root, &conversations, loaded_since)?;
+    crate::bench::mark("publish_done");
+    crate::bench::mark_peak_rss_as("publish_peak_rss");
+    let _ = debug_log::log_debug(&format!("List snapshot: {outcome:?}"));
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -410,8 +494,6 @@ pub fn run_with_loader(
     exclude_projects: Vec<String>,
     search_options: TuiSearchOptions,
 ) -> Result<(Action, Arc<Vec<Conversation>>)> {
-    // Declared before the terminal so that exiting restores the terminal
-    // before waiting for a snapshot write.
     let mut snapshot = SnapshotStore::new();
     let mut guard = TerminalGuard::new()?;
     let (events_tx, events_rx) = mpsc::channel();
@@ -431,6 +513,9 @@ pub fn run_with_loader(
     prepare_frame(&mut app, &mut guard.terminal);
     draw_frame(&app, &mut guard.terminal)?;
     let mut reported_first_rows = report_first_rows(&app);
+    if app.open_search_index() {
+        crate::bench::mark("index_open");
+    }
 
     let loaded_since = SystemTime::now();
     let mut load = LoadState::default();
@@ -450,7 +535,10 @@ pub fn run_with_loader(
         if std::mem::take(&mut report_load_done) {
             crate::bench::mark("load_done");
             crate::bench::mark_peak_rss();
-            snapshot.write(&app, &load, time_filter, loaded_since);
+            let events = events_tx.clone();
+            snapshot.write(&app, &load, time_filter, loaded_since, move || {
+                let _ = events.send(RuntimeEvent::SnapshotBuilt);
+            });
         }
         if app.receive_search_results() {
             draw_frame(&app, &mut guard.terminal)?;
@@ -481,6 +569,12 @@ pub fn run_with_loader(
             let ev = match event {
                 RuntimeEvent::Input(ev) => ev,
                 RuntimeEvent::InputError(err) => return Err(AppError::Io(err)),
+                RuntimeEvent::SnapshotBuilt => {
+                    if let Some(cards) = snapshot.open(show_last, time_filter) {
+                        app.swap_search_index(cards);
+                    }
+                    continue;
+                }
                 loader_event => {
                     report_load_done |= load.apply(&mut app, loader_event)?;
                     if batch_started.elapsed() < Duration::from_millis(8) {
@@ -608,7 +702,13 @@ fn report_first_rows(app: &App) -> bool {
 }
 
 /// Runs the list startup path against an offscreen terminal and prints timing
-/// marks: first populated frame, loading finished, and results for `query`.
+/// marks: first populated frame, the first page and complete ranking of
+/// `query`, loading finished, and the snapshot rebuild.
+///
+/// The query runs as soon as lexical search is ready: right after the first
+/// frame when the snapshot has an index, otherwise after loading. When
+/// `CLAUDE_HISTORY_BENCH_QUERIES` names a file, each of its lines is then
+/// run the same way and the latency percentiles are printed.
 #[allow(clippy::too_many_arguments)]
 pub fn bench_startup(
     show_last: bool,
@@ -626,14 +726,80 @@ pub fn bench_startup(
     const WIDTH: u16 = 120;
     const HEIGHT: u16 = 40;
 
-    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT))
-        .map_err(|e| AppError::Io(io::Error::other(e)))?;
-    let mut draw = |app: &App| {
+    type Screen = Terminal<TestBackend>;
+    fn draw(terminal: &mut Screen, app: &App) -> Result<()> {
         terminal
             .draw(|frame| ui::render(frame, app))
             .map(|_| ())
             .map_err(|e| AppError::Io(io::Error::other(e)))
-    };
+    }
+    /// Runs `query` the way typing it does and returns the times until its
+    /// first page and its complete ranking are drawn.
+    fn run_query(
+        terminal: &mut Screen,
+        app: &mut App,
+        query: &str,
+        marks: bool,
+    ) -> Result<(Duration, Duration)> {
+        let started = Instant::now();
+        app.replace_query(query);
+        let mut page = None;
+        loop {
+            let applied = app.receive_search_results();
+            if applied || !app.has_search_work_in_flight() {
+                draw(terminal, app)?;
+                if page.is_none() {
+                    page = Some(started.elapsed());
+                    if marks {
+                        bench::mark("search_ready");
+                    }
+                }
+            }
+            if !app.has_search_work_in_flight() {
+                if marks {
+                    bench::mark("search_complete");
+                }
+                let page = page.unwrap_or_else(|| started.elapsed());
+                return Ok((page, started.elapsed()));
+            }
+            if !applied {
+                std::thread::sleep(Duration::from_micros(200));
+            }
+        }
+    }
+    fn run_bench_queries(terminal: &mut Screen, app: &mut App) -> Result<()> {
+        let Some(path) = std::env::var_os("CLAUDE_HISTORY_BENCH_QUERIES") else {
+            return Ok(());
+        };
+        let queries = std::fs::read_to_string(path).map_err(AppError::Io)?;
+        let (mut pages, mut completes) = (Vec::new(), Vec::new());
+        for query in queries.lines().filter(|line| !line.trim().is_empty()) {
+            let (page, complete) = run_query(terminal, app, query, false)?;
+            pages.push(page.as_secs_f64() * 1e3);
+            completes.push(complete.as_secs_f64() * 1e3);
+        }
+        for (label, times) in [
+            ("query_page", &mut pages),
+            ("query_complete", &mut completes),
+        ] {
+            if times.is_empty() {
+                continue;
+            }
+            times.sort_by(f64::total_cmp);
+            let at = |p: f64| times[((times.len() - 1) as f64 * p).round() as usize];
+            eprintln!(
+                "bench {label} n={} p50 {:.1}ms p95 {:.1}ms max {:.1}ms",
+                times.len(),
+                at(0.5),
+                at(0.95),
+                at(1.0)
+            );
+        }
+        Ok(())
+    }
+
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT))
+        .map_err(|e| AppError::Io(io::Error::other(e)))?;
 
     let mut snapshot = SnapshotStore::new();
     let mut app = App::new_loading_with_options(
@@ -649,9 +815,20 @@ pub fn bench_startup(
         eprintln!("bench generation {}", cards.generation_name());
         app.show_snapshot(cards);
     }
-    draw(&app)?;
+    draw(&mut terminal, &app)?;
     bench::mark("first_frame");
     let first_rows = report_first_rows(&app);
+
+    let mut searched = false;
+    if app.open_search_index() {
+        bench::mark("index_open");
+        bench::mark_peak_rss_as("index_open_peak_rss");
+        run_query(&mut terminal, &mut app, query, true)?;
+        eprintln!("bench results {}", app.filtered().len());
+        run_bench_queries(&mut terminal, &mut app)?;
+        bench::mark_peak_rss_as("generation_peak_rss");
+        searched = true;
+    }
 
     let loaded_since = SystemTime::now();
     let rx = crate::history::load_all_conversations_streaming(show_last, debug_level, time_filter);
@@ -667,28 +844,43 @@ pub fn bench_startup(
     bench::mark("load_received");
 
     app.finish_loading();
-    draw(&app)?;
-    if !first_rows {
-        report_first_rows(&app);
-    }
-    bench::mark("load_done");
-    snapshot.write(&app, &load, time_filter, loaded_since);
-
-    app.replace_query(query);
     while app.has_search_work_in_flight() {
         if !app.receive_search_results() {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
-    draw(&app)?;
-    bench::mark("search_ready");
-    eprintln!(
-        "bench conversations {} results {}",
-        app.conversations().len(),
-        app.filtered().len()
-    );
+    draw(&mut terminal, &app)?;
+    if !first_rows {
+        report_first_rows(&app);
+    }
+    bench::mark("load_done");
+    bench::mark_peak_rss_as("load_peak_rss");
+    let (built_tx, built_rx) = mpsc::channel();
+    snapshot.write(&app, &load, time_filter, loaded_since, move || {
+        let _ = built_tx.send(());
+    });
+
+    if !searched {
+        run_query(&mut terminal, &mut app, query, true)?;
+        eprintln!("bench results {}", app.filtered().len());
+        run_bench_queries(&mut terminal, &mut app)?;
+    }
+    eprintln!("bench conversations {}", app.conversations().len());
     if let Some(outcome) = snapshot.finish() {
         eprintln!("bench snapshot {outcome:?}");
+    }
+    if built_rx.try_recv().is_ok()
+        && let Some(cards) = snapshot.open(show_last, time_filter)
+        && app.swap_search_index(cards)
+    {
+        bench::mark("index_swapped");
+        let (page, complete) = run_query(&mut terminal, &mut app, query, false)?;
+        eprintln!(
+            "bench swapped_query page {:.1}ms complete {:.1}ms results {}",
+            page.as_secs_f64() * 1e3,
+            complete.as_secs_f64() * 1e3,
+            app.filtered().len()
+        );
     }
     bench::mark_peak_rss();
     Ok(())

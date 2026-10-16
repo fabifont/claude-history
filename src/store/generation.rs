@@ -3,23 +3,31 @@
 //! Layout under the store root:
 //!
 //! ```text
-//! LOCK        held by the process that publishes or collects
-//! CURRENT     name of the live generation, e.g. "g000012"
+//! LOCK            held by the process that publishes or collects
+//! CURRENT         name of the live generation, e.g. "g000012"
 //! g000012/
-//!   manifest  header | CardRow[] | ProjectRow[] | Fingerprint[] | string heap
+//!   manifest      header | CardRow[] | ProjectRow[] | Fingerprint[] | string heap
+//!   text-0000.zst conversation text, one zstd frame per card (see `text`)
+//!   base.*        suffix index over the same cards (see `lexindex`)
 //! ```
 //!
 //! A generation is built in `gNNN.tmp/`, synced and renamed into place before
 //! `CURRENT` is replaced through `CURRENT.tmp`, so readers only ever see
-//! complete generations. Published files are never modified; collection
-//! unlinks whole directories, which leaves existing memory maps valid.
+//! complete generations, whose cards, text and index always agree. Published
+//! files are never modified; collection unlinks whole directories, which
+//! leaves existing memory maps valid.
 
 use super::card::{
-    CardRow, Fingerprint, Header, MAGIC, NO_DURATION, PREVIEW_CAP, ProjectRow, StrRef, VERSION,
-    cap_preview, card_flags, project_flags, source_from_u8, source_to_u8,
+    BlobRef, CardRow, Fingerprint, Header, MAGIC, NO_DURATION, PREVIEW_CAP, ProjectRow, StrRef,
+    VERSION, cap_preview, card_flags, project_flags, source_from_u8, source_to_u8,
 };
+use super::lexindex::{self, LexIndex};
+use super::text::{self, TextSegments};
 use crate::history::{Conversation, Source};
+use crate::text_match::normalize_for_search;
 use chrono::{Local, TimeZone};
+use rayon::prelude::*;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -40,6 +48,7 @@ const MTIME_SLACK: Duration = Duration::from_secs(2);
 /// A validated, memory-mapped generation manifest.
 pub struct Generation {
     name: String,
+    dir: PathBuf,
     map: memmap2::Mmap,
     rows: Range<usize>,
     projects: Range<usize>,
@@ -69,14 +78,15 @@ impl Generation {
         let name = fs::read_to_string(root.join(CURRENT)).ok()?;
         let name = name.trim();
         generation_number(name)?;
-        let file = File::open(root.join(name).join(MANIFEST)).ok()?;
+        let dir = root.join(name);
+        let file = File::open(dir.join(MANIFEST)).ok()?;
         // SAFETY: published manifests are never written again and are only
         // removed by unlinking, so the mapped bytes cannot change underneath.
         let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
-        Self::validate(name.to_string(), map)
+        Self::validate(name.to_string(), dir, map)
     }
 
-    fn validate(name: String, map: memmap2::Mmap) -> Option<Self> {
+    fn validate(name: String, dir: PathBuf, map: memmap2::Mmap) -> Option<Self> {
         let header_len = std::mem::size_of::<Header>();
         let header: Header = bytemuck::try_pod_read_unaligned(map.get(..header_len)?).ok()?;
         if header.magic != MAGIC
@@ -115,6 +125,7 @@ impl Generation {
 
         let generation = Self {
             name,
+            dir,
             map,
             rows,
             projects,
@@ -156,6 +167,14 @@ impl Generation {
     /// Directory name of this generation, e.g. `g000012`.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Opens this generation's suffix index and text segments. `None` when
+    /// either is missing or invalid.
+    pub fn open_search_files(&self) -> Option<(LexIndex, TextSegments)> {
+        let index = LexIndex::open(&self.dir, self.rows().len() as u32)?;
+        let text = TextSegments::open(&self.dir, self.rows())?;
+        Some((index, text))
     }
 
     pub fn rows(&self) -> &[CardRow] {
@@ -349,18 +368,65 @@ fn path_str(path: &Path) -> std::borrow::Cow<'_, str> {
     path.to_string_lossy()
 }
 
-/// Serializes `conversations` and their `fingerprints` (in the same order)
-/// into manifest bytes. Output depends only on the inputs, so an unchanged
-/// corpus produces an identical manifest.
-pub fn build_manifest(conversations: &[Conversation], fingerprints: &[Fingerprint]) -> Vec<u8> {
-    assert_eq!(conversations.len(), fingerprints.len());
-    let mut order: Vec<usize> = (0..conversations.len()).collect();
-    order.sort_by(|&a, &b| {
-        let (a, b) = (&conversations[a], &conversations[b]);
-        b.timestamp
-            .cmp(&a.timestamp)
-            .then_with(|| a.path.cmp(&b.path))
-    });
+/// A loaded corpus to write as a generation.
+pub struct Corpus<'a> {
+    conversations: &'a [Conversation],
+    /// Conversation indices in doc order: newest first, then by path.
+    order: Vec<usize>,
+    /// Per conversation.
+    fingerprints: Vec<Fingerprint>,
+    /// Per conversation, see `CardRow::text_hash`.
+    text_hashes: Vec<u64>,
+}
+
+impl<'a> Corpus<'a> {
+    /// `fingerprints` are in the same order as `conversations`.
+    pub fn new(conversations: &'a [Conversation], fingerprints: Vec<Fingerprint>) -> Self {
+        assert_eq!(conversations.len(), fingerprints.len());
+        let mut order: Vec<usize> = (0..conversations.len()).collect();
+        order.sort_by(|&a, &b| {
+            let (a, b) = (&conversations[a], &conversations[b]);
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        let text_hashes = conversations
+            .par_iter()
+            .map(|conversation| hash64(conversation.full_text.as_bytes()))
+            .collect();
+        Self {
+            conversations,
+            order,
+            fingerprints,
+            text_hashes,
+        }
+    }
+
+    /// Conversation texts in doc order.
+    fn texts(&self) -> Vec<&'a str> {
+        let conversations = self.conversations;
+        self.order
+            .iter()
+            .map(|&index| &*conversations[index].full_text)
+            .collect()
+    }
+}
+
+fn hash64(bytes: &[u8]) -> u64 {
+    u64::from_le_bytes(
+        blake3::hash(bytes).as_bytes()[..8]
+            .try_into()
+            .expect("8-byte slice"),
+    )
+}
+
+/// Serializes the cards of `corpus`, with `text[doc]` as the text ref of
+/// each doc (empty refs when `text` is empty). Output depends only on the
+/// inputs, so an unchanged corpus produces an identical manifest.
+pub fn build_manifest(corpus: &Corpus, text: &[BlobRef]) -> Vec<u8> {
+    let conversations = corpus.conversations;
+    let order = &corpus.order;
+    assert!(text.is_empty() || text.len() == order.len());
 
     // Project ids follow the sorted project keys, so they only change when
     // the set of projects does.
@@ -412,7 +478,7 @@ pub fn build_manifest(conversations: &[Conversation], fingerprints: &[Fingerprin
 
     let mut rows: Vec<CardRow> = Vec::with_capacity(order.len());
     let mut row_fingerprints = Vec::with_capacity(order.len());
-    for &index in &order {
+    for (doc, &index) in order.iter().enumerate() {
         let conversation = &conversations[index];
         let project_id = project_ids[&project_keys[index]];
 
@@ -436,13 +502,11 @@ pub fn build_manifest(conversations: &[Conversation], fingerprints: &[Fingerprin
             &mut flags,
         );
         rows.push(CardRow {
-            key_hash: u64::from_le_bytes(
-                blake3::hash(path.as_bytes()).as_bytes()[..8]
-                    .try_into()
-                    .expect("8-byte slice"),
-            ),
+            key_hash: key_hash(&path),
             timestamp_ms: conversation.timestamp.timestamp_millis(),
             total_tokens: conversation.total_tokens,
+            text_hash: corpus.text_hashes[index],
+            text: text.get(doc).copied().unwrap_or_default(),
             path: heap.push(&path),
             session_id: heap.push(&conversation.session_id),
             custom_title,
@@ -462,7 +526,7 @@ pub fn build_manifest(conversations: &[Conversation], fingerprints: &[Fingerprin
             flags,
             _pad: [0; 2],
         });
-        row_fingerprints.push(fingerprints[index]);
+        row_fingerprints.push(corpus.fingerprints[index]);
     }
     debug_assert!(
         rows.iter()
@@ -499,6 +563,11 @@ pub fn build_manifest(conversations: &[Conversation], fingerprints: &[Fingerprin
     out
 }
 
+/// `CardRow::key_hash` of the conversation stored at `path`.
+pub fn key_hash(path: &str) -> u64 {
+    hash64(path.as_bytes())
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum Publish {
     /// `CURRENT` already holds an identical manifest; nothing was written.
@@ -509,14 +578,33 @@ pub enum Publish {
     Busy,
 }
 
-fn current_matches(root: &Path, manifest: &[u8]) -> bool {
-    Generation::open(root).is_some_and(|current| current.manifest_bytes() == manifest)
+/// Whether `CURRENT` is complete and its manifest, with text refs cleared,
+/// equals `unreferenced` (a manifest built without text refs).
+fn current_matches(root: &Path, unreferenced: &[u8]) -> bool {
+    let Some(current) = Generation::open(root) else {
+        return false;
+    };
+    let mut bytes = current.manifest_bytes().to_vec();
+    let text = std::mem::offset_of!(CardRow, text);
+    let row_size = std::mem::size_of::<CardRow>();
+    for row in 0..current.rows().len() {
+        let start = current.rows.start + row * row_size + text;
+        bytes[start..start + std::mem::size_of::<BlobRef>()].fill(0);
+    }
+    bytes == unreferenced && current.open_search_files().is_some()
 }
 
-/// Publishes `manifest` as a new generation unless `CURRENT` already holds
-/// the same bytes. Writes nothing when unchanged.
-pub fn publish(root: &Path, manifest: &[u8]) -> io::Result<Publish> {
-    if current_matches(root, manifest) {
+/// Whether `CURRENT` already holds `corpus`, so publishing it would write
+/// nothing.
+pub fn is_current(root: &Path, corpus: &Corpus) -> bool {
+    current_matches(root, &build_manifest(corpus, &[]))
+}
+
+/// Publishes `corpus` as a new generation with its text and index, unless
+/// `CURRENT` already holds the same cards. Writes nothing when unchanged.
+pub fn publish(root: &Path, corpus: &Corpus) -> io::Result<Publish> {
+    let unreferenced = build_manifest(corpus, &[]);
+    if current_matches(root, &unreferenced) {
         return Ok(Publish::Unchanged);
     }
     fs::create_dir_all(root)?;
@@ -531,7 +619,7 @@ pub fn publish(root: &Path, manifest: &[u8]) -> io::Result<Publish> {
         Err(fs::TryLockError::Error(err)) => return Err(err),
     }
     // Another process may have published the same corpus while we waited.
-    if current_matches(root, manifest) {
+    if current_matches(root, &unreferenced) {
         return Ok(Publish::Unchanged);
     }
 
@@ -547,7 +635,14 @@ pub fn publish(root: &Path, manifest: &[u8]) -> io::Result<Publish> {
         fs::remove_dir_all(&tmp)?;
     }
     fs::create_dir(&tmp)?;
-    write_synced(&tmp.join(MANIFEST), manifest)?;
+    let texts = corpus.texts();
+    let refs = text::write_segment(&text::segment_path(&tmp, 0), 0, &texts)?;
+    write_synced(&tmp.join(MANIFEST), &build_manifest(corpus, &refs))?;
+    drop(refs);
+    lexindex::build(texts.len(), |doc| {
+        Cow::Owned(normalize_for_search(texts[doc as usize]))
+    })
+    .write(&tmp)?;
     sync_dir(&tmp);
     fs::rename(&tmp, root.join(&name))?;
     sync_dir(root);
@@ -628,8 +723,8 @@ mod tests {
     }
 
     fn publish_sample(root: &Path, conversations: &[Conversation]) -> Publish {
-        let manifest = build_manifest(conversations, &unknown_fingerprints(conversations.len()));
-        publish(root, &manifest).unwrap()
+        let corpus = Corpus::new(conversations, unknown_fingerprints(conversations.len()));
+        publish(root, &corpus).unwrap()
     }
 
     #[test]
@@ -703,6 +798,54 @@ mod tests {
     }
 
     #[test]
+    fn publishes_text_and_index_with_the_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conversations = sample();
+        conversations[0].full_text = "older text about caches".into();
+        conversations[1].full_text = "".into();
+        publish_sample(dir.path(), &conversations);
+        let generation = Generation::open(dir.path()).unwrap();
+        let (index, text) = generation.open_search_files().unwrap();
+        let rows = generation.rows();
+        assert_eq!(text.read(rows[0].text).as_deref(), Some(""));
+        assert_eq!(
+            text.read(rows[1].text).as_deref(),
+            Some("older text about caches")
+        );
+        assert_eq!(index.prefix_tf("cach"), vec![0, 1]);
+    }
+
+    #[test]
+    fn changed_text_or_missing_search_files_publish_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conversations = sample();
+        publish_sample(dir.path(), &conversations);
+        conversations[0].full_text = "different text, same cards".into();
+        assert_eq!(
+            publish_sample(dir.path(), &conversations),
+            Publish::Published("g000002".into())
+        );
+        assert_eq!(
+            publish_sample(dir.path(), &conversations),
+            Publish::Unchanged
+        );
+        let corpus = Corpus::new(&conversations, unknown_fingerprints(2));
+        assert!(is_current(dir.path(), &corpus));
+
+        fs::remove_file(dir.path().join("g000002").join(lexindex::POST_FILE)).unwrap();
+        assert!(!is_current(dir.path(), &corpus));
+        assert_eq!(
+            publish_sample(dir.path(), &conversations),
+            Publish::Published("g000003".into())
+        );
+        fs::remove_file(text::segment_path(&dir.path().join("g000003"), 0)).unwrap();
+        assert_eq!(
+            publish_sample(dir.path(), &conversations),
+            Publish::Published("g000004".into())
+        );
+    }
+
+    #[test]
     fn keeps_two_generations_behind_current() {
         let dir = tempfile::tempdir().unwrap();
         let mut conversations = sample();
@@ -757,13 +900,13 @@ mod tests {
         assert!(corrupt(&|bytes| bytes.truncate(40)), "short header");
         let rows_off = std::mem::size_of::<Header>();
         // CardRow::path.len of the first row.
-        let path_len = rows_off + 24 + 4;
+        let path_len = rows_off + std::mem::offset_of!(CardRow, path) + 4;
         assert!(
             corrupt(&|bytes| bytes[path_len..path_len + 4].copy_from_slice(&u32::MAX.to_le_bytes())),
             "string ref out of bounds"
         );
         // CardRow::project_id of the first row.
-        let project_id = rows_off + 88;
+        let project_id = rows_off + std::mem::offset_of!(CardRow, project_id);
         assert!(
             corrupt(&|bytes| bytes[project_id..project_id + 4].copy_from_slice(&9u32.to_le_bytes())),
             "project id out of range"
@@ -840,9 +983,13 @@ mod tests {
                     c
                 })
                 .collect();
-            let manifest = build_manifest(&conversations, &unknown_fingerprints(count));
             let root = dir.path().join(count.to_string());
-            publish(&root, &manifest).unwrap();
+            publish(
+                &root,
+                &Corpus::new(&conversations, unknown_fingerprints(count)),
+            )
+            .unwrap();
+            let manifest = fs::read(root.join("g000001").join(MANIFEST)).unwrap();
             let started = std::time::Instant::now();
             let generation = Generation::open(&root).unwrap();
             let opened = started.elapsed();

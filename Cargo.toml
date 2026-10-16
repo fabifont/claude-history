@@ -41,6 +41,7 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 memmap2 = "0.9"
 fst = "0.4"
 memchr = "2"
+zstd = "0.13"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

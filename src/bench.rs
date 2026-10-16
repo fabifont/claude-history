@@ -58,15 +58,29 @@ pub(crate) fn mark(label: &str) {
 
 /// Reports the process's peak resident set size.
 pub(crate) fn mark_peak_rss() {
-    if !matches!(SINK.get(), Some(Some(_))) {
+    mark_peak_rss_as("peak_rss");
+}
+
+/// Reports the process's peak resident set size so far under `label`, and
+/// where available its peak physical footprint under `<label>_footprint`.
+/// Resident size counts clean pages of mapped files, which the footprint
+/// leaves out.
+pub(crate) fn mark_peak_rss_as(label: &str) {
+    if !enabled() {
         return;
     }
+    let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
     if let Some(bytes) = peak_rss_bytes() {
-        emit(format_args!(
-            "bench peak_rss {:.1}MB",
-            bytes as f64 / (1024.0 * 1024.0)
-        ));
+        emit(format_args!("bench {label} {:.1}MB", mb(bytes)));
     }
+    if let Some(bytes) = peak_footprint_bytes() {
+        emit(format_args!("bench {label}_footprint {:.1}MB", mb(bytes)));
+    }
+}
+
+/// Whether marks are reported.
+pub(crate) fn enabled() -> bool {
+    matches!(SINK.get(), Some(Some(_)))
 }
 
 #[cfg(unix)]
@@ -90,5 +104,28 @@ fn peak_rss_bytes() -> Option<u64> {
 
 #[cfg(not(unix))]
 fn peak_rss_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn peak_footprint_bytes() -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v4>::uninit();
+    // SAFETY: proc_pid_rusage fully initializes `info` when it returns 0.
+    let info = unsafe {
+        if libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V4,
+            info.as_mut_ptr().cast(),
+        ) != 0
+        {
+            return None;
+        }
+        info.assume_init()
+    };
+    Some(info.ri_lifetime_max_phys_footprint)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn peak_footprint_bytes() -> Option<u64> {
     None
 }

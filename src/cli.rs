@@ -447,6 +447,11 @@ pub struct Args {
     )]
     pub bench_startup: Option<String>,
 
+    /// Load the whole history and publish it as the list snapshot with its
+    /// search index; run in the background by the TUI
+    #[arg(long = "publish-snapshot", hide = true)]
+    pub publish_snapshot: bool,
+
     /// Debug semantic search matching for a query
     #[arg(
         long = "debug-semantic-search",

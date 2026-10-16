@@ -21,9 +21,9 @@ fn test_conversation(path: PathBuf, custom_title: Option<String>) -> Conversatio
         preview: "hello body".into(),
         preview_first: "hello body".into(),
         preview_last: "hello body".into(),
-        search_text_lower: search::normalize_for_search(&full_text).into(),
         semantic_turns: vec!["hello body".to_string()].into(),
         semantic_turn_ranges: vec![crate::agent::refs::MessageRange::single(1)],
+        search_text_lower: search::normalize_for_search(&full_text).into(),
         full_text: full_text.into(),
         agent_search_text: "".into(),
         semantic_route_text: "".into(),
@@ -391,8 +391,24 @@ fn submit_rename_reparses_and_updates_search_index() {
     app.handle_rename_key(KeyCode::Enter, KeyModifiers::empty());
 
     assert_eq!(app.conversations[0].custom_title, Some("new".to_string()));
-    assert!(search::search(&app.conversations, &app.searchable, "new", Local::now()).contains(&0));
-    assert!(search::search(&app.conversations, &app.searchable, "old", Local::now()).is_empty());
+    assert!(
+        search::search(
+            &app.conversations,
+            &search::precompute_search_text(&app.conversations),
+            "new",
+            Local::now()
+        )
+        .contains(&0)
+    );
+    assert!(
+        search::search(
+            &app.conversations,
+            &search::precompute_search_text(&app.conversations),
+            "old",
+            Local::now()
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -433,7 +449,15 @@ fn submit_empty_rename_clears_searchable_title() {
     app.handle_rename_key(KeyCode::Enter, KeyModifiers::empty());
 
     assert_eq!(app.conversations[0].custom_title, None);
-    assert!(search::search(&app.conversations, &app.searchable, "old", Local::now()).is_empty());
+    assert!(
+        search::search(
+            &app.conversations,
+            &search::precompute_search_text(&app.conversations),
+            "old",
+            Local::now()
+        )
+        .is_empty()
+    );
 }
 
 #[test]

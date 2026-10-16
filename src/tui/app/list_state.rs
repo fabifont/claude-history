@@ -141,17 +141,6 @@ impl App {
 
         Arc::make_mut(&mut self.conversations).remove(conv_idx);
 
-        Arc::make_mut(&mut self.searchable).retain_mut(|s| {
-            if s.index == conv_idx {
-                false
-            } else {
-                if s.index > conv_idx {
-                    s.index -= 1;
-                }
-                true
-            }
-        });
-
         self.filtered.retain(|&idx| idx != conv_idx);
         for idx in &mut self.filtered {
             if *idx > conv_idx {
