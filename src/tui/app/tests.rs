@@ -682,6 +682,7 @@ fn show_conversations_dispatches_buffered_semantic_query() {
         false,
         None,
         vec![],
+        vec![],
         TuiSearchOptions {
             default_mode: ListSearchMode::Semantic,
             ..Default::default()
@@ -717,6 +718,7 @@ fn semantic_dispatch_after_loading_keeps_snapshot_aligned() {
         KeyBindings::default(),
         false,
         None,
+        vec![],
         vec![],
         TuiSearchOptions {
             default_mode: ListSearchMode::Semantic,
@@ -1612,6 +1614,7 @@ fn show_conversations_invalidates_stale_loading_search_response() {
         false,
         None,
         vec![],
+        vec![],
         TuiSearchOptions::default(),
     );
 
@@ -1652,6 +1655,7 @@ fn workspace_filter_without_project_context_keeps_rows() {
         true,
         None,
         vec![],
+        vec![],
         TuiSearchOptions::default(),
     );
 
@@ -1674,6 +1678,7 @@ fn exclude_projects_filters_shown_conversations() {
         false,
         None,
         vec!["Hidden".to_string()],
+        vec![],
         TuiSearchOptions::default(),
     );
 
@@ -1813,4 +1818,62 @@ fn group_digits_separates_thousands() {
     assert_eq!(super::group_digits(999), "999");
     assert_eq!(super::group_digits(1000), "1,000");
     assert_eq!(super::group_digits(1234567), "1,234,567");
+}
+
+#[test]
+fn exclude_paths_filters_shown_conversations_search_and_semantic_scope() {
+    let mut rows = Vec::new();
+    for (index, source) in [
+        crate::history::model::SourceKind::Claude,
+        crate::history::model::SourceKind::Pi,
+        crate::history::model::SourceKind::Omp,
+        crate::history::model::SourceKind::Codex,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut hidden = conversation(
+            Some("Eval"),
+            "-tmp-eval",
+            &format!("hidden-{index}"),
+            "needle",
+        );
+        hidden.source = source;
+        hidden.cwd = Some(PathBuf::from("/tmp/deleted-eval"));
+        rows.push(hidden);
+    }
+    let mut missing = conversation(None, "-tmp-no-cwd", "missing", "needle");
+    missing.project_path = Some(PathBuf::from("/tmp/decoded-fallback"));
+    rows.push(missing);
+    rows.push(conversation(
+        Some("ProjectHidden"),
+        "-work-hidden",
+        "project-hidden",
+        "needle",
+    ));
+    let mut visible = conversation(Some("Visible"), "-work-visible", "visible", "needle");
+    visible.cwd = Some(PathBuf::from("/work/project"));
+    rows.push(visible);
+
+    let mut app = App::new_loading_with_options(
+        ToolDisplayMode::Truncated,
+        false,
+        KeyBindings::default(),
+        false,
+        None,
+        vec!["ProjectHidden".into()],
+        vec!["/tmp/".into()],
+        TuiSearchOptions::default(),
+    );
+    app.show_conversations(rows);
+    assert_eq!(filtered_projects(&app), vec![None, Some("Visible")]);
+    assert_eq!(*app.semantic_scope_indices(), vec![4, 6]);
+
+    app.replace_query("needle");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.has_search_work_in_flight() && std::time::Instant::now() < deadline {
+        app.receive_search_results();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(filtered_projects(&app), vec![None, Some("Visible")]);
 }

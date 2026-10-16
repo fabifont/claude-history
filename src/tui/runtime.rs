@@ -473,6 +473,7 @@ pub fn run_with_loader(
     workspace_filter: bool,
     current_project_dir_name: Option<String>,
     exclude_projects: Vec<String>,
+    exclude_paths: Vec<String>,
     search_options: TuiSearchOptions,
 ) -> Result<(Action, Option<Conversation>)> {
     let mut store = Store::new(show_last, time_filter);
@@ -486,6 +487,7 @@ pub fn run_with_loader(
         workspace_filter,
         current_project_dir_name,
         exclude_projects,
+        exclude_paths,
         search_options,
     );
     let no_history = || AppError::NoHistoryFound("selected scope".to_string());
@@ -743,6 +745,7 @@ pub fn bench_startup(
     workspace_filter: bool,
     current_project_dir_name: Option<String>,
     exclude_projects: Vec<String>,
+    exclude_paths: Vec<String>,
     query: &str,
 ) -> Result<()> {
     use crate::bench;
@@ -881,6 +884,7 @@ pub fn bench_startup(
         workspace_filter,
         current_project_dir_name,
         exclude_projects,
+        exclude_paths,
         TuiSearchOptions::default(),
     );
     if let Some(cards) = store.open() {

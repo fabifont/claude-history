@@ -14,6 +14,7 @@ impl App {
             indices,
             &self.conversations,
             &self.excluded_projects,
+            &self.excluded_paths,
             self.all_kinds,
             self.workspace_filter,
             self.current_project_dir_name.as_deref(),
@@ -209,6 +210,7 @@ pub(super) fn filter_conversation_indices<I, C>(
     indices: I,
     conversations: &[C],
     excluded_projects: &HashSet<String>,
+    excluded_paths: &[String],
     all_kinds: bool,
     workspace_filter: bool,
     current_project_dir_name: Option<&str>,
@@ -226,6 +228,12 @@ where
                 .project_name
                 .as_deref()
                 .is_none_or(|name| !project_is_excluded(name, excluded_projects))
+        })
+        .filter(|&idx| {
+            !crate::history::path::cwd_is_excluded(
+                conversations[idx].borrow().cwd.as_deref(),
+                excluded_paths,
+            )
         })
         .filter(|&idx| {
             let Some(project_dir_name) = current_project_dir_name.filter(|_| workspace_filter)

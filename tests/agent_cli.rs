@@ -779,3 +779,219 @@ fn codex_threads_support_agent_search_read_and_outline() {
     );
     assert!(String::from_utf8_lossy(&exec_outline.stdout).contains(&format!("uuid={EXEC}")));
 }
+
+fn write_tui_config(config: &Path, body: &str) -> PathBuf {
+    let file = config.join("home/.config/claude-history/config.toml");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, body).unwrap();
+    file
+}
+
+#[test]
+fn shared_exclude_paths_filters_search_without_skips_and_preserves_explicit_access() {
+    let config = tempfile::tempdir().unwrap();
+    let project = project(config.path());
+    let hidden_id = "11111111-1111-4111-8111-111111111111";
+    let visible_id = "22222222-2222-4222-8222-222222222222";
+    let missing_id = "33333333-3333-4333-8333-333333333333";
+    let hidden = project.join(format!("{hidden_id}.jsonl"));
+    let visible = project.join(format!("{visible_id}.jsonl"));
+    let missing = project.join(format!("{missing_id}.jsonl"));
+    for path in [&hidden, &visible, &missing] {
+        write_transcript(path, "path exclusion needle");
+    }
+    let text = std::fs::read_to_string(&visible).unwrap();
+    std::fs::write(
+        &visible,
+        text.replace("/tmp/agent-phase3-tests", "/work/real-project"),
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&missing).unwrap();
+    std::fs::write(
+        &missing,
+        text.replace(r#""cwd":"/tmp/agent-phase3-tests","#, ""),
+    )
+    .unwrap();
+    let unfiltered = run(
+        config.path(),
+        &["agent", "within", hidden_id, "needle", "--lexical"],
+    );
+    assert!(unfiltered.status.success());
+    let reference = first_ref(&unfiltered.stdout);
+    let config_file = write_tui_config(
+        config.path(),
+        "[tui]\nexclude_paths = [\"/tmp/\", \"/private/tmp/\"]\n",
+    );
+
+    // Repeated invocations exercise both a freshly published and an
+    // unchanged store generation.
+    for mode in ["--lexical", "--exact", "--lexical"] {
+        let output = run(
+            config.path(),
+            &["agent", "search", mode, "path exclusion needle"],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(!text.contains(hidden_id), "{text}");
+        assert!(text.contains(visible_id), "{text}");
+        assert!(text.contains(missing_id), "{text}");
+        assert!(!text.contains("kind=skipped"), "{text}");
+    }
+    for args in [
+        vec!["agent", "read", reference.as_str()],
+        vec!["agent", "outline", hidden_id],
+        vec!["agent", "within", hidden_id, "needle", "--lexical"],
+    ] {
+        let output = run(config.path(), &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("path exclusion needle"));
+    }
+    let render = run(
+        config.path(),
+        &[
+            "--no-color",
+            "--no-pager",
+            "--render",
+            hidden.to_str().unwrap(),
+        ],
+    );
+    assert!(render.status.success());
+    assert!(String::from_utf8_lossy(&render.stdout).contains("path exclusion needle"));
+    assert!(hidden.exists());
+
+    std::fs::write(
+        project.join("44444444-4444-4444-8444-444444444444.jsonl"),
+        "{malformed\n",
+    )
+    .unwrap();
+    let output = run(config.path(), &["agent", "search", "--lexical", "needle"]);
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("kind=malformed-transcript"), "{text}");
+    std::fs::remove_file(config_file).unwrap();
+    let restored = run(config.path(), &["agent", "search", "--lexical", "needle"]);
+    assert!(restored.status.success());
+    assert!(String::from_utf8_lossy(&restored.stdout).contains(hidden_id));
+}
+
+#[test]
+fn shared_exclude_paths_filters_pi_and_omp_header_cwd() {
+    for (fixture, uuid, query) in [
+        (
+            "pi/v3-branched.jsonl",
+            "01912345-6789-7abc-8def-0123456789ab",
+            "active root question",
+        ),
+        (
+            "omp/v3.jsonl",
+            "omp_session_custom_id",
+            "OMP active question",
+        ),
+    ] {
+        let config = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        std::fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(fixture),
+            sessions.path().join("session.jsonl"),
+        )
+        .unwrap();
+        let config_file = write_tui_config(config.path(), "[tui]\nexclude_paths = [\"/tmp/\"]\n");
+        for _ in 0..2 {
+            let output = run_pi(
+                config.path(),
+                sessions.path(),
+                &["agent", "search", "--lexical", query],
+            );
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let text = String::from_utf8_lossy(&output.stdout);
+            assert!(!text.contains(uuid), "{text}");
+            assert!(!text.contains("kind=skipped"), "{text}");
+        }
+        std::fs::remove_file(&config_file).unwrap();
+        let restored = run_pi(
+            config.path(),
+            sessions.path(),
+            &["agent", "search", "--lexical", query],
+        );
+        assert!(restored.status.success());
+        assert!(String::from_utf8_lossy(&restored.stdout).contains(uuid));
+        let reference = first_ref(&restored.stdout);
+        write_tui_config(config.path(), "[tui]\nexclude_paths = [\"/tmp/\"]\n");
+        let direct = run_pi(
+            config.path(),
+            sessions.path(),
+            &["agent", "outline", &reference],
+        );
+        assert!(
+            direct.status.success(),
+            "{}",
+            String::from_utf8_lossy(&direct.stderr)
+        );
+        assert!(String::from_utf8_lossy(&direct.stdout).contains(query));
+    }
+}
+
+#[test]
+fn shared_exclude_paths_filters_codex_threads() {
+    const FORK: &str = "01a00000-0000-7000-8000-000000000003";
+    let config = tempfile::tempdir().expect("config");
+    let codex = tempfile::tempdir().expect("codex home");
+    copy_dir(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex"),
+        codex.path(),
+    );
+    let run_codex = |args: &[&str]| {
+        command(&config.path().join("home"))
+            .env("CLAUDE_CONFIG_DIR", config.path())
+            .env(
+                "PI_CODING_AGENT_SESSION_DIR",
+                config.path().join("empty-agent-sessions"),
+            )
+            .env("CODEX_HOME", codex.path())
+            .args(args)
+            .output()
+            .expect("run claude-history with a Codex home")
+    };
+    let claude_id = "11111111-1111-4111-8111-111111111111";
+    write_transcript(
+        &project(config.path()).join(format!("{claude_id}.jsonl")),
+        "ocelot example",
+    );
+    let search = run_codex(&["agent", "search", "--lexical", "ocelot example"]);
+    assert!(String::from_utf8_lossy(&search.stdout).contains(&format!("uuid={FORK}")));
+    let reference = first_ref(&search.stdout);
+
+    // The fixture threads all run in /work/demo.
+    write_tui_config(config.path(), "[tui]\nexclude_paths = [\"/work/\"]\n");
+    let hidden = run_codex(&["agent", "search", "--lexical", "ocelot example"]);
+    assert!(
+        hidden.status.success(),
+        "{}",
+        String::from_utf8_lossy(&hidden.stderr)
+    );
+    let text = String::from_utf8_lossy(&hidden.stdout);
+    assert!(!text.contains(FORK), "{text}");
+    assert!(text.contains(claude_id), "{text}");
+    assert!(!text.contains("kind=skipped"), "{text}");
+    let read = run_codex(&["agent", "read", &reference]);
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    assert!(String::from_utf8_lossy(&read.stdout).contains("ocelot example"));
+}

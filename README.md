@@ -720,6 +720,9 @@ mode = "lexical"
 # Hide exact project names from TUI browse/search lists
 # exclude_projects = ["project-name", "repo/worktree"]
 
+# Hide recorded working-directory prefixes in the TUI and agent search
+# exclude_paths = ["/tmp/", "/private/tmp/"]
+
 # Deprecated: use [search].mode instead
 semantic_search = false
 
@@ -777,6 +780,17 @@ Customize the keybindings for list actions. Values are key combinations like
   rows like `"repo/feature"`. Excluded conversations remain on disk and can
   still be opened by pasting their full UUID or by passing the JSONL file path
   directly.
+- `exclude_paths` (array of strings): Hide sessions whose recorded working
+  directory starts with any listed prefix, in both TUI browse/search lists and
+  `agent search`. Defaults to empty. Matching is literal and case-sensitive:
+  `"/tmp/"` matches `"/tmp/eval-123"`, but not `"/tmp"` or `"/tmp-other"`;
+  `"/tmp"` matches all three. Paths are not resolved, so deleted directories
+  still match; list both `"/tmp/"` and `"/private/tmp/"` to cover both spellings.
+  No `~`, environment-variable, or glob expansion is performed. Empty entries
+  are ignored, and sessions without a recorded working directory stay visible.
+  Exclusions apply in local and global scope. Transcripts remain on disk and
+  can still be opened by full UUID or file path, or with `agent read`,
+  `agent outline`, and `agent within`.
 - `semantic_search` (boolean): Deprecated compatibility alias. When
   `[search].mode` is unset, `true` starts list search in semantic mode and
   `false` starts lexical mode. Press `Ctrl+T` in the TUI to switch modes.

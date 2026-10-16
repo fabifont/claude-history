@@ -291,26 +291,33 @@ impl Snapshot {
     }
 
     /// Ids of the newest `n` listed cards inside the time filter whose
-    /// project passes `project_visible`. `all_kinds` lists automated and
-    /// child conversations too.
+    /// project passes `project_visible` and whose cwd starts with none of
+    /// `excluded_paths`. `all_kinds` lists automated and child
+    /// conversations too.
     pub fn head(
         &self,
         n: usize,
         all_kinds: bool,
+        excluded_paths: &[String],
         project_visible: impl FnMut(&ProjectView) -> bool,
     ) -> Vec<u32> {
         let visible = self.project_visibility(project_visible);
         self.generation.head(n, |row| {
-            listed(row, all_kinds) && visible[row.project_id as usize] && in_time(&self.time, row)
+            listed(row, all_kinds)
+                && visible[row.project_id as usize]
+                && in_time(&self.time, row)
+                && !self.cwd_excluded(row, excluded_paths)
         })
     }
 
-    /// For every card, whether it is listed, inside the time filter and its
-    /// project passes `project_visible`. `all_kinds` lists automated and
-    /// child conversations too.
+    /// For every card, whether it is listed, inside the time filter, its
+    /// project passes `project_visible` and its cwd starts with none of
+    /// `excluded_paths`. `all_kinds` lists automated and child
+    /// conversations too.
     pub fn scope(
         &self,
         all_kinds: bool,
+        excluded_paths: &[String],
         project_visible: impl FnMut(&ProjectView) -> bool,
     ) -> Vec<bool> {
         let visible = self.project_visibility(project_visible);
@@ -321,8 +328,19 @@ impl Snapshot {
                 listed(row, all_kinds)
                     && visible[row.project_id as usize]
                     && in_time(&self.time, row)
+                    && !self.cwd_excluded(row, excluded_paths)
             })
             .collect()
+    }
+
+    /// Whether the card records a cwd starting with one of `prefixes`.
+    fn cwd_excluded(&self, row: &card::CardRow, prefixes: &[String]) -> bool {
+        !prefixes.is_empty()
+            && row.flags & card::card_flags::CWD != 0
+            && crate::history::path::cwd_is_excluded(
+                Some(Path::new(self.generation.str(row.cwd))),
+                prefixes,
+            )
     }
 
     fn project_visibility(

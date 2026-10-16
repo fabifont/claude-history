@@ -168,18 +168,28 @@ impl AgentService {
         let config = config::load_config()?;
         let search_config = config.search.unwrap_or_default();
         let agent_config = config.agent.unwrap_or_default();
+        let exclude_paths = config.tui.unwrap_or_default().exclude_paths;
         // Resolved before loading so an inverted range fails without paying for
         // a full corpus parse.
         let time = args.time.resolve()?;
+        let excluded_paths = std::sync::Mutex::new(std::collections::HashSet::new());
         let mut conversations = crate::store::load_conversations_where(
             false,
             crate::store::Contents::Full,
             &|conversation| {
+                if history::path::cwd_is_excluded(conversation.cwd.as_deref(), &exclude_paths) {
+                    excluded_paths
+                        .lock()
+                        .unwrap()
+                        .insert(conversation.path.clone());
+                    return false;
+                }
                 (args.all_kinds || !conversation.provenance.hidden_by_default())
                     && !project_is_excluded(&conversation.path, &agent_config.exclude_projects)
                     && time.matches(conversation.timestamp)
             },
         )?;
+        let excluded_paths = excluded_paths.into_inner().unwrap();
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         let scope = configured_scope(args, &agent_config);
         let current_project_dir_name = if scope == agent::search::AgentSearchScope::Local {
@@ -221,7 +231,10 @@ impl AgentService {
             Some(&conversations),
             args.all_kinds,
         )?;
-        keys.retain(|key| !project_is_excluded(&key.path, &agent_config.exclude_projects));
+        keys.retain(|key| {
+            !excluded_paths.contains(&key.path)
+                && !project_is_excluded(&key.path, &agent_config.exclude_projects)
+        });
         if time.is_active() {
             // Key discovery walks the projects directory independently, so
             // without this every conversation outside the window would be

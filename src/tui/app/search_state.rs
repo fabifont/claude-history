@@ -382,6 +382,7 @@ impl App {
                 0..conversations.len(),
                 conversations.as_slice(),
                 &self.excluded_projects,
+                &self.excluded_paths,
                 self.all_kinds,
                 self.workspace_filter,
                 self.current_project_dir_name.as_deref(),

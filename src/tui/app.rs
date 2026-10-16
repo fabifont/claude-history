@@ -121,6 +121,8 @@ pub struct App {
     current_project_dir_name: Option<String>,
     /// Exact project names hidden from list-mode display
     excluded_projects: HashSet<String>,
+    /// Working-directory prefixes hidden from list-mode display
+    excluded_paths: Vec<String>,
     /// Channel to send commands to the background search worker
     search_tx: mpsc::Sender<SearchCommand>,
     /// Channel to receive results from the background search worker
@@ -155,6 +157,7 @@ struct AppParts {
     all_kinds: bool,
     current_project_dir_name: Option<String>,
     excluded_projects: HashSet<String>,
+    excluded_paths: Vec<String>,
     search_tx: mpsc::Sender<SearchCommand>,
     search_rx: mpsc::Receiver<SearchResponse>,
     list_search_mode: ListSearchMode,
@@ -198,6 +201,7 @@ impl App {
             all_kinds: parts.all_kinds,
             current_project_dir_name: parts.current_project_dir_name,
             excluded_projects: parts.excluded_projects,
+            excluded_paths: parts.excluded_paths,
             search_tx: parts.search_tx,
             search_rx: parts.search_rx,
             search_generation: 0,
@@ -257,6 +261,7 @@ impl App {
             0..conversations.len(),
             &conversations,
             &excluded_projects,
+            &[],
             search_options.all_kinds,
             false,
             None,
@@ -284,6 +289,7 @@ impl App {
             all_kinds: search_options.all_kinds,
             current_project_dir_name: None,
             excluded_projects,
+            excluded_paths: Vec::new(),
             search_tx,
             search_rx,
             list_search_mode: Self::list_search_mode_from_options(search_options),
@@ -292,6 +298,7 @@ impl App {
     }
 
     /// Create a new app in loading state
+    #[allow(clippy::too_many_arguments)]
     pub fn new_loading_with_options(
         tool_display: ToolDisplayMode,
         show_thinking: bool,
@@ -299,6 +306,7 @@ impl App {
         workspace_filter: bool,
         current_project_dir_name: Option<String>,
         exclude_projects: Vec<String>,
+        exclude_paths: Vec<String>,
         search_options: TuiSearchOptions,
     ) -> Self {
         let (search_tx, search_rx) = spawn_search_worker();
@@ -318,6 +326,7 @@ impl App {
             all_kinds: search_options.all_kinds,
             current_project_dir_name,
             excluded_projects: exclude_projects.into_iter().collect(),
+            excluded_paths: exclude_paths,
             search_tx,
             search_rx,
             list_search_mode: Self::list_search_mode_from_options(search_options),
@@ -372,6 +381,7 @@ impl App {
             all_kinds: false,
             current_project_dir_name: None,
             excluded_projects: HashSet::new(),
+            excluded_paths: Vec::new(),
             search_tx,
             search_rx,
             list_search_mode: ListSearchMode::Lexical,
@@ -441,7 +451,7 @@ impl App {
     pub fn generation_is_empty(&self) -> bool {
         self.snapshot
             .as_ref()
-            .is_none_or(|snapshot| snapshot.head(1, self.all_kinds, |_| true).is_empty())
+            .is_none_or(|snapshot| snapshot.head(1, self.all_kinds, &[], |_| true).is_empty())
     }
 
     /// Makes `snapshot` the source of rows, dropping rows of the previous
@@ -461,7 +471,7 @@ impl App {
             return;
         };
         let workspace = self.workspace_scope();
-        let docs = snapshot.head(limit, self.all_kinds, |project| {
+        let docs = snapshot.head(limit, self.all_kinds, &self.excluded_paths, |project| {
             list_state::card_project_visible(project, &self.excluded_projects, &workspace)
         });
         let docs: Vec<u32> = docs
@@ -630,9 +640,11 @@ impl App {
             return;
         };
         let workspace = self.workspace_scope();
-        let mut docs = index.cards().scope(self.all_kinds, |project| {
-            list_state::card_project_visible(project, &self.excluded_projects, &workspace)
-        });
+        let mut docs = index
+            .cards()
+            .scope(self.all_kinds, &self.excluded_paths, |project| {
+                list_state::card_project_visible(project, &self.excluded_projects, &workspace)
+            });
         if !self.removed.is_empty() {
             for (doc, in_scope) in docs.iter_mut().enumerate() {
                 *in_scope &= !self.is_removed(doc as u32);

@@ -6,6 +6,16 @@
 
 use std::path::{Path, PathBuf};
 
+/// Match literal prefixes of the recorded working directory without resolving paths.
+pub(crate) fn cwd_is_excluded(cwd: Option<&Path>, prefixes: &[String]) -> bool {
+    cwd.is_some_and(|cwd| {
+        let cwd = cwd.to_string_lossy();
+        prefixes
+            .iter()
+            .any(|prefix| !prefix.is_empty() && cwd.starts_with(prefix))
+    })
+}
+
 /// Convert the current working directory into Claude's project directory name.
 pub fn convert_path_to_project_dir_name(path: &Path) -> String {
     path.to_string_lossy()
@@ -198,6 +208,39 @@ pub fn decode_project_dir_name(encoded: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cwd_exclusions_use_literal_nonempty_prefixes() {
+        let prefixes = vec![
+            "".to_string(),
+            "/tmp/".to_string(),
+            "/private/tmp/".to_string(),
+        ];
+        for cwd in [
+            "/tmp/eval-random",
+            "/tmp/deleted/nested",
+            "/private/tmp/eval",
+        ] {
+            assert!(cwd_is_excluded(Some(Path::new(cwd)), &prefixes), "{cwd}");
+        }
+        for cwd in ["/tmp", "/tmp-other/eval", "/TMP/eval", "/work/project", ""] {
+            assert!(!cwd_is_excluded(Some(Path::new(cwd)), &prefixes), "{cwd}");
+        }
+        assert!(!cwd_is_excluded(None, &prefixes));
+        assert!(!cwd_is_excluded(Some(Path::new("/tmp/eval")), &[]));
+        assert!(cwd_is_excluded(
+            Some(Path::new("/tmp/eval")),
+            &["/tmp/ev".into()]
+        ));
+        assert!(cwd_is_excluded(
+            Some(Path::new("/tmp-other")),
+            &["/tmp".into()]
+        ));
+        assert!(!cwd_is_excluded(
+            Some(Path::new("/home/user/eval")),
+            &["~/".into()]
+        ));
+    }
 
     // === Encoding tests ===
 

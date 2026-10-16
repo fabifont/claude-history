@@ -75,6 +75,8 @@ where
 pub struct TuiConfig {
     #[serde(default)]
     pub exclude_projects: Vec<String>,
+    #[serde(default)]
+    pub exclude_paths: Vec<String>,
     pub semantic_search: Option<bool>,
 }
 
@@ -108,6 +110,25 @@ exclude_projects = ["Hidden", "hidden", " spaced "]
             config.tui.unwrap().exclude_projects,
             vec!["Hidden", "hidden", " spaced "]
         );
+    }
+
+    #[test]
+    fn tui_exclude_paths_defaults_and_preserves_literal_prefixes() {
+        for input in ["", "[tui]", "[tui]\nexclude_paths = []"] {
+            let config: ConfigFile = toml::from_str(input).unwrap();
+            assert!(config.tui.unwrap_or_default().exclude_paths.is_empty());
+        }
+        let config: ConfigFile = toml::from_str(
+            r#"[tui]
+exclude_paths = ["/tmp/", "/private/tmp/", "", " spaced "]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.tui.unwrap().exclude_paths,
+            ["/tmp/", "/private/tmp/", "", " spaced "]
+        );
+        assert!(toml::from_str::<ConfigFile>("[tui]\nexclude_paths = [1]").is_err());
     }
 
     #[test]

@@ -180,6 +180,7 @@ fn run() -> Result<()> {
         tui_semantic_search: tui_config.semantic_search,
     });
     let exclude_projects = tui_config.exclude_projects;
+    let exclude_paths = tui_config.exclude_paths;
 
     // Disable colors globally when --no-color is passed
     if args.no_color {
@@ -444,6 +445,7 @@ fn run() -> Result<()> {
             workspace_filter,
             current_project_dir_name,
             exclude_projects,
+            exclude_paths,
             &query,
         );
     }
@@ -457,6 +459,7 @@ fn run() -> Result<()> {
         workspace_filter,
         current_project_dir_name,
         exclude_projects,
+        exclude_paths,
         tui::TuiSearchOptions {
             default_mode: tui_search_mode(search_mode),
             all_kinds: args.all_kinds,
