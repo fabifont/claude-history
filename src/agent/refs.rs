@@ -2,10 +2,18 @@ use crate::agent::diagnostic::{AgentError, AgentErrorKind};
 use crate::error::{AppError, Result};
 use crate::history::Conversation;
 use crate::history::model::SourceKind;
+use crate::history::sources::Registry;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
-const REF_NAMESPACE: &str = "agent-v1";
+/// Namespace of refs digesting a conversation's source instance and native
+/// id.
+const REF_NAMESPACE: &str = "agent-v2";
+/// Namespace of the path-based refs Claude conversations had before refs
+/// digested the source instance; they still resolve.
+const LEGACY_REF_NAMESPACE: &str = "agent-v1";
 const PROJECT_NAMESPACE: &str = "agent-project-v1";
 const MIN_EMITTED_DIGEST_HEX_LEN: usize = 12;
 const PROJECT_DIGEST_HEX_LEN: usize = 16;
@@ -31,13 +39,9 @@ enum ConversationRefInput {
 }
 
 impl AgentConversationRef {
-    pub fn from_parts(project_dir_name: &str, session_filename: &str) -> Self {
-        let digest = digest_parts([REF_NAMESPACE, project_dir_name, session_filename]);
+    fn new(uuid: String, digest: u128) -> Self {
         Self {
-            uuid: session_uuid(session_filename)
-                .filter(|uuid| is_uuid(uuid))
-                .unwrap_or("none")
-                .to_ascii_lowercase(),
+            uuid,
             digest_hex: format!("{digest:032x}"),
             emitted_digest_hex_len: MIN_EMITTED_DIGEST_HEX_LEN,
         }
@@ -68,28 +72,78 @@ pub struct AgentConversationKey {
     pub session_filename: String,
     pub session_id: String,
     pub path: PathBuf,
+    /// Root of the source instance holding the conversation, canonical
+    /// where it resolves.
+    pub root: PathBuf,
+    /// The source adapter's id of the conversation within `root`.
+    pub native_id: String,
 }
 
 impl AgentConversationKey {
+    /// Key of the Claude session file `path`, at
+    /// `<projects root>/<project_dir_name>/<session_filename>`.
     pub fn new(
         project_dir_name: impl Into<String>,
         session_filename: impl Into<String>,
         path: PathBuf,
     ) -> Self {
+        let project_dir_name = project_dir_name.into();
         let session_filename = session_filename.into();
+        let root = path
+            .parent()
+            .and_then(Path::parent)
+            .map(canonical_root)
+            .unwrap_or_default();
         Self {
             source: SourceKind::Claude,
             session_id: session_filename
                 .strip_suffix(".jsonl")
                 .unwrap_or(&session_filename)
                 .to_owned(),
-            project_dir_name: project_dir_name.into(),
+            native_id: format!("{project_dir_name}/{session_filename}"),
+            project_dir_name,
             session_filename,
+            path,
+            root,
+        }
+    }
+
+    /// Key of the session file `path` under `root`, the root of a source
+    /// instance keeping one file per session.
+    pub fn in_instance(
+        source: SourceKind,
+        root: &Path,
+        project_dir_name: String,
+        session_id: String,
+        path: PathBuf,
+    ) -> Self {
+        let session_filename = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let native_id = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        Self {
+            source,
+            project_dir_name,
+            session_filename,
+            session_id,
+            root: canonical_root(root),
+            native_id,
             path,
         }
     }
 
+    /// Key of the conversation stored at `conversation.path`, identified
+    /// within the first configured instance whose root holds it.
     pub fn from_conversation(conversation: &Conversation) -> Result<Self> {
+        Self::from_conversation_in(conversation, &Registry::from_env())
+    }
+
+    pub fn from_conversation_in(conversation: &Conversation, registry: &Registry) -> Result<Self> {
         let project_dir_name = if conversation.source != SourceKind::Claude {
             let project = conversation
                 .project_path
@@ -125,58 +179,74 @@ impl AgentConversationKey {
                 AppError::ConfigError("conversation path has no session filename".to_string())
             })?
             .to_string();
+        let (root, native_id) = match registry.key_of(&conversation.path) {
+            Some(key) => (canonical_root(&key.instance.root), key.native_id),
+            None => (
+                conversation
+                    .path
+                    .parent()
+                    .map(canonical_root)
+                    .unwrap_or_default(),
+                session_filename.clone(),
+            ),
+        };
         Ok(Self {
             source: conversation.source,
             project_dir_name,
             session_filename,
             session_id: conversation.session_id.clone(),
             path: conversation.path.clone(),
+            root,
+            native_id,
         })
     }
 
+    /// The conversation's ref: a digest of its source instance and native
+    /// id, so it holds while the adapter keeps the id (a Codex thread
+    /// across reverts and archiving).
     pub fn conversation_ref(&self) -> AgentConversationRef {
-        match self.source {
-            SourceKind::Claude => {
-                AgentConversationRef::from_parts(&self.project_dir_name, &self.session_filename)
-            }
-            SourceKind::Pi => {
-                let digest = digest_parts([
-                    "agent-pi-v1",
-                    self.source.label(),
-                    &self.project_dir_name,
-                    &self.session_id,
-                    &self.session_filename,
-                ]);
-                AgentConversationRef {
-                    uuid: self.session_id.clone(),
-                    digest_hex: format!("{digest:032x}"),
-                    emitted_digest_hex_len: MIN_EMITTED_DIGEST_HEX_LEN,
-                }
-            }
-            SourceKind::Omp => {
-                let digest = digest_parts([
-                    "agent-omp-v1",
-                    self.source.label(),
-                    &self.project_dir_name,
-                    &self.session_id,
-                    &self.session_filename,
-                ]);
-                AgentConversationRef {
-                    uuid: self.session_id.clone(),
-                    digest_hex: format!("{digest:032x}"),
-                    emitted_digest_hex_len: MIN_EMITTED_DIGEST_HEX_LEN,
-                }
-            }
-            // A thread keeps its id when a revert moves it to a new rollout.
+        let root = self.root.to_string_lossy();
+        let digest = digest_parts([REF_NAMESPACE, self.source.label(), &root, &self.native_id]);
+        AgentConversationRef::new(self.uuid(), digest)
+    }
+
+    /// The ref the conversation had when refs digested its project and file
+    /// name rather than its source instance.
+    pub fn legacy_ref(&self) -> AgentConversationRef {
+        let digest = match self.source {
+            SourceKind::Claude => digest_parts([
+                LEGACY_REF_NAMESPACE,
+                &self.project_dir_name,
+                &self.session_filename,
+            ]),
+            SourceKind::Pi => digest_parts([
+                "agent-pi-v1",
+                self.source.label(),
+                &self.project_dir_name,
+                &self.session_id,
+                &self.session_filename,
+            ]),
+            SourceKind::Omp => digest_parts([
+                "agent-omp-v1",
+                self.source.label(),
+                &self.project_dir_name,
+                &self.session_id,
+                &self.session_filename,
+            ]),
             SourceKind::Codex => {
-                let digest =
-                    digest_parts(["agent-codex-v1", self.source.label(), &self.session_id]);
-                AgentConversationRef {
-                    uuid: self.session_id.clone(),
-                    digest_hex: format!("{digest:032x}"),
-                    emitted_digest_hex_len: MIN_EMITTED_DIGEST_HEX_LEN,
-                }
+                digest_parts(["agent-codex-v1", self.source.label(), &self.session_id])
             }
+        };
+        AgentConversationRef::new(self.uuid(), digest)
+    }
+
+    fn uuid(&self) -> String {
+        match self.source {
+            SourceKind::Claude => session_uuid(&self.session_filename)
+                .filter(|uuid| is_uuid(uuid))
+                .unwrap_or("none")
+                .to_ascii_lowercase(),
+            _ => self.session_id.clone(),
         }
     }
 
@@ -322,23 +392,42 @@ pub fn resolve_conversation_ref(
     reference: &str,
 ) -> Result<ResolvedConversation> {
     let input = validate_conversation_ref(reference)?;
-    let matches: Vec<ResolvedConversation> = keys
+    let mut matches: Vec<&AgentConversationKey> = keys
         .iter()
         .filter(|key| match &input {
             ConversationRefInput::Digest(prefix) => {
                 key.conversation_ref().digest_hex.starts_with(prefix)
             }
-            ConversationRefInput::Uuid(uuid) => {
-                key.conversation_ref().uuid().eq_ignore_ascii_case(uuid)
-            }
+            ConversationRefInput::Uuid(uuid) => key.uuid().eq_ignore_ascii_case(uuid),
             ConversationRefInput::Filename(stem) => {
                 key.session_filename.strip_suffix(".jsonl") == Some(stem.as_str())
             }
         })
-        .map(|key| resolved_conversation_for_key(keys, key))
         .collect();
+    if matches.is_empty()
+        && let ConversationRefInput::Digest(prefix) = &input
+    {
+        matches = legacy_matches(keys, prefix);
+    }
 
-    finish_resolution(reference, matches)
+    finish_resolution(
+        reference,
+        matches
+            .into_iter()
+            .map(|key| resolved_conversation_for_key(keys, key))
+            .collect(),
+    )
+}
+
+/// Keys whose legacy ref starts with `prefix`, for refs issued before refs
+/// digested the source instance.
+fn legacy_matches<'a>(
+    keys: &'a [AgentConversationKey],
+    prefix: &str,
+) -> Vec<&'a AgentConversationKey> {
+    keys.iter()
+        .filter(|key| key.legacy_ref().digest_hex.starts_with(prefix))
+        .collect()
 }
 
 pub fn resolved_conversation_for_key(
@@ -509,6 +598,21 @@ fn validate_conversation_ref(reference: &str) -> Result<ConversationRefInput> {
     Err(AgentError::invalid_ref(reference, "use a full UUID, UUID-based session basename/filename (not a path), or ref=ch_... from agent output").into())
 }
 
+/// `root`, canonical where it resolves, so a ref does not depend on how the
+/// root is spelled (a symlinked home, a relative `CLAUDE_CONFIG_DIR`).
+/// Resolved once per root and thread.
+fn canonical_root(root: &Path) -> PathBuf {
+    thread_local! {
+        static ROOTS: RefCell<HashMap<PathBuf, PathBuf>> = RefCell::default();
+    }
+    ROOTS.with_borrow_mut(|roots| {
+        roots
+            .entry(root.to_path_buf())
+            .or_insert_with(|| root.canonicalize().unwrap_or_else(|_| root.to_path_buf()))
+            .clone()
+    })
+}
+
 fn session_uuid(session_filename: &str) -> Option<&str> {
     session_filename.strip_suffix(".jsonl")
 }
@@ -597,55 +701,102 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pi_refs_include_source_project_and_header_session_identity() {
-        let pi = AgentConversationKey {
+    fn pi(native_id: &str, session_id: &str) -> AgentConversationKey {
+        let path = PathBuf::from(format!("/sessions/{native_id}"));
+        AgentConversationKey {
             source: SourceKind::Pi,
             project_dir_name: "/tmp/project".to_owned(),
-            session_filename: "2024_custom_id_with_underscores.jsonl".to_owned(),
-            session_id: "custom_id_with_underscores".to_owned(),
-            path: PathBuf::from("/sessions/2024_custom_id_with_underscores.jsonl"),
-        };
-        let other_project = AgentConversationKey {
-            project_dir_name: "/tmp/other".to_owned(),
-            ..pi.clone()
-        };
-        let claude = key("/tmp/project", "custom_id_with_underscores.jsonl");
+            session_filename: path.file_name().unwrap().to_str().unwrap().to_owned(),
+            session_id: session_id.to_owned(),
+            path,
+            root: PathBuf::from("/sessions"),
+            native_id: native_id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn refs_digest_the_source_instance_and_native_id() {
+        let pi = pi(
+            "--tmp-project--/2024_custom_id_with_underscores.jsonl",
+            "custom_id_with_underscores",
+        );
         let omp = AgentConversationKey {
             source: SourceKind::Omp,
+            ..pi.clone()
+        };
+        let other_root = AgentConversationKey {
+            root: PathBuf::from("/other"),
+            ..pi.clone()
+        };
+        let moved_project = AgentConversationKey {
+            project_dir_name: "/tmp/other".to_owned(),
             ..pi.clone()
         };
 
         assert_eq!(pi.conversation_ref().uuid(), "custom_id_with_underscores");
         assert_ne!(
             pi.conversation_ref().full_ref(),
-            other_project.conversation_ref().full_ref()
-        );
-        assert_ne!(
-            pi.conversation_ref().full_ref(),
             omp.conversation_ref().full_ref()
         );
         assert_ne!(
             pi.conversation_ref().full_ref(),
-            claude.conversation_ref().full_ref()
+            other_root.conversation_ref().full_ref()
         );
+        // The project a session ran in is not part of its identity.
+        assert_eq!(
+            pi.conversation_ref().full_ref(),
+            moved_project.conversation_ref().full_ref()
+        );
+        assert_ne!(
+            pi.legacy_ref().full_ref(),
+            moved_project.legacy_ref().full_ref()
+        );
+        assert_ne!(pi.conversation_ref(), pi.legacy_ref());
         assert!(pi.conversation_ref().canonical().starts_with("ch_"));
     }
 
     #[test]
-    fn pi_refs_distinguish_duplicate_session_ids_in_one_project() {
-        let first = AgentConversationKey {
-            source: SourceKind::Pi,
+    fn codex_refs_hold_across_rollouts_of_a_thread() {
+        let thread = "019a0000-0000-7000-8000-000000000001";
+        let codex = |path: &str| AgentConversationKey {
+            source: SourceKind::Codex,
             project_dir_name: "/tmp/project".to_owned(),
-            session_filename: "first.jsonl".to_owned(),
-            session_id: "copied-session".to_owned(),
-            path: PathBuf::from("/sessions/first.jsonl"),
+            session_filename: format!("rollout-{thread}.jsonl"),
+            session_id: thread.to_owned(),
+            path: PathBuf::from(path),
+            root: PathBuf::from("/home/.codex"),
+            native_id: thread.to_owned(),
         };
-        let second = AgentConversationKey {
-            session_filename: "second.jsonl".to_owned(),
-            path: PathBuf::from("/sessions/second.jsonl"),
-            ..first.clone()
-        };
+        let live = codex("/home/.codex/sessions/2026/10/16/rollout-a.jsonl");
+        let reverted = codex("/home/.codex/sessions/2026/10/17/rollout-b.jsonl");
+        let archived = codex("/home/.codex/archived_sessions/rollout-b.jsonl");
+
+        assert_eq!(live.conversation_ref(), reverted.conversation_ref());
+        assert_eq!(live.conversation_ref(), archived.conversation_ref());
+    }
+
+    #[test]
+    fn legacy_refs_resolve_to_the_current_ref() {
+        let claude = key("project-a", "12345678-1234-4234-9234-123456789abc.jsonl");
+        let pi = pi("--tmp--/2024_session.jsonl", "session");
+        let keys = vec![claude.clone(), pi.clone()];
+        for key in &keys {
+            let legacy = key.legacy_ref();
+            let resolved = resolve_conversation_ref(&keys, &legacy.canonical()).unwrap();
+            assert_eq!(resolved.key, *key);
+            assert_eq!(
+                resolved.reference.full_ref(),
+                key.conversation_ref().full_ref()
+            );
+            let full = resolve_conversation_ref(&keys, &legacy.full_ref()).unwrap();
+            assert_eq!(full.key, *key);
+        }
+    }
+
+    #[test]
+    fn pi_refs_distinguish_duplicate_session_ids_in_one_project() {
+        let first = pi("--tmp-project--/first.jsonl", "copied-session");
+        let second = pi("--tmp-project--/second.jsonl", "copied-session");
 
         assert_ne!(
             first.conversation_ref().full_ref(),
@@ -665,9 +816,9 @@ mod tests {
 
     #[test]
     fn emitted_refs_extend_colliding_minimum_prefixes() {
-        let mut first = AgentConversationRef::from_parts("project-a", "one.jsonl");
+        let mut first = key("project-a", "one.jsonl").conversation_ref();
         first.digest_hex = "aaaaaaaaaaaa0bbbbbbbbbbbbbbbbbbb".to_string();
-        let mut second = AgentConversationRef::from_parts("project-b", "two.jsonl");
+        let mut second = key("project-b", "two.jsonl").conversation_ref();
         second.digest_hex = "aaaaaaaaaaaa1ccccccccccccccccccc".to_string();
 
         let emitted = unique_emitted_references(&[first, second]);
@@ -679,8 +830,8 @@ mod tests {
     #[test]
     fn emitted_refs_keep_documented_twelve_hex_minimum() {
         let refs = unique_emitted_references(&[
-            AgentConversationRef::from_parts("project-a", "one.jsonl"),
-            AgentConversationRef::from_parts("project-b", "two.jsonl"),
+            key("project-a", "one.jsonl").conversation_ref(),
+            key("project-b", "two.jsonl").conversation_ref(),
         ]);
 
         assert!(
@@ -711,9 +862,9 @@ mod tests {
 
     #[test]
     fn duplicate_full_digests_emit_full_refs() {
-        let mut first = AgentConversationRef::from_parts("project-a", "one.jsonl");
+        let mut first = key("project-a", "one.jsonl").conversation_ref();
         first.digest_hex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
-        let mut second = AgentConversationRef::from_parts("project-b", "two.jsonl");
+        let mut second = key("project-b", "two.jsonl").conversation_ref();
         second.digest_hex = first.digest_hex.clone();
 
         let emitted = unique_emitted_references(&[first, second]);
@@ -736,20 +887,14 @@ mod tests {
 
     #[test]
     fn canonical_ref_is_internal_digest_ref() {
-        let reference = AgentConversationRef::from_parts(
-            "project-a",
-            "12345678-1234-4234-9234-123456789abc.jsonl",
-        );
-        assert_eq!(reference.canonical(), "ch_98bd40760a01");
+        let key = key("project-a", "12345678-1234-4234-9234-123456789abc.jsonl");
+        let reference = key.conversation_ref();
+        assert_eq!(reference.canonical().len(), "ch_".len() + 12);
         assert_eq!(reference.full_ref().len(), "ch_".len() + DIGEST_HEX_LEN);
         assert_eq!(reference.uuid(), "12345678-1234-4234-9234-123456789abc");
-        assert_eq!(
-            reference,
-            AgentConversationRef::from_parts(
-                "project-a",
-                "12345678-1234-4234-9234-123456789abc.jsonl"
-            )
-        );
+        assert_eq!(reference, key.conversation_ref());
+        // Refs agents were given before keep their digest.
+        assert_eq!(key.legacy_ref().canonical(), "ch_98bd40760a01");
     }
 
     #[test]
@@ -831,11 +976,9 @@ mod tests {
             key("project-a", "12345678-1234-4234-9234-123456789abc.jsonl"),
             key("project-b", "87654321-1234-4234-9234-123456789abc.jsonl"),
         ];
-        let internal = AgentConversationRef::from_parts(
-            "project-a",
-            "12345678-1234-4234-9234-123456789abc.jsonl",
-        )
-        .digest_hex;
+        let internal = key("project-a", "12345678-1234-4234-9234-123456789abc.jsonl")
+            .conversation_ref()
+            .digest_hex;
         let resolved = resolve_conversation_ref(&keys, &format!("ch_{}", &internal[..8])).unwrap();
         assert_eq!(
             resolved.key.session_filename,
@@ -948,7 +1091,7 @@ mod tests {
         let reads = vec![parse_read_ref("ch_12345678:m2..m5").unwrap()];
         let resolved = ResolvedConversation {
             key: key("project-a", "one.jsonl"),
-            reference: AgentConversationRef::from_parts("project-a", "one.jsonl"),
+            reference: key("project-a", "one.jsonl").conversation_ref(),
         };
         let resolved_reads = vec![(reads[0].clone(), resolved)];
         validate_resolved_focus_in_ranges(&resolved_reads, &parse_focus_ref("m3").unwrap(), None)
@@ -970,11 +1113,11 @@ mod tests {
         ];
         let first = ResolvedConversation {
             key: key("project-a", "one.jsonl"),
-            reference: AgentConversationRef::from_parts("project-a", "one.jsonl"),
+            reference: key("project-a", "one.jsonl").conversation_ref(),
         };
         let second = ResolvedConversation {
             key: key("project-b", "two.jsonl"),
-            reference: AgentConversationRef::from_parts("project-b", "two.jsonl"),
+            reference: key("project-b", "two.jsonl").conversation_ref(),
         };
         let resolved_reads = vec![(reads[0].clone(), first), (reads[1].clone(), second)];
         let err = validate_resolved_focus_in_ranges(

@@ -238,18 +238,28 @@ impl AgentTranscript {
 
     pub fn resolve_anchor(&self, resolved: &ResolvedConversation, anchor: &str) -> Result<usize> {
         validate_anchor(anchor)?;
+        // Anchors issued under the conversation's legacy ref keep working.
+        let refs = [
+            resolved.reference.full_ref(),
+            resolved.key.legacy_ref().full_ref(),
+        ];
         let matches = self
             .messages
             .iter()
-            .filter(|message| self.message_anchor(resolved, message) == anchor)
+            .filter(|message| {
+                refs.iter()
+                    .any(|full_ref| message_anchor_of(full_ref, message) == anchor)
+            })
             .map(|message| message.ordinal)
             .collect::<Vec<_>>();
         match matches.as_slice() {
             [ordinal] => Ok(*ordinal),
             [] => Err(AgentError::new(
-                AgentErrorKind::NotFound,
+                AgentErrorKind::StaleAnchor,
                 Some(anchor),
-                format!("message anchor {anchor} was not found in the conversation"),
+                format!(
+                    "message anchor {anchor} matches no message of the conversation's current history; it changed since the anchor was issued, so search again for current anchors"
+                ),
             )
             .into()),
             _ => Err(AgentError::new(
@@ -262,9 +272,16 @@ impl AgentTranscript {
     }
 }
 
+/// Anchor of `message`: a digest of the conversation's ref and the
+/// message's content, so it finds the message wherever the history moves
+/// it and matches nothing once the content is gone.
 fn message_anchor(resolved: &ResolvedConversation, message: &AgentMessage) -> String {
+    message_anchor_of(&resolved.reference.full_ref(), message)
+}
+
+fn message_anchor_of(full_ref: &str, message: &AgentMessage) -> String {
     let mut identity = String::new();
-    identity.push_str(&resolved.reference.full_ref());
+    identity.push_str(full_ref);
     identity.push('|');
     identity.push_str(match message.role {
         AgentMessageRole::User => "user",
@@ -700,6 +717,41 @@ mod tests {
             original.message_anchor(&resolved, &original.messages[0]),
             prepended.message_anchor(&resolved, &prepended.messages[1])
         );
+    }
+
+    #[test]
+    fn anchors_issued_under_the_legacy_ref_resolve() {
+        let transcript = parse(&[user("first"), user("second")].join("\n"));
+        let resolved = resolved();
+        let legacy = message_anchor_of(
+            &resolved.key.legacy_ref().full_ref(),
+            &transcript.messages[1],
+        );
+
+        assert_ne!(
+            legacy,
+            transcript.message_anchor(&resolved, &transcript.messages[1])
+        );
+        assert_eq!(transcript.resolve_anchor(&resolved, &legacy).unwrap(), 2);
+    }
+
+    #[test]
+    fn anchor_of_rewritten_history_is_stale() {
+        let original = parse(&[user("kept"), user("reverted")].join("\n"));
+        let rewritten = parse(&[user("kept"), user("replacement")].join("\n"));
+        let resolved = resolved();
+        let kept = original.message_anchor(&resolved, &original.messages[0]);
+        let reverted = original.message_anchor(&resolved, &original.messages[1]);
+
+        assert_eq!(rewritten.resolve_anchor(&resolved, &kept).unwrap(), 1);
+        let error = rewritten.resolve_anchor(&resolved, &reverted).unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::AppError::Agent(AgentError {
+                kind: AgentErrorKind::StaleAnchor,
+                ..
+            })
+        ));
     }
 
     #[test]

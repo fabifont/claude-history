@@ -150,8 +150,10 @@ The `project=pr_...` plus `uuid=...` pair is reporting identity. Commands contin
 the collision-safe opaque `ref=ch_...` handle. Full UUIDs and UUID-based session filenames are also accepted when unambiguous.
 Canonical `mN` ordinals are ergonomic message addresses. Content-derived
 `ma_...` anchors survive unrelated earlier insertions and provide durable direct
-reads. Duplicate normalized content returns `ambiguous-ref`, missing anchors
-return `not-found`, and edits to anchored content change the anchor.
+reads. Duplicate normalized content returns `ambiguous-ref`, and edits to
+anchored content change the anchor. An anchor whose message is no longer in the
+conversation's history (edited, or dropped by a Codex revert) returns
+`stale-anchor`; search again for current anchors instead of reading by `mN`.
 
 If a hit needs better evidence, narrow within the conversation:
 
@@ -185,7 +187,7 @@ protocol agent-error kind=not-found ref=ch_1234abcd5678 detail=...
 ```
 
 Branch on `kind=`. Values include `invalid-ref`, `ambiguous-ref`, `not-found`,
-`out-of-range`, `budget-too-small`, `malformed-transcript`, `io`, and
+`stale-anchor`, `out-of-range`, `budget-too-small`, `malformed-transcript`, `io`, and
 `semantic-unavailable`. Percent-encoded fields and transcript output have
 terminal control sequences removed.
 

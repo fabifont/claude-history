@@ -7,6 +7,9 @@ pub enum AgentErrorKind {
     InvalidRef,
     AmbiguousRef,
     NotFound,
+    /// A message anchor that no message of the conversation's current
+    /// history matches: the history changed since the anchor was issued.
+    StaleAnchor,
     OutOfRange,
     BudgetTooSmall,
     MalformedTranscript,
@@ -20,6 +23,7 @@ impl AgentErrorKind {
             Self::InvalidRef => "invalid-ref",
             Self::AmbiguousRef => "ambiguous-ref",
             Self::NotFound => "not-found",
+            Self::StaleAnchor => "stale-anchor",
             Self::OutOfRange => "out-of-range",
             Self::BudgetTooSmall => "budget-too-small",
             Self::MalformedTranscript => "malformed-transcript",

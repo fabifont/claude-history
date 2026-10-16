@@ -960,7 +960,7 @@ fn snippet(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::refs::{AgentConversationKey, AgentConversationRef};
+    use crate::agent::refs::AgentConversationKey;
     use crate::agent::test_support::{source, text_message};
     use serde_json::json;
     use std::path::PathBuf;
@@ -969,7 +969,7 @@ mod tests {
         let key =
             AgentConversationKey::new("project with space", filename, PathBuf::from(filename));
         ResolvedConversation {
-            reference: AgentConversationRef::from_parts("project with space", filename),
+            reference: key.conversation_ref(),
             key,
         }
     }

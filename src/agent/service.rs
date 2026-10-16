@@ -559,16 +559,16 @@ fn discover_agent_keys(
                 .unwrap_or(header.cwd)
                 .to_string_lossy()
                 .into_owned();
-            let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+            if path.file_name().and_then(|name| name.to_str()).is_none() {
                 continue;
-            };
-            keys.push(agent::refs::AgentConversationKey {
-                source: history::model::SourceKind::Pi,
-                project_dir_name: project_identity,
-                session_filename: filename.to_owned(),
-                session_id: header.id,
+            }
+            keys.push(agent::refs::AgentConversationKey::in_instance(
+                history::model::SourceKind::Pi,
+                &pi_root.path,
+                project_identity,
+                header.id,
                 path,
-            });
+            ));
         }
     }
     if let Ok(omp_root) = history::omp_loader::session_root()
@@ -604,16 +604,16 @@ fn discover_agent_keys(
                 .unwrap_or(header.cwd)
                 .to_string_lossy()
                 .into_owned();
-            let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+            if path.file_name().and_then(|name| name.to_str()).is_none() {
                 continue;
-            };
-            keys.push(agent::refs::AgentConversationKey {
-                source: history::model::SourceKind::Omp,
-                project_dir_name: project_identity,
-                session_filename: filename.to_owned(),
-                session_id: header.id,
+            }
+            keys.push(agent::refs::AgentConversationKey::in_instance(
+                history::model::SourceKind::Omp,
+                &omp_root.path,
+                project_identity,
+                header.id,
                 path,
-            });
+            ));
         }
     }
     let loaded;
@@ -624,6 +624,7 @@ fn discover_agent_keys(
             &loaded
         }
     };
+    let registry = history::sources::Registry::from_env();
     keys.extend(
         listed
             .iter()
@@ -632,7 +633,8 @@ fn discover_agent_keys(
                     && !conversation.provenance.hidden_by_default()
             })
             .filter_map(|conversation| {
-                agent::refs::AgentConversationKey::from_conversation(conversation).ok()
+                agent::refs::AgentConversationKey::from_conversation_in(conversation, &registry)
+                    .ok()
             }),
     );
     if keys.is_empty() && !root.exists() {
