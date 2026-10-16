@@ -111,6 +111,36 @@ pub struct Fingerprint {
     pub mtime_ns: i64,
 }
 
+/// Where a card's document lives in the generation's index segments,
+/// parallel to the card rows.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
+pub struct IndexLoc {
+    /// Index segment id (see `lexindex::segment_stem`).
+    pub seg: u32,
+    /// Doc id inside that segment.
+    pub doc: u32,
+}
+
+/// One index segment of a generation. Docs of the segment that no card
+/// points at are dead and skipped by queries.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
+pub struct IndexSegRow {
+    pub id: u32,
+    pub n_docs: u32,
+}
+
+/// A native file that holds no conversation (empty, or not one of its
+/// source's sessions), remembered so it is not parsed again while its
+/// fingerprint holds.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
+pub struct IgnoredRow {
+    pub path: StrRef,
+    pub fingerprint: Fingerprint,
+}
+
 /// Fixed-size manifest header. Section offsets are 8-byte aligned.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -123,12 +153,20 @@ pub struct Header {
     pub rows_off: u64,
     pub projects_off: u64,
     pub fingerprints_off: u64,
+    /// `IndexLoc[row_count]`.
+    pub locs_off: u64,
+    /// `IndexSegRow[seg_count]`, ascending ids.
+    pub segs_off: u64,
+    /// `IgnoredRow[ignored_count]`.
+    pub ignored_off: u64,
     pub heap_off: u64,
     pub heap_len: u64,
+    pub seg_count: u32,
+    pub ignored_count: u32,
 }
 
 pub const MAGIC: [u8; 8] = *b"CHGEN\0\0\0";
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 pub fn source_to_u8(source: crate::history::Source) -> u8 {
     match source {
@@ -168,7 +206,10 @@ mod tests {
         assert_eq!(std::mem::size_of::<CardRow>(), 128);
         assert_eq!(std::mem::size_of::<ProjectRow>(), 32);
         assert_eq!(std::mem::size_of::<Fingerprint>(), 16);
-        assert_eq!(std::mem::size_of::<Header>(), 64);
+        assert_eq!(std::mem::size_of::<IndexLoc>(), 8);
+        assert_eq!(std::mem::size_of::<IndexSegRow>(), 8);
+        assert_eq!(std::mem::size_of::<IgnoredRow>(), 24);
+        assert_eq!(std::mem::size_of::<Header>(), 96);
     }
 
     #[test]

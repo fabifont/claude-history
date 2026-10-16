@@ -343,8 +343,6 @@ struct SnapshotStore {
 
 #[derive(Debug)]
 enum SnapshotWrite {
-    /// `CURRENT` already holds the loaded corpus; nothing was written.
-    Unchanged,
     /// A builder process ran and exited with this status.
     Built(std::process::ExitStatus),
 }
@@ -361,41 +359,28 @@ impl SnapshotStore {
         crate::store::Snapshot::open(self.root.as_deref()?, show_last, time_filter)
     }
 
-    /// Rebuilds the snapshot in the background unless it already holds the
-    /// loaded corpus, and calls `built` once a builder process has exited.
-    /// Only a complete load outside any time window is the whole corpus, so
-    /// nothing else is compared or written.
-    ///
-    /// Building the index takes many seconds, longer than many sessions
-    /// last, so it runs in a separate process (`publish_snapshot`) that
-    /// outlives the TUI. Writing nothing on an unchanged corpus is decided
-    /// here, from the loaded conversations, without starting it.
+    /// Reconciles the store with the session files in the background, and
+    /// calls `built` once the reconcile process has exited. It runs in a
+    /// separate process (`reconcile`) that outlives the TUI and writes
+    /// nothing when no session file changed.
     fn write(
         &mut self,
-        app: &App,
+        _app: &App,
         load: &LoadState,
         time_filter: TimeFilter,
-        loaded_since: SystemTime,
+        _loaded_since: SystemTime,
         built: impl FnOnce() + Send + 'static,
     ) {
-        let Some(root) = self.root.clone() else {
+        if self.root.is_none() {
             return;
-        };
+        }
         if load.initial_incomplete || time_filter.is_active() || self.writer.is_some() {
             return;
         }
-        let conversations = app.shared_conversations();
         self.writer = std::thread::Builder::new()
             .name("snapshot-writer".into())
             .spawn(move || {
-                let current =
-                    crate::store::snapshot_is_current(&root, &conversations, loaded_since);
-                drop(conversations);
-                crate::bench::mark("snapshot_checked");
-                if current {
-                    return Ok(SnapshotWrite::Unchanged);
-                }
-                let status = spawn_snapshot_builder()?.wait()?;
+                let status = spawn_reconciler()?.wait()?;
                 crate::bench::mark("snapshot_built");
                 built();
                 Ok(SnapshotWrite::Built(status))
@@ -419,13 +404,13 @@ impl SnapshotStore {
     }
 }
 
-/// Starts `claude-history --publish-snapshot` in its own session, so it keeps
+/// Starts `claude-history --reconcile` in its own session, so it keeps
 /// running when the TUI exits or replaces itself with an agent.
-fn spawn_snapshot_builder() -> io::Result<std::process::Child> {
+fn spawn_reconciler() -> io::Result<std::process::Child> {
     use std::process::{Command, Stdio};
     let mut command = Command::new(std::env::current_exe()?);
     command
-        .arg("--publish-snapshot")
+        .arg("--reconcile")
         .stdin(Stdio::null())
         .stdout(Stdio::null());
     if crate::bench::enabled() {
@@ -449,10 +434,9 @@ fn spawn_snapshot_builder() -> io::Result<std::process::Child> {
     command.spawn()
 }
 
-/// Entry point of the snapshot builder process: loads the whole history and
-/// publishes it with its index and text, at low priority. Publishes nothing
-/// when any project fails to load.
-pub fn publish_snapshot() -> Result<()> {
+/// Entry point of the reconcile process: brings the store up to date with
+/// the session files at low priority (see `store::reconcile`).
+pub fn reconcile() -> Result<()> {
     #[cfg(unix)]
     // SAFETY: lowers this process's own scheduling priority.
     unsafe {
@@ -461,48 +445,19 @@ pub fn publish_snapshot() -> Result<()> {
     let Some(root) = crate::store::default_root() else {
         return Ok(());
     };
-    let outcome = publish_snapshot_at(&root, || {
-        let mut conversations = Vec::new();
-        for message in
-            crate::history::load_all_conversations_streaming(false, None, TimeFilter::default())
-        {
-            match message {
-                LoaderMessage::Batch(batch) => conversations.extend(batch),
-                LoaderMessage::Done => break,
-                LoaderMessage::ProjectError => return Ok(None),
-                LoaderMessage::Fatal(err) => return Err(err),
-            }
-        }
-        crate::bench::mark("publish_loaded");
-        Ok(Some(conversations))
-    })?;
-    crate::bench::mark("publish_done");
-    crate::bench::mark_peak_rss_as("publish_peak_rss");
-    let _ = debug_log::log_debug(&format!("List snapshot: {outcome:?}"));
+    crate::bench::mark("reconcile_start");
+    let sources = crate::store::reconcile::Sources::from_env();
+    let outcome = crate::store::reconcile::reconcile(&root, &sources)?;
+    crate::bench::mark("reconcile_done");
+    if crate::bench::enabled() {
+        eprintln!(
+            "bench reconcile_bytes_written {}B\nbench reconcile_parsed {}\nbench reconcile_published {}",
+            outcome.written.bytes, outcome.parsed, outcome.published
+        );
+    }
+    crate::bench::mark_peak_rss_as("reconcile_peak_rss");
+    let _ = debug_log::log_debug(&format!("Reconcile: {outcome:?}"));
     Ok(())
-}
-
-/// Publishes the corpus returned by `load` under `root`, holding the
-/// publish lock from before loading until the generation is published, so
-/// concurrent builders never load a corpus they cannot publish. Returns
-/// `Busy` without loading when another process holds the lock, and `None`
-/// when `load` yields no complete corpus.
-fn publish_snapshot_at(
-    root: &std::path::Path,
-    load: impl FnOnce() -> Result<Option<Vec<Conversation>>>,
-) -> Result<Option<crate::store::Publish>> {
-    let Some(lock) = crate::store::PublishLock::try_acquire(root)? else {
-        return Ok(Some(crate::store::Publish::Busy));
-    };
-    let loaded_since = SystemTime::now();
-    let Some(conversations) = load()? else {
-        return Ok(None);
-    };
-    Ok(Some(crate::store::write_snapshot(
-        &lock,
-        &conversations,
-        loaded_since,
-    )?))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -922,34 +877,5 @@ mod tests {
     #[test]
     fn content_width_reserves_timestamp_prefix_when_timing_is_on() {
         assert_eq!(calculate_content_width(60, true), 32);
-    }
-
-    #[test]
-    fn snapshot_builder_skips_loading_while_another_holds_the_lock() {
-        use crate::store::{Generation, Publish, PublishLock};
-        let dir = tempfile::tempdir().unwrap();
-        let conversations = || {
-            vec![crate::store::test_support::conversation(
-                "/p/proj/a.jsonl",
-                1_000,
-            )]
-        };
-
-        let held = PublishLock::try_acquire(dir.path()).unwrap().unwrap();
-        let outcome = publish_snapshot_at(dir.path(), || -> Result<_> {
-            panic!("loaded while another builder holds the lock")
-        })
-        .unwrap();
-        assert_eq!(outcome, Some(Publish::Busy));
-        drop(held);
-
-        let outcome = publish_snapshot_at(dir.path(), || {
-            assert!(PublishLock::try_acquire(dir.path()).unwrap().is_none());
-            Ok(Some(conversations()))
-        })
-        .unwrap();
-        assert_eq!(outcome, Some(Publish::Published("g000001".into())));
-        assert_eq!(Generation::open(dir.path()).unwrap().rows().len(), 1);
-        assert!(PublishLock::try_acquire(dir.path()).unwrap().is_some());
     }
 }

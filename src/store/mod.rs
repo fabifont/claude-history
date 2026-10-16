@@ -9,10 +9,12 @@
 pub mod card;
 pub mod generation;
 pub mod lexindex;
+pub mod reconcile;
 pub mod search;
+pub mod segments;
 pub mod text;
 
-pub use generation::{Generation, ProjectView, Publish, PublishLock};
+pub use generation::{Generation, ProjectView};
 
 use crate::history::Conversation;
 use crate::time_filter::TimeFilter;
@@ -21,7 +23,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 /// Store root: `v3/roots-<hash>/` beside the other caches. The cache dir is
 /// namespaced by `CLAUDE_CONFIG_DIR` like the other caches, and the hash
@@ -163,7 +164,7 @@ fn in_time(time: &TimeFilter, row: &card::CardRow) -> bool {
 /// A generation's cards, suffix index and text, ready for lexical search.
 pub struct SearchIndex {
     cards: Snapshot,
-    index: lexindex::LexIndex,
+    index: segments::IndexSet,
     text: text::TextSegments,
     docs: search::SearchDocs,
 }
@@ -208,36 +209,6 @@ impl search::TextSource for SearchIndex {
     }
 }
 
-/// Whether `CURRENT` under `root` already holds `conversations` (the
-/// complete corpus, loaded starting at `loaded_since`) with its index, so
-/// `write_snapshot` would write nothing.
-pub fn snapshot_is_current(
-    root: &Path,
-    conversations: &[Conversation],
-    loaded_since: SystemTime,
-) -> bool {
-    generation::is_current(root, &corpus(conversations, loaded_since))
-}
-
-/// Writes a generation for `conversations` (the complete corpus, loaded
-/// starting at `loaded_since`) into the root of `lock` unless `CURRENT`
-/// already matches it.
-pub fn write_snapshot(
-    lock: &PublishLock,
-    conversations: &[Conversation],
-    loaded_since: SystemTime,
-) -> std::io::Result<Publish> {
-    generation::publish_locked(lock, &corpus(conversations, loaded_since))
-}
-
-fn corpus(conversations: &[Conversation], loaded_since: SystemTime) -> generation::Corpus<'_> {
-    let fingerprints = conversations
-        .iter()
-        .map(|conversation| generation::fingerprint(&conversation.path, loaded_since))
-        .collect();
-    generation::Corpus::new(conversations, fingerprints)
-}
-
 #[cfg(test)]
 mod tests {
     use super::source_roots_namespace;
@@ -266,7 +237,6 @@ mod tests {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use super::card::Fingerprint;
     use crate::history::{Conversation, Source};
     use chrono::{Local, TimeZone};
     use std::path::{Path, PathBuf};
@@ -312,9 +282,5 @@ pub(crate) mod test_support {
             total_tokens: 42,
             duration_minutes: None,
         }
-    }
-
-    pub(crate) fn unknown_fingerprints(count: usize) -> Vec<Fingerprint> {
-        vec![Fingerprint::default(); count]
     }
 }

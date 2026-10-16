@@ -22,7 +22,8 @@
 
 use super::card::card_flags;
 use super::generation::Generation;
-use super::lexindex::{self, LexIndex, TERM_CAP};
+use super::lexindex::{self, TERM_CAP};
+use super::segments::IndexSet;
 use crate::search::lexical::{
     WEIGHT_BODY, WEIGHT_PROJECT, WEIGHT_SUMMARY, WEIGHT_TITLE, adjacency_score, adjacent_pairs,
     count_adjacent_pairs, count_prefix_matches, freshness_bonus, identifier_literals,
@@ -218,7 +219,7 @@ pub struct Ranking<'a> {
 /// Starts `query` against `index`. `scope(doc)` restricts the documents
 /// considered, like the `scope` of `search::debug_search`.
 pub fn search<'a>(
-    index: &LexIndex,
+    index: &IndexSet,
     docs: &'a SearchDocs,
     text: &'a dyn TextSource,
     query: &str,
@@ -692,7 +693,7 @@ fn literals_match(full_text: &str, project_name: Option<&str>, literals: &[Liter
 /// that starts with the term the literal itself yields there. A document
 /// lacking any of a literal's terms can still match through the text the
 /// literal corpus appends: the project name, after a space.
-fn literal_mask(index: &LexIndex, docs: &SearchDocs, literals: &[Literal]) -> Option<Vec<bool>> {
+fn literal_mask(index: &IndexSet, docs: &SearchDocs, literals: &[Literal]) -> Option<Vec<bool>> {
     let mut mask: Option<Vec<bool>> = None;
     for literal in literals {
         let lowered = normalize_for_search(literal.text());
@@ -818,7 +819,7 @@ pub(crate) mod oracle {
         pub conversations: Vec<Conversation>,
         pub searchable: Vec<SearchableConversation>,
         pub docs: SearchDocs,
-        pub index: LexIndex,
+        pub index: IndexSet,
         pub frames: Frames,
         pub build: lexindex::BuildStats,
         pub build_time: std::time::Duration,
@@ -833,9 +834,11 @@ pub(crate) mod oracle {
                 Cow::Owned(normalize_for_search(&conversations[doc as usize].full_text))
             });
             let dir = tempfile::tempdir().unwrap();
-            built.write(dir.path()).unwrap();
+            built.write(dir.path(), 0).unwrap();
             let build_time = started.elapsed();
-            let index = LexIndex::open(dir.path(), conversations.len() as u32).unwrap();
+            let index = IndexSet::single(
+                lexindex::LexIndex::open(dir.path(), 0, conversations.len() as u32).unwrap(),
+            );
             let texts: Vec<&str> = conversations.iter().map(|c| &*c.full_text).collect();
             let refs = text::write_segment(&text::segment_path(dir.path(), 0), 0, &texts).unwrap();
             let rows: Vec<CardRow> = refs
@@ -1186,11 +1189,7 @@ mod tests {
         let now = Local.timestamp_opt(1_760_000_000, 0).unwrap();
         let conversations = super::oracle::into_doc_order(golden_corpus(now));
         let root = tempfile::tempdir().unwrap();
-        let corpus = crate::store::generation::Corpus::new(
-            &conversations,
-            crate::store::test_support::unknown_fingerprints(conversations.len()),
-        );
-        crate::store::generation::publish(root.path(), &corpus).unwrap();
+        crate::store::generation::publish(root.path(), &conversations).unwrap();
         let generation = Generation::open(root.path()).unwrap();
 
         let from_cards = SearchDocs::from_generation(&generation);

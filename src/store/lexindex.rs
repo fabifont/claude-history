@@ -53,9 +53,35 @@ use std::io;
 use std::ops::Range;
 use std::path::Path;
 
+#[cfg(test)]
 pub const FST_FILE: &str = "base.fst";
+#[cfg(test)]
 pub const POST_FILE: &str = "base.post";
+#[cfg(test)]
 pub const SHORT_FILE: &str = "base.short";
+
+/// File stem of index segment `id`: `base` for segment 0, `delta-NNNN` for
+/// the others.
+pub fn segment_stem(id: u32) -> String {
+    if id == 0 {
+        "base".to_owned()
+    } else {
+        format!("delta-{id:04}")
+    }
+}
+
+/// The three file names of index segment `id`.
+pub fn segment_files(id: u32) -> [String; 3] {
+    let stem = segment_stem(id);
+    [
+        format!("{stem}.fst"),
+        format!("{stem}.post"),
+        format!("{stem}.short"),
+    ]
+}
+
+/// `remap` value of a document that no longer exists.
+pub const DEAD: u32 = u32::MAX;
 
 /// Longest stored term, in bytes.
 pub const TERM_CAP: usize = 24;
@@ -314,10 +340,16 @@ pub struct Built {
 }
 
 impl Built {
-    pub fn write(&self, dir: &Path) -> io::Result<()> {
-        write_synced(&dir.join(FST_FILE), &self.fst)?;
-        write_synced(&dir.join(POST_FILE), &self.post)?;
-        write_synced(&dir.join(SHORT_FILE), &self.short)
+    /// Writes the files of index segment `id` into `dir`.
+    pub fn write(&self, dir: &Path, id: u32) -> io::Result<()> {
+        let [fst, post, short] = segment_files(id);
+        write_synced(&dir.join(fst), &self.fst)?;
+        write_synced(&dir.join(post), &self.post)?;
+        write_synced(&dir.join(short), &self.short)
+    }
+
+    pub fn disk_bytes(&self) -> u64 {
+        (self.fst.len() + self.post.len() + self.short.len()) as u64
     }
 }
 
@@ -351,7 +383,11 @@ where
         .collect();
     let short = build_short(&docs, n_docs);
     drop(docs);
+    assemble(parts, short, n_docs)
+}
 
+/// Lays out built partitions and the short file as index files.
+fn assemble(parts: Vec<Part>, short: (Vec<u8>, usize), n_docs: usize) -> Built {
     let header = |magic, count: usize| FileHeader {
         magic,
         version: VERSION,
@@ -489,7 +525,14 @@ fn build_short(docs: &[DocTerms], n_docs: usize) -> (Vec<u8>, usize) {
                 .push((doc_id as u32, *tf));
         }
     }
+    write_short(&columns, n_docs)
+}
 
+/// Serializes short columns whose postings are in doc order.
+fn write_short<K: AsRef<[u8]>>(
+    columns: &BTreeMap<K, Vec<(u32, u8)>>,
+    n_docs: usize,
+) -> (Vec<u8>, usize) {
     let header = FileHeader {
         magic: SHORT_MAGIC,
         version: VERSION,
@@ -501,7 +544,8 @@ fn build_short(docs: &[DocTerms], n_docs: usize) -> (Vec<u8>, usize) {
         std::mem::size_of::<FileHeader>() + columns.len() * std::mem::size_of::<ShortRow>();
     let mut rows = Vec::with_capacity(columns.len());
     let mut data = Vec::new();
-    for (key, postings) in &columns {
+    for (key, postings) in columns {
+        let key = key.as_ref();
         let mut sparse = Vec::new();
         write_varint(&mut sparse, postings.len() as u64);
         let mut prev = 0;
@@ -563,21 +607,43 @@ fn read_varint(data: &[u8], pos: &mut usize) -> Option<u64> {
     None
 }
 
-/// Adds the posting list at the start of `data` into `acc`, capping at
-/// `TF_CAP`. Stops at the first malformed entry.
-fn add_postings(data: &[u8], acc: &mut [u8]) -> Option<()> {
+/// Calls `f` with every `(doc, tf)` of the posting list at the start of
+/// `data`. Stops at the first malformed entry or when `f` returns `None`.
+fn for_each_posting(data: &[u8], mut f: impl FnMut(u64, u8) -> Option<()>) -> Option<()> {
     let mut pos = 0;
     let count = read_varint(data, &mut pos)?;
     let mut doc = 0u64;
     for _ in 0..count {
         let posting = read_varint(data, &mut pos)?;
         doc = doc.checked_add(posting >> 4)?;
-        let tf = (posting & 0xf) as u8;
-        let slot = acc.get_mut(usize::try_from(doc).ok()?)?;
-        *slot = slot.saturating_add(tf).min(TF_CAP);
+        f(doc, (posting & 0xf) as u8)?;
     }
     Some(())
 }
+
+/// Adds `tf` to the slot of local doc `doc` in `acc`, capping at `TF_CAP`.
+/// `remap` maps local docs to slots, `DEAD` docs are skipped. `None` when
+/// `doc` is out of range.
+#[inline]
+fn add_tf(acc: &mut [u8], remap: Option<&[u32]>, doc: u64, tf: u8) -> Option<()> {
+    let doc = usize::try_from(doc).ok()?;
+    let slot = match remap {
+        Some(remap) => match *remap.get(doc)? {
+            DEAD => return Some(()),
+            slot => slot as usize,
+        },
+        None => doc,
+    };
+    let slot = acc.get_mut(slot)?;
+    *slot = slot.saturating_add(tf).min(TF_CAP);
+    Some(())
+}
+
+/// `(doc, tf)` pairs in doc order.
+type Postings = Vec<(u32, u8)>;
+
+/// A partition's fst map and the postings it points into.
+type PartMap<'a> = (fst::Map<&'a [u8]>, &'a [u8]);
 
 /// A validated, memory-mapped index.
 pub struct LexIndex {
@@ -611,12 +677,14 @@ fn table<T>(len: usize, count: u32) -> Option<Range<usize>> {
 }
 
 impl LexIndex {
-    /// Opens the index files in `dir`, built for `n_docs` documents. Returns
+    /// Opens the files of index segment `id` in `dir`, built for `n_docs`
+    /// documents. Returns
     /// `None` when any file is missing or fails validation.
-    pub fn open(dir: &Path, n_docs: u32) -> Option<Self> {
-        let fst = map_file(&dir.join(FST_FILE))?;
-        let post = map_file(&dir.join(POST_FILE))?;
-        let short = map_file(&dir.join(SHORT_FILE))?;
+    pub fn open(dir: &Path, id: u32, n_docs: u32) -> Option<Self> {
+        let [fst, post, short] = segment_files(id);
+        let fst = map_file(&dir.join(fst))?;
+        let post = map_file(&dir.join(post))?;
+        let short = map_file(&dir.join(short))?;
         read_header(&post, POST_MAGIC, n_docs)?;
 
         let header = read_header(&fst, FST_MAGIC, n_docs)?;
@@ -666,25 +734,42 @@ impl LexIndex {
         bytemuck::cast_slice(&self.short[self.short_rows.clone()])
     }
 
-    /// Capped count of word-start occurrences of `word` (a normalized word,
-    /// or an adjacent pair) in each document. Words longer than `TERM_CAP`
-    /// are counted by their `TERM_CAP`-byte prefix, which can only
-    /// overcount.
     /// Per-document count of `word` (normalized, starting with an ideograph)
     /// occurring right after an alphanumeric char, cut to `TERM_CAP` bytes
     /// like `prefix_tf`. With `prefix_tf`, it bounds where `word` occurs at
     /// all.
+    #[cfg(test)]
     pub fn inner_tf(&self, word: &str) -> Vec<u8> {
-        if !word.starts_with(is_ideograph) {
-            return vec![0; self.n_docs as usize];
-        }
-        self.prefix_tf(&format!(" {}", truncate_on_char_boundary(word, TERM_CAP)))
+        let mut acc = vec![0; self.n_docs as usize];
+        self.inner_tf_into(word, &mut acc, None);
+        acc
     }
 
+    /// Capped count of word-start occurrences of `word` (a normalized word,
+    /// or an adjacent pair) in each document. Words longer than `TERM_CAP`
+    /// are counted by their `TERM_CAP`-byte prefix, which can only
+    /// overcount.
+    #[cfg(test)]
     pub fn prefix_tf(&self, word: &str) -> Vec<u8> {
-        let mut acc = vec![0u8; self.n_docs as usize];
+        let mut acc = vec![0; self.n_docs as usize];
+        self.prefix_tf_into(word, &mut acc, None);
+        acc
+    }
+
+    /// `inner_tf` added into `acc`; see `prefix_tf_into`.
+    pub fn inner_tf_into(&self, word: &str, acc: &mut [u8], remap: Option<&[u32]>) {
+        if word.starts_with(is_ideograph) {
+            let term = format!(" {}", truncate_on_char_boundary(word, TERM_CAP));
+            self.prefix_tf_into(&term, acc, remap);
+        }
+    }
+
+    /// `prefix_tf` added into `acc`, capping at `TF_CAP`. With `remap`, the
+    /// tf of doc `d` goes to `acc[remap[d]]` and `DEAD` docs are skipped;
+    /// otherwise `acc` is indexed by doc.
+    pub fn prefix_tf_into(&self, word: &str, acc: &mut [u8], remap: Option<&[u32]>) {
         if word.is_empty() {
-            return acc;
+            return;
         }
         if word.len() <= SHORT_LEN {
             let rows = self.short_rows();
@@ -692,12 +777,22 @@ impl LexIndex {
                 let row = rows[i];
                 let data = &self.short[row.off as usize..(row.off + row.len) as usize];
                 if row.dense == 1 {
-                    acc.copy_from_slice(data);
+                    if remap.is_none() && acc.len() == data.len() {
+                        for (slot, &tf) in acc.iter_mut().zip(data) {
+                            *slot = slot.saturating_add(tf).min(TF_CAP);
+                        }
+                    } else {
+                        for (doc, &tf) in data.iter().enumerate() {
+                            if tf > 0 && add_tf(acc, remap, doc as u64, tf).is_none() {
+                                break;
+                            }
+                        }
+                    }
                 } else {
-                    add_postings(data, &mut acc);
+                    for_each_posting(data, |doc, tf| add_tf(acc, remap, doc, tf));
                 }
             }
-            return acc;
+            return;
         }
 
         let key = if word.contains(' ') {
@@ -716,21 +811,192 @@ impl LexIndex {
                     break;
                 }
                 if value & INLINE != 0 {
-                    let doc = (value & 0xffff_ffff) as usize;
-                    if let Some(slot) = acc.get_mut(doc) {
-                        *slot = slot.saturating_add((value >> 32) as u8).min(TF_CAP);
-                    }
+                    add_tf(acc, remap, value & 0xffff_ffff, (value >> 32) as u8);
                 } else if let Some(data) = usize::try_from(value)
                     .ok()
                     .and_then(|off| off.checked_add(*post_off))
                     .and_then(|start| self.post.get(start..))
                 {
-                    add_postings(data, &mut acc);
+                    for_each_posting(data, |doc, tf| add_tf(acc, remap, doc, tf));
                 }
             }
         }
-        acc
     }
+
+    /// Fst maps of the partitions, in term order, with their postings.
+    fn part_maps(&self) -> Vec<PartMap<'_>> {
+        self.parts
+            .iter()
+            .filter_map(|(range, post_off)| {
+                let map = fst::Map::new(&self.fst[range.clone()]).ok()?;
+                Some((map, self.post.get(*post_off..)?))
+            })
+            .collect()
+    }
+
+    /// Calls `f` with every `(doc, tf)` stored under fst value `value` of a
+    /// partition whose postings start at `post`.
+    fn for_each_value_posting(value: u64, post: &[u8], mut f: impl FnMut(u64, u8)) {
+        if value & INLINE != 0 {
+            f(value & 0xffff_ffff, (value >> 32) as u8);
+        } else if let Some(data) = usize::try_from(value).ok().and_then(|off| post.get(off..)) {
+            for_each_posting(data, |doc, tf| {
+                f(doc, tf);
+                Some(())
+            });
+        }
+    }
+
+    /// Every short column: key and `(doc, tf)` with nonzero tf, doc order.
+    fn short_columns(&self) -> Vec<(&[u8], Postings)> {
+        self.short_rows()
+            .iter()
+            .map(|row| {
+                let data = &self.short[row.off as usize..(row.off + row.len) as usize];
+                let mut postings = Vec::new();
+                if row.dense == 1 {
+                    postings.extend(
+                        data.iter()
+                            .enumerate()
+                            .filter(|(_, tf)| **tf > 0)
+                            .map(|(doc, &tf)| (doc as u32, tf)),
+                    );
+                } else {
+                    for_each_posting(data, |doc, tf| {
+                        postings.push((u32::try_from(doc).ok()?, tf));
+                        Some(())
+                    });
+                }
+                (row.key(), postings)
+            })
+            .collect()
+    }
+}
+
+/// Merges index segments into one index over `n_docs` documents. Each
+/// source comes with its `remap`: the new doc id of each of its docs, or
+/// `DEAD` to drop it. Every new doc must come from exactly one source. The
+/// result equals `build` over the same documents in the new order, without
+/// reading their text.
+pub fn merge(sources: &[(&LexIndex, &[u32])], n_docs: usize) -> Built {
+    assert!(n_docs <= u32::MAX as usize);
+    let maps: Vec<Vec<PartMap>> = sources.iter().map(|(index, _)| index.part_maps()).collect();
+    // Partition like the largest source, whose parts already split its terms
+    // into similar posting counts.
+    let bounds: Vec<Vec<u8>> = maps
+        .iter()
+        .max_by_key(|parts| parts.len())
+        .map(|parts| {
+            parts
+                .iter()
+                .skip(1)
+                .filter_map(|(map, _)| map.stream().next().map(|(term, _)| term.to_vec()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let parts: Vec<Part> = (0..bounds.len() + 1)
+        .into_par_iter()
+        .map(|part| {
+            let lo = part.checked_sub(1).map(|i| bounds[i].as_slice());
+            let hi = bounds.get(part).map(Vec::as_slice);
+            merge_part(sources, &maps, lo, hi)
+        })
+        .collect();
+
+    let mut columns: BTreeMap<Vec<u8>, Vec<(u32, u8)>> = BTreeMap::new();
+    for (index, remap) in sources {
+        for (key, postings) in index.short_columns() {
+            let column = columns.entry(key.to_vec()).or_default();
+            column.extend(postings.into_iter().filter_map(|(doc, tf)| {
+                let doc = *remap.get(doc as usize)?;
+                (doc != DEAD).then_some((doc, tf))
+            }));
+        }
+    }
+    columns.retain(|_, postings| !postings.is_empty());
+    for postings in columns.values_mut() {
+        postings.sort_unstable_by_key(|&(doc, _)| doc);
+    }
+    let short = write_short(&columns, n_docs);
+    assemble(parts, short, n_docs)
+}
+
+/// Merges the terms in `[lo, hi)` of every source into one partition.
+fn merge_part(
+    sources: &[(&LexIndex, &[u32])],
+    maps: &[Vec<PartMap>],
+    lo: Option<&[u8]>,
+    hi: Option<&[u8]>,
+) -> Part {
+    let mut union = fst::map::OpBuilder::new();
+    // Union index -> (source, postings of the partition).
+    let mut origins = Vec::new();
+    for (source, parts) in maps.iter().enumerate() {
+        for (map, post) in parts {
+            let range = map.range();
+            let range = match lo {
+                Some(lo) => range.ge(lo),
+                None => range,
+            };
+            let range = match hi {
+                Some(hi) => range.lt(hi),
+                None => range,
+            };
+            union.push(range);
+            origins.push((source, *post));
+        }
+    }
+    let mut stream = union.union();
+
+    let mut builder = fst::MapBuilder::memory();
+    let mut post = Vec::new();
+    let mut part = Part {
+        fst: Vec::new(),
+        post: Vec::new(),
+        terms: 0,
+        postings: 0,
+        inline_postings: 0,
+    };
+    let mut postings: Vec<(u32, u8)> = Vec::new();
+    while let Some((term, values)) = stream.next() {
+        postings.clear();
+        for value in values {
+            let (source, data) = origins[value.index];
+            let remap = sources[source].1;
+            LexIndex::for_each_value_posting(value.value, data, |doc, tf| {
+                if let Some(&doc) = usize::try_from(doc).ok().and_then(|doc| remap.get(doc))
+                    && doc != DEAD
+                {
+                    postings.push((doc, tf));
+                }
+            });
+        }
+        if postings.is_empty() {
+            continue;
+        }
+        postings.sort_unstable_by_key(|&(doc, _)| doc);
+        part.postings += postings.len() as u64;
+        let value = if let [(doc, tf)] = postings[..] {
+            part.inline_postings += 1;
+            INLINE | (u64::from(tf) << 32) | u64::from(doc)
+        } else {
+            let off = post.len() as u64;
+            write_varint(&mut post, postings.len() as u64);
+            let mut prev = 0;
+            for &(doc, tf) in &postings {
+                write_posting(&mut post, doc - prev, tf);
+                prev = doc;
+            }
+            off
+        };
+        builder
+            .insert(term, value)
+            .expect("union streams terms in sorted order");
+        part.terms += 1;
+    }
+    part.fst = builder.into_inner().expect("in-memory fst write");
+    part.post = post;
+    part
 }
 
 #[cfg(test)]
@@ -742,8 +1008,8 @@ mod tests {
         let lowered: Vec<String> = texts.iter().map(|t| normalize_for_search(t)).collect();
         let built = build(lowered.len(), |doc| Cow::Borrowed(&lowered[doc as usize]));
         let dir = tempfile::tempdir().unwrap();
-        built.write(dir.path()).unwrap();
-        let index = LexIndex::open(dir.path(), lowered.len() as u32).unwrap();
+        built.write(dir.path(), 0).unwrap();
+        let index = LexIndex::open(dir.path(), 0, lowered.len() as u32).unwrap();
         (dir, index)
     }
 
@@ -915,16 +1181,19 @@ mod tests {
     #[test]
     fn open_rejects_corrupt_or_mismatched_files() {
         let (dir, _index) = index_of(&["alpha beta", "gamma"]);
-        assert!(LexIndex::open(dir.path(), 3).is_none(), "doc count");
+        assert!(LexIndex::open(dir.path(), 0, 3).is_none(), "doc count");
         for file in [FST_FILE, POST_FILE, SHORT_FILE] {
             let path = dir.path().join(file);
             let original = std::fs::read(&path).unwrap();
             let mut bytes = original.clone();
             bytes[0] = b'X';
             std::fs::write(&path, &bytes).unwrap();
-            assert!(LexIndex::open(dir.path(), 2).is_none(), "{file} magic");
+            assert!(LexIndex::open(dir.path(), 0, 2).is_none(), "{file} magic");
             std::fs::write(&path, &original[..original.len().min(20)]).unwrap();
-            assert!(LexIndex::open(dir.path(), 2).is_none(), "{file} truncated");
+            assert!(
+                LexIndex::open(dir.path(), 0, 2).is_none(),
+                "{file} truncated"
+            );
             std::fs::write(&path, &original).unwrap();
         }
         let short = dir.path().join(SHORT_FILE);
@@ -932,6 +1201,92 @@ mod tests {
         let row = std::mem::size_of::<FileHeader>();
         bytes[row + 16..row + 24].copy_from_slice(&u64::MAX.to_le_bytes());
         std::fs::write(&short, &bytes).unwrap();
-        assert!(LexIndex::open(dir.path(), 2).is_none(), "short row bounds");
+        assert!(
+            LexIndex::open(dir.path(), 0, 2).is_none(),
+            "short row bounds"
+        );
+    }
+
+    fn words_of(lowered: &[String]) -> Vec<String> {
+        let mut words: Vec<String> = lowered
+            .iter()
+            .flat_map(|text| text.split(' ').map(str::to_owned))
+            .filter(|word| !word.is_empty())
+            .flat_map(|word| {
+                let short: String = word.chars().take(2).collect();
+                let one: String = word.chars().take(1).collect();
+                [word, short, one]
+            })
+            .collect();
+        words.extend(["测试", "试", "alpha be", "zzz"].map(str::to_owned));
+        words.sort();
+        words.dedup();
+        words
+    }
+
+    #[test]
+    fn merge_equals_build_over_the_new_order() {
+        let texts: Vec<String> = (0..300)
+            .map(|i| match i % 4 {
+                0 => format!("alpha beta {i} common word{}", i % 7),
+                1 => format!("测试{i} abc测试 gamma{} common", i % 5),
+                2 => "a b c d e f alpha alpha alpha".repeat(i % 3 + 1),
+                _ => format!("x{i} y{} unique{i}", i % 11),
+            })
+            .map(|text| normalize_for_search(&text))
+            .collect();
+        let (first, second) = texts.split_at(200);
+        let built_first = build(first.len(), |doc| Cow::Borrowed(&first[doc as usize]));
+        let built_second = build(second.len(), |doc| Cow::Borrowed(&second[doc as usize]));
+        let dir = tempfile::tempdir().unwrap();
+        built_first.write(dir.path(), 0).unwrap();
+        built_second.write(dir.path(), 3).unwrap();
+        let a = LexIndex::open(dir.path(), 0, first.len() as u32).unwrap();
+        let b = LexIndex::open(dir.path(), 3, second.len() as u32).unwrap();
+
+        // Drop every third doc of the first source and interleave the rest
+        // in reverse order.
+        let mut new_order: Vec<&String> = Vec::new();
+        let mut remap_a = vec![DEAD; first.len()];
+        let mut remap_b = vec![DEAD; second.len()];
+        let mut next_b = (0..second.len()).rev();
+        for (doc, text) in first.iter().enumerate().rev() {
+            if doc % 3 != 0 {
+                remap_a[doc] = new_order.len() as u32;
+                new_order.push(text);
+            }
+            if doc % 2 == 0
+                && let Some(other) = next_b.next()
+            {
+                remap_b[other] = new_order.len() as u32;
+                new_order.push(&second[other]);
+            }
+        }
+        for other in next_b {
+            remap_b[other] = new_order.len() as u32;
+            new_order.push(&second[other]);
+        }
+
+        let merged = merge(&[(&a, &remap_a), (&b, &remap_b)], new_order.len());
+        merged.write(dir.path(), 7).unwrap();
+        let merged = LexIndex::open(dir.path(), 7, new_order.len() as u32).unwrap();
+        let rebuilt = build(new_order.len(), |doc| {
+            Cow::Borrowed(new_order[doc as usize])
+        });
+        rebuilt.write(dir.path(), 8).unwrap();
+        let rebuilt = LexIndex::open(dir.path(), 8, new_order.len() as u32).unwrap();
+
+        for word in words_of(&texts) {
+            assert_eq!(
+                merged.prefix_tf(&word),
+                rebuilt.prefix_tf(&word),
+                "{word:?}"
+            );
+            assert_eq!(merged.inner_tf(&word), rebuilt.inner_tf(&word), "{word:?}");
+            let mut acc = vec![0; new_order.len()];
+            a.prefix_tf_into(&word, &mut acc, Some(&remap_a));
+            b.prefix_tf_into(&word, &mut acc, Some(&remap_b));
+            assert_eq!(acc, rebuilt.prefix_tf(&word), "remapped {word:?}");
+        }
     }
 }

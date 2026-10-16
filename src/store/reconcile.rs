@@ -1,0 +1,836 @@
+//! Brings the store up to date with the native session files.
+//!
+//! One pass takes `LOCK` without waiting (a busy lock means another process
+//! is reconciling, and readers keep the current generation), lists every
+//! session file of every source with one `stat` each, and compares them with
+//! the fingerprints of `CURRENT`. Only new or changed files are parsed; a
+//! pass that finds nothing to do writes nothing. Changes are published as
+//! delta generations (see `generation::publish_update`), newest files first
+//! and in batches, so a cold build shows the newest conversations early.
+//! Segments are merged afterwards when `MergePolicy` asks for it.
+//!
+//! A source or directory that cannot be listed is degraded: its cards and
+//! ignored files are kept as they are rather than dropped.
+
+use super::card::Fingerprint;
+use super::generation::{
+    self, Doc, Generation, MergePolicy, Publish, PublishLock, Update, Written,
+};
+use crate::history::omp_loader::{self, OmpSessionRoot};
+use crate::history::parser::{process_conversation_file, process_omp_conversation_file};
+use crate::history::path::decode_project_dir_name_to_path;
+use crate::history::pi_loader::{self, PiSessionRoot};
+use crate::history::{Conversation, Source, format_short_name_from_path};
+use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
+
+/// Newest files parsed and published before any other.
+const FIRST_BATCH: usize = 200;
+/// Parsing time after which the conversations parsed so far are published.
+const BATCH_TIME: Duration = Duration::from_secs(2);
+
+/// Where each source keeps its session files.
+#[derive(Clone, Debug, Default)]
+pub struct Sources {
+    /// Claude's `projects` directory.
+    pub claude: Option<PathBuf>,
+    pub pi: Option<PiSessionRoot>,
+    pub omp: Option<OmpSessionRoot>,
+}
+
+impl Sources {
+    /// The session roots the environment selects.
+    pub fn from_env() -> Self {
+        Self {
+            claude: crate::history::get_claude_projects_root().ok(),
+            pi: pi_loader::session_root().ok(),
+            omp: omp_loader::session_root().ok(),
+        }
+    }
+}
+
+/// What one pass did.
+#[derive(Debug)]
+pub struct Outcome {
+    /// `Busy` when another process holds the lock, `Unchanged` when nothing
+    /// was written, else the last generation published.
+    pub publish: Publish,
+    /// Generations published, merges included.
+    pub published: usize,
+    pub written: Written,
+    /// Session files found.
+    pub scanned: usize,
+    /// Files parsed because they were new or changed.
+    pub parsed: usize,
+}
+
+/// Runs one pass over `sources` into the store at `root`.
+pub fn reconcile(root: &Path, sources: &Sources) -> io::Result<Outcome> {
+    reconcile_with(root, sources, MergePolicy::DEFAULT)
+}
+
+pub fn reconcile_with(root: &Path, sources: &Sources, policy: MergePolicy) -> io::Result<Outcome> {
+    let mut outcome = Outcome {
+        publish: Publish::Busy,
+        published: 0,
+        written: Written::default(),
+        scanned: 0,
+        parsed: 0,
+    };
+    let Some(lock) = PublishLock::try_acquire(root)? else {
+        return Ok(outcome);
+    };
+    outcome.publish = Publish::Unchanged;
+    let scan = scan(sources);
+    outcome.scanned = scan.files.len();
+    crate::bench::mark("reconcile_scanned");
+
+    let mut base = open_base(root);
+    let cold = base.is_none();
+    let plan = diff(base.as_ref(), &scan);
+    let mut keep = plan.keep;
+    let mut ignored = plan.ignored;
+    let mut pending = plan.parse;
+    // Newest first, so the first batches cover what the list shows first.
+    pending.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    let omp_owned = sources
+        .omp
+        .as_ref()
+        .is_some_and(|root| omp_owned(&root.path));
+
+    let mut first = true;
+    loop {
+        let batch = take_batch(&mut pending, first, omp_owned);
+        first = false;
+        outcome.parsed += batch.len();
+        let docs = apply_batch(base.as_ref(), &mut keep, &mut ignored, batch);
+        let (publish, written) = generation::publish_update(
+            &lock,
+            Update {
+                base: base.as_ref(),
+                docs,
+                ignored: ignored.clone(),
+            },
+        )?;
+        add_written(&mut outcome, publish, written);
+        if pending.is_empty() {
+            break;
+        }
+        // Later batches build on what was just published.
+        base = open_base(root);
+        let Some(current) = &base else {
+            return Err(io::Error::other("published generation does not open"));
+        };
+        keep = (0..current.rows().len() as u32)
+            .map(|row| (row, current.fingerprints()[row as usize]))
+            .collect();
+        ignored = current.ignored_entries();
+    }
+
+    if let Some(current) = open_base(root) {
+        let policy = if cold { MergePolicy::FULL } else { policy };
+        let (publish, written) = generation::compact(&lock, &current, policy)?;
+        add_written(&mut outcome, publish, written);
+    }
+    Ok(outcome)
+}
+
+fn add_written(outcome: &mut Outcome, publish: Publish, written: Written) {
+    if let Publish::Published(_) = &publish {
+        outcome.published += 1;
+        outcome.written.bytes += written.bytes;
+        outcome.written.docs += written.docs;
+        outcome.publish = publish;
+    }
+}
+
+/// `CURRENT` when it opens with its search files.
+fn open_base(root: &Path) -> Option<Generation> {
+    Generation::open(root).filter(|generation| generation.open_search_files().is_some())
+}
+
+/// A session file found by the scan.
+#[derive(Clone, Debug)]
+struct Found {
+    path: PathBuf,
+    source: Source,
+    size: u64,
+    modified: Option<SystemTime>,
+    fingerprint: Fingerprint,
+}
+
+#[derive(Default)]
+struct Scan {
+    files: Vec<Found>,
+    /// Sources whose root could not be listed.
+    degraded_sources: HashSet<Source>,
+    /// Directories that could not be listed.
+    degraded_dirs: HashSet<PathBuf>,
+}
+
+impl Scan {
+    /// Whether the scan may have missed `path` of `source`.
+    fn misses(&self, path: &Path, source: Source) -> bool {
+        self.degraded_sources.contains(&source)
+            || path
+                .parent()
+                .is_some_and(|dir| self.degraded_dirs.contains(dir))
+    }
+}
+
+/// Lists every session file with its metadata. A file reachable through
+/// more than one path is kept once, under the first path in source order
+/// (Claude, Pi, OMP).
+fn scan(sources: &Sources) -> Scan {
+    let started = SystemTime::now();
+    let mut scan = Scan::default();
+    let mut candidates: Vec<(PathBuf, Source)> = Vec::new();
+    if let Some(root) = &sources.claude {
+        scan_claude(root, &mut scan, &mut candidates);
+    }
+    if let Some(root) = &sources.pi {
+        match pi_loader::discover_files(root) {
+            Ok(files) => candidates.extend(files.into_iter().map(|path| (path, Source::Pi))),
+            Err(_) => {
+                scan.degraded_sources.insert(Source::Pi);
+            }
+        }
+    }
+    if let Some(root) = &sources.omp {
+        match omp_loader::discover_files(root) {
+            Ok(files) => candidates.extend(files.into_iter().map(|path| (path, Source::Omp))),
+            Err(_) => {
+                scan.degraded_sources.insert(Source::Omp);
+            }
+        }
+    }
+
+    let stats: Vec<Option<(Found, Option<FileId>)>> = candidates
+        .into_par_iter()
+        .map(|(path, source)| {
+            let metadata = fs::metadata(&path).ok()?;
+            let modified = metadata.modified().ok();
+            let size = metadata.len();
+            Some((
+                Found {
+                    fingerprint: generation::fingerprint_from(size, modified, started),
+                    path,
+                    source,
+                    size,
+                    modified,
+                },
+                file_id(&metadata),
+            ))
+        })
+        .collect();
+    let mut ids = HashSet::new();
+    let mut paths = HashSet::new();
+    for (found, id) in stats.into_iter().flatten() {
+        let unique = match id {
+            Some(id) => ids.insert(id),
+            None => paths.insert(found.path.clone()),
+        };
+        if unique {
+            scan.files.push(found);
+        }
+    }
+    scan
+}
+
+/// Claude sessions: `*.jsonl` directly inside each project directory,
+/// except subagent transcripts (`agent-*`).
+fn scan_claude(root: &Path, scan: &mut Scan, candidates: &mut Vec<(PathBuf, Source)>) {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+        Err(_) => {
+            scan.degraded_sources.insert(Source::Claude);
+            return;
+        }
+    };
+    let mut dirs = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => dirs.push(entry.path()),
+            Err(_) => {
+                scan.degraded_sources.insert(Source::Claude);
+            }
+        }
+    }
+    let listed: Vec<(PathBuf, io::Result<Vec<PathBuf>>)> = dirs
+        .into_par_iter()
+        .filter(|dir| dir.is_dir())
+        .map(|dir| {
+            let files = list_claude_dir(&dir);
+            (dir, files)
+        })
+        .collect();
+    for (dir, files) in listed {
+        match files {
+            Ok(files) => candidates.extend(files.into_iter().map(|path| (path, Source::Claude))),
+            Err(_) => {
+                scan.degraded_dirs.insert(dir);
+            }
+        }
+    }
+}
+
+fn list_claude_dir(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        let is_session = path
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+            && !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("agent-"));
+        if is_session {
+            files.push(path);
+        }
+    }
+    Ok(files)
+}
+
+/// Device and inode of a file.
+type FileId = (u64, u64);
+
+#[cfg(unix)]
+fn file_id(metadata: &fs::Metadata) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_id(_metadata: &fs::Metadata) -> Option<FileId> {
+    None
+}
+
+/// The scan compared with the base generation.
+struct Plan {
+    /// Base rows to carry over, with their fingerprints. Rows of files that
+    /// are about to be parsed stay until their batch replaces them.
+    keep: Vec<(u32, Fingerprint)>,
+    ignored: Vec<(String, Fingerprint)>,
+    /// New files, changed files and files whose fingerprint is unknown.
+    parse: Vec<Found>,
+}
+
+fn diff(base: Option<&Generation>, scan: &Scan) -> Plan {
+    let mut plan = Plan {
+        keep: Vec::new(),
+        ignored: Vec::new(),
+        parse: Vec::new(),
+    };
+    let Some(base) = base else {
+        plan.parse = scan.files.clone();
+        return plan;
+    };
+    let rows = base.rows();
+    let fingerprints = base.fingerprints();
+    let by_path: HashMap<&str, u32> = rows
+        .iter()
+        .enumerate()
+        .map(|(row, card)| (base.str(card.path), row as u32))
+        .collect();
+    let ignored: Vec<(String, Fingerprint)> = base.ignored_entries();
+    let ignored_by_path: HashMap<&str, Fingerprint> = ignored
+        .iter()
+        .map(|(path, fingerprint)| (path.as_str(), *fingerprint))
+        .collect();
+
+    let mut seen_rows = vec![false; rows.len()];
+    let mut seen_ignored: HashSet<&str> = HashSet::new();
+    for found in &scan.files {
+        let path = found.path.to_string_lossy();
+        let known = found.fingerprint.mtime_ns != 0;
+        let row = by_path.get(path.as_ref()).copied();
+        if let Some(row) = row {
+            seen_rows[row as usize] = true;
+            if known && fingerprints[row as usize] == found.fingerprint {
+                plan.keep.push((row, found.fingerprint));
+                continue;
+            }
+            // Shown as it was until the file is parsed again.
+            plan.keep.push((row, fingerprints[row as usize]));
+        }
+        if let Some((&key, &fingerprint)) = ignored_by_path.get_key_value(path.as_ref()) {
+            seen_ignored.insert(key);
+            if row.is_none() && known && fingerprint == found.fingerprint {
+                plan.ignored.push((key.to_owned(), fingerprint));
+                continue;
+            }
+        }
+        plan.parse.push(found.clone());
+    }
+    for (row, card) in rows.iter().enumerate() {
+        if !seen_rows[row]
+            && let Some(source) = crate::store::card::source_from_u8(card.source)
+            && scan.misses(Path::new(base.str(card.path)), source)
+        {
+            plan.keep.push((row as u32, fingerprints[row]));
+        }
+    }
+    for (path, fingerprint) in &ignored {
+        if !seen_ignored.contains(path.as_str())
+            && [Source::Claude, Source::Pi, Source::Omp]
+                .into_iter()
+                .any(|source| scan.misses(Path::new(path), source))
+        {
+            plan.ignored.push((path.clone(), *fingerprint));
+        }
+    }
+    plan
+}
+
+/// What parsing one file gave.
+enum Parsed {
+    Conversation(Box<Conversation>),
+    /// Holds no conversation of its source.
+    Ignored,
+    /// Removed since the scan.
+    Gone,
+    /// Could not be read; tried again next pass.
+    Failed,
+}
+
+/// Removes and parses the next batch from `pending`: the first
+/// `FIRST_BATCH` files on the first call, then as many as parse within
+/// `BATCH_TIME`.
+fn take_batch(pending: &mut Vec<Found>, first: bool, omp_owned: bool) -> Vec<(Found, Parsed)> {
+    if first {
+        let files: Vec<Found> = pending.drain(..pending.len().min(FIRST_BATCH)).collect();
+        return parse_all(files, omp_owned);
+    }
+    let started = Instant::now();
+    let chunk = rayon::current_num_threads().max(1) * 8;
+    let mut batch = Vec::new();
+    while !pending.is_empty() && started.elapsed() < BATCH_TIME {
+        let files: Vec<Found> = pending.drain(..pending.len().min(chunk)).collect();
+        batch.extend(parse_all(files, omp_owned));
+    }
+    batch
+}
+
+fn parse_all(files: Vec<Found>, omp_owned: bool) -> Vec<(Found, Parsed)> {
+    files
+        .into_par_iter()
+        .map(|found| {
+            let parsed = parse(&found, omp_owned);
+            (found, parsed)
+        })
+        .collect()
+}
+
+/// Parses `found` the way the history loader does for its source.
+fn parse(found: &Found, omp_owned: bool) -> Parsed {
+    let path = found.path.clone();
+    let result = match found.source {
+        Source::Omp if omp_owned => process_omp_conversation_file(path, found.modified, None),
+        _ => process_conversation_file(path, found.modified, None),
+    };
+    let mut conversation = match result {
+        Ok(Some(conversation)) => conversation,
+        Ok(None) => return Parsed::Ignored,
+        Err(crate::error::AppError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Parsed::Gone;
+        }
+        Err(_) => return Parsed::Failed,
+    };
+    let project_path = match found.source {
+        Source::Claude => conversation.cwd.clone().unwrap_or_else(|| {
+            found
+                .path
+                .parent()
+                .and_then(Path::file_name)
+                .map(|dir| decode_project_dir_name_to_path(&dir.to_string_lossy()))
+                .unwrap_or_default()
+        }),
+        source => {
+            if conversation.source != source {
+                return Parsed::Ignored;
+            }
+            conversation
+                .cwd
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("unknown"))
+        }
+    };
+    conversation.project_name = Some(format_short_name_from_path(&project_path));
+    conversation.project_path = Some(project_path);
+    Parsed::Conversation(Box::new(conversation))
+}
+
+/// Whether OMP sessions under `root` are OMP's own format rather than Pi's.
+fn omp_owned(root: &Path) -> bool {
+    root.components()
+        .any(|component| matches!(component.as_os_str().to_str(), Some(".omp" | "omp")))
+}
+
+/// The docs of the next generation: `keep` without the rows `batch`
+/// replaces, plus the batch's conversations. Updates `ignored` with the
+/// batch's outcome.
+fn apply_batch(
+    base: Option<&Generation>,
+    keep: &mut Vec<(u32, Fingerprint)>,
+    ignored: &mut Vec<(String, Fingerprint)>,
+    batch: Vec<(Found, Parsed)>,
+) -> Vec<Doc> {
+    let parsed_paths: HashSet<String> = batch
+        .iter()
+        .map(|(found, _)| found.path.to_string_lossy().into_owned())
+        .collect();
+    ignored.retain(|(path, _)| !parsed_paths.contains(path));
+    let row_of: HashMap<&str, u32> = base
+        .map(|base| {
+            keep.iter()
+                .map(|&(row, _)| (base.str(base.rows()[row as usize].path), row))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut replaced: HashSet<u32> = HashSet::new();
+    let mut failed: Vec<(u32, Fingerprint)> = Vec::new();
+    let mut new = Vec::new();
+    for (found, parsed) in batch {
+        let path = found.path.to_string_lossy().into_owned();
+        let row = row_of.get(path.as_str()).copied();
+        if let Some(row) = row {
+            replaced.insert(row);
+        }
+        let unknown = Fingerprint {
+            size: found.size,
+            mtime_ns: 0,
+        };
+        match parsed {
+            Parsed::Conversation(conversation) => new.push(Doc::New {
+                conversation,
+                fingerprint: found.fingerprint,
+            }),
+            Parsed::Ignored => ignored.push((path, found.fingerprint)),
+            Parsed::Gone => {}
+            Parsed::Failed => match row {
+                Some(row) => failed.push((row, unknown)),
+                None => ignored.push((path, unknown)),
+            },
+        }
+    }
+    keep.retain(|(row, _)| !replaced.contains(row));
+    keep.extend(failed);
+    let mut docs: Vec<Doc> = keep
+        .iter()
+        .map(|&(row, fingerprint)| Doc::Keep { row, fingerprint })
+        .collect();
+    docs.extend(new);
+    docs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        projects: PathBuf,
+        sources: Sources,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let projects = dir.path().join("claude").join("projects");
+            let pi = dir.path().join("pi").join("sessions");
+            let omp = dir.path().join(".omp").join("agent").join("sessions");
+            for path in [&projects, &pi.join("--tmp-pi--"), &omp.join("--tmp-omp--")] {
+                fs::create_dir_all(path).unwrap();
+            }
+            let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+            fs::copy(
+                fixtures.join("pi/v1.jsonl"),
+                pi.join("--tmp-pi--").join("one.jsonl"),
+            )
+            .unwrap();
+            fs::copy(
+                fixtures.join("omp/v3.jsonl"),
+                omp.join("--tmp-omp--").join("two.jsonl"),
+            )
+            .unwrap();
+            Self {
+                root: dir.path().join("store"),
+                sources: Sources {
+                    claude: Some(projects.clone()),
+                    pi: Some(PiSessionRoot {
+                        path: pi,
+                        flat: false,
+                    }),
+                    omp: Some(OmpSessionRoot {
+                        path: omp,
+                        flat: false,
+                    }),
+                },
+                projects,
+                _dir: dir,
+            }
+        }
+
+        /// Writes a Claude session in project `project` with `text` as its
+        /// only prompt, dated an hour ago so its fingerprint is known.
+        fn claude(&self, project: &str, name: &str, text: &str) -> PathBuf {
+            let dir = self.projects.join(project);
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(name);
+            let line = serde_json::json!({
+                "type": "user",
+                "timestamp": "2024-01-01T00:00:00Z",
+                "cwd": "/tmp/work",
+                "message": {"role": "user", "content": text}
+            });
+            fs::write(&path, format!("{line}\n")).unwrap();
+            settle(&path);
+            path
+        }
+
+        fn run(&self) -> Outcome {
+            reconcile(&self.root, &self.sources).unwrap()
+        }
+
+        fn current(&self) -> Generation {
+            Generation::open(&self.root).unwrap()
+        }
+
+        fn paths(&self) -> Vec<String> {
+            let generation = self.current();
+            let mut paths: Vec<String> = generation
+                .rows()
+                .iter()
+                .map(|row| generation.str(row.path).to_owned())
+                .collect();
+            paths.sort();
+            paths
+        }
+
+        fn text_of(&self, path: &Path) -> String {
+            let generation = self.current();
+            let (_, text) = generation.open_search_files().unwrap();
+            let row = generation
+                .rows()
+                .iter()
+                .find(|row| generation.str(row.path) == path.to_string_lossy())
+                .unwrap();
+            text.read(row.text).unwrap()
+        }
+    }
+
+    /// Dates `path` an hour back, past the window in which fingerprints are
+    /// unknown.
+    fn settle(path: &Path) {
+        let file = fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
+    }
+
+    fn settle_all(dir: &Path) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                settle_all(&path);
+            } else {
+                settle(&path);
+            }
+        }
+    }
+
+    #[test]
+    fn cold_build_reads_every_source_like_the_loader() {
+        let fixture = Fixture::new();
+        let a = fixture.claude("-tmp-work", "a.jsonl", "hello alpha");
+        fixture.claude("-tmp-work", "agent-1.jsonl", "subagent");
+        let empty = fixture.projects.join("-tmp-work").join("empty.jsonl");
+        fs::write(&empty, "").unwrap();
+        let outcome = fixture.run();
+        assert!(matches!(outcome.publish, Publish::Published(_)));
+
+        let generation = fixture.current();
+        let sources: Vec<_> = generation.rows().iter().map(|row| row.source).collect();
+        assert_eq!(generation.rows().len(), 3, "{:?}", fixture.paths());
+        for source in [Source::Claude, Source::Pi, Source::Omp] {
+            assert!(sources.contains(&crate::store::card::source_to_u8(source)));
+        }
+        assert!(!fixture.paths().iter().any(|path| path.contains("agent-1")));
+        assert_eq!(
+            generation.ignored_entries()[0].0,
+            empty.to_string_lossy().as_ref()
+        );
+        let row = generation
+            .rows()
+            .iter()
+            .position(|row| generation.str(row.path) == a.to_string_lossy())
+            .unwrap();
+        let card = generation.conversation(row as u32, false);
+        assert_eq!(card.project_path, Some(PathBuf::from("/tmp/work")));
+        assert_eq!(card.project_name.as_deref(), Some("work"));
+        assert!(fixture.text_of(&a).contains("hello alpha"));
+    }
+
+    #[test]
+    fn unchanged_files_write_nothing_and_parse_nothing() {
+        let fixture = Fixture::new();
+        fixture.claude("-tmp-work", "a.jsonl", "hello alpha");
+        fs::write(fixture.projects.join("-tmp-work").join("empty.jsonl"), "").unwrap();
+        settle_all(fixture._dir.path());
+        fixture.run();
+        let current = fs::read_to_string(fixture.root.join("CURRENT")).unwrap();
+
+        let outcome = fixture.run();
+        assert_eq!(outcome.publish, Publish::Unchanged);
+        assert_eq!(outcome.parsed, 0);
+        assert_eq!(outcome.written.bytes, 0);
+        assert_eq!(
+            fs::read_to_string(fixture.root.join("CURRENT")).unwrap(),
+            current
+        );
+    }
+
+    #[test]
+    fn an_appended_session_publishes_one_delta_doc() {
+        let fixture = Fixture::new();
+        let a = fixture.claude("-tmp-work", "a.jsonl", "hello alpha");
+        for i in 0..20 {
+            fixture.claude("-tmp-other", &format!("{i}.jsonl"), "filler words");
+        }
+        settle_all(fixture._dir.path());
+        fixture.run();
+
+        let line = serde_json::json!({
+            "type": "user",
+            "timestamp": "2024-01-02T00:00:00Z",
+            "message": {"role": "user", "content": "appended zebra"}
+        });
+        let mut file = fs::File::options().append(true).open(&a).unwrap();
+        std::io::Write::write_all(&mut file, format!("{line}\n").as_bytes()).unwrap();
+        drop(file);
+        settle(&a);
+
+        let outcome = fixture.run();
+        assert!(matches!(outcome.publish, Publish::Published(_)));
+        assert_eq!(outcome.parsed, 1);
+        assert_eq!(outcome.written.docs, 1);
+        assert!(fixture.text_of(&a).contains("appended zebra"));
+        let generation = fixture.current();
+        assert_eq!(generation.segs().len(), 2);
+        let (index, _) = generation.open_search_files().unwrap();
+        assert_eq!(
+            index
+                .prefix_tf("zebra")
+                .iter()
+                .filter(|&&tf| tf > 0)
+                .count(),
+            1
+        );
+        assert_eq!(
+            index
+                .prefix_tf("alpha")
+                .iter()
+                .filter(|&&tf| tf > 0)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn recently_modified_files_are_parsed_again() {
+        let fixture = Fixture::new();
+        let a = fixture.claude("-tmp-work", "a.jsonl", "hello alpha");
+        settle_all(fixture._dir.path());
+        fs::File::options()
+            .write(true)
+            .open(&a)
+            .unwrap()
+            .set_modified(SystemTime::now())
+            .unwrap();
+        fixture.run();
+        let outcome = fixture.run();
+        assert_eq!(outcome.parsed, 1);
+        assert_eq!(outcome.publish, Publish::Unchanged);
+    }
+
+    #[test]
+    fn removed_files_are_dropped_unless_their_directory_is_unreadable() {
+        let fixture = Fixture::new();
+        let a = fixture.claude("-tmp-work", "a.jsonl", "hello alpha");
+        let b = fixture.claude("-tmp-gone", "b.jsonl", "hello beta");
+        let c = fixture.claude("-tmp-locked", "c.jsonl", "hello gamma");
+        settle_all(fixture._dir.path());
+        fixture.run();
+        assert_eq!(fixture.paths().len(), 5);
+
+        fs::remove_file(&b).unwrap();
+        #[cfg(unix)]
+        let locked = {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = c.parent().unwrap().to_path_buf();
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+            fs::read_dir(&dir).is_err().then_some(dir)
+        };
+        fixture.run();
+        let paths = fixture.paths();
+        #[cfg(unix)]
+        if let Some(dir) = locked {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(paths.contains(&c.to_string_lossy().into_owned()));
+        }
+        assert!(paths.contains(&a.to_string_lossy().into_owned()));
+        assert!(!paths.contains(&b.to_string_lossy().into_owned()));
+    }
+
+    #[test]
+    fn a_held_lock_skips_the_pass() {
+        let fixture = Fixture::new();
+        fixture.claude("-tmp-work", "a.jsonl", "hello alpha");
+        let held = PublishLock::try_acquire(&fixture.root).unwrap().unwrap();
+        assert_eq!(fixture.run().publish, Publish::Busy);
+        assert!(Generation::open(&fixture.root).is_none());
+        drop(held);
+        assert!(matches!(fixture.run().publish, Publish::Published(_)));
+    }
+
+    #[test]
+    fn a_large_cold_build_publishes_the_newest_first_then_one_base() {
+        let fixture = Fixture::new();
+        let count = FIRST_BATCH + 50;
+        for i in 0..count {
+            let path = fixture.claude("-tmp-many", &format!("{i:04}.jsonl"), &format!("doc{i}"));
+            let file = fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(SystemTime::now() - Duration::from_secs(3600 + i as u64))
+                .unwrap();
+        }
+        let outcome = fixture.run();
+        assert!(outcome.published >= 3, "{outcome:?}");
+        let generation = fixture.current();
+        assert_eq!(generation.rows().len(), count + 2);
+        assert_eq!(generation.segs().len(), 1);
+        let files = fs::read_dir(fixture.root.join(generation.name()))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with("delta-"))
+            .count();
+        assert_eq!(files, 0);
+        let (index, _) = generation.open_search_files().unwrap();
+        assert_eq!(
+            index.prefix_tf("doc1").iter().filter(|&&tf| tf > 0).count(),
+            111
+        );
+    }
+}

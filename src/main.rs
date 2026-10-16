@@ -142,8 +142,8 @@ fn truncate_delete_empty_preview(preview: &str) -> String {
 fn run() -> Result<()> {
     let args = Args::parse();
     bench::start(args.bench_startup.is_some());
-    if args.publish_snapshot {
-        return tui::publish_snapshot();
+    if args.reconcile {
+        return tui::reconcile();
     }
 
     // Handle subcommands

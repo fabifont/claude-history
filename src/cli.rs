@@ -447,10 +447,10 @@ pub struct Args {
     )]
     pub bench_startup: Option<String>,
 
-    /// Load the whole history and publish it as the list snapshot with its
-    /// search index; run in the background by the TUI
-    #[arg(long = "publish-snapshot", hide = true)]
-    pub publish_snapshot: bool,
+    /// Bring the list snapshot and its search index up to date with the
+    /// session files; run in the background by the TUI
+    #[arg(long = "reconcile", hide = true)]
+    pub reconcile: bool,
 
     /// Debug semantic search matching for a query
     #[arg(

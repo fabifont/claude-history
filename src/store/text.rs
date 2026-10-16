@@ -21,8 +21,12 @@ const BATCH: usize = 256;
 /// trigger a huge allocation.
 const MAX_TEXT: u64 = 1 << 32;
 
+pub fn segment_file(seg: u32) -> String {
+    format!("text-{seg:04}.zst")
+}
+
 pub fn segment_path(dir: &Path, seg: u32) -> PathBuf {
-    dir.join(format!("text-{seg:04}.zst"))
+    dir.join(segment_file(seg))
 }
 
 /// Writes segment `seg` to `path` with one frame per entry of `texts`, in
@@ -32,31 +36,72 @@ pub fn write_segment<S: AsRef<str> + Sync>(
     seg: u32,
     texts: &[S],
 ) -> io::Result<Vec<BlobRef>> {
-    let file = File::create(path)?;
-    let mut out = BufWriter::with_capacity(1 << 20, &file);
+    let mut out = SegmentWriter::create(path, seg)?;
     let mut refs = Vec::with_capacity(texts.len());
-    let mut off = 0u64;
     for batch in texts.chunks(BATCH) {
         let frames: Vec<Vec<u8>> = batch
             .par_iter()
             .map(|text| compress(text.as_ref().as_bytes()))
             .collect::<io::Result<_>>()?;
         for frame in frames {
-            let len = u32::try_from(frame.len())
-                .map_err(|_| io::Error::other("text frame exceeds 4 GiB"))?;
-            refs.push(if len == 0 {
-                BlobRef::default()
-            } else {
-                BlobRef { seg, len, off }
-            });
-            out.write_all(&frame)?;
-            off += u64::from(len);
+            refs.push(out.push(&frame)?);
         }
     }
-    out.flush()?;
-    drop(out);
-    file.sync_all()?;
+    out.finish()?;
     Ok(refs)
+}
+
+/// Writes segment `seg` to `path` from already compressed `frames`, in
+/// order, and returns their refs. Empty frames get an empty ref.
+pub fn write_frames(path: &Path, seg: u32, frames: &[&[u8]]) -> io::Result<Vec<BlobRef>> {
+    let mut out = SegmentWriter::create(path, seg)?;
+    let refs = frames
+        .iter()
+        .map(|frame| out.push(frame))
+        .collect::<io::Result<_>>()?;
+    out.finish()?;
+    Ok(refs)
+}
+
+struct SegmentWriter {
+    file: File,
+    out: BufWriter<File>,
+    seg: u32,
+    off: u64,
+}
+
+impl SegmentWriter {
+    fn create(path: &Path, seg: u32) -> io::Result<Self> {
+        let file = File::create(path)?;
+        Ok(Self {
+            out: BufWriter::with_capacity(1 << 20, file.try_clone()?),
+            file,
+            seg,
+            off: 0,
+        })
+    }
+
+    fn push(&mut self, frame: &[u8]) -> io::Result<BlobRef> {
+        let len =
+            u32::try_from(frame.len()).map_err(|_| io::Error::other("text frame exceeds 4 GiB"))?;
+        if len == 0 {
+            return Ok(BlobRef::default());
+        }
+        self.out.write_all(frame)?;
+        let r = BlobRef {
+            seg: self.seg,
+            len,
+            off: self.off,
+        };
+        self.off += u64::from(len);
+        Ok(r)
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        self.out.flush()?;
+        drop(self.out);
+        self.file.sync_all()
+    }
 }
 
 fn compress(text: &[u8]) -> io::Result<Vec<u8>> {
@@ -83,37 +128,39 @@ fn compress(text: &[u8]) -> io::Result<Vec<u8>> {
 
 /// The memory-mapped text segments of one generation.
 pub struct TextSegments {
-    segments: Vec<memmap2::Mmap>,
+    /// Indexed by segment number; `None` for segments no card refers to.
+    segments: Vec<Option<memmap2::Mmap>>,
 }
 
 impl TextSegments {
     /// Maps the segments in `dir` that `rows` refer to. Returns `None` when
     /// one is missing or a ref points outside its segment.
     pub fn open(dir: &Path, rows: &[CardRow]) -> Option<Self> {
-        let count = rows
-            .iter()
-            .filter(|row| row.text.len > 0)
-            .map(|row| row.text.seg + 1)
-            .max()
-            .unwrap_or(0);
-        let mut segments = Vec::with_capacity(count as usize);
-        for seg in 0..count {
-            let file = File::open(segment_path(dir, seg)).ok()?;
-            // SAFETY: published segments are never written again and are only
-            // removed by unlinking, so the mapped bytes cannot change underneath.
-            segments.push(unsafe { memmap2::Mmap::map(&file) }.ok()?);
+        let mut segments: Vec<Option<memmap2::Mmap>> = Vec::new();
+        for row in rows.iter().filter(|row| row.text.len > 0) {
+            let seg = row.text.seg as usize;
+            if segments.len() <= seg {
+                segments.resize_with(seg + 1, || None);
+            }
+            if segments[seg].is_none() {
+                let file = File::open(segment_path(dir, row.text.seg)).ok()?;
+                // SAFETY: published segments are never written again and are
+                // only removed by unlinking, so the mapped bytes cannot change
+                // underneath.
+                segments[seg] = Some(unsafe { memmap2::Mmap::map(&file) }.ok()?);
+            }
         }
-        let in_bounds = |r: BlobRef| {
-            r.len == 0
-                || segments.get(r.seg as usize).is_some_and(|segment| {
-                    r.off
-                        .checked_add(u64::from(r.len))
-                        .is_some_and(|end| end <= segment.len() as u64)
-                })
-        };
+        let text = Self { segments };
         rows.iter()
-            .all(|row| in_bounds(row.text))
-            .then_some(Self { segments })
+            .all(|row| row.text.len == 0 || text.frame(row.text).is_some())
+            .then_some(text)
+    }
+
+    /// The compressed frame behind `r`; `None` when out of bounds.
+    pub fn frame(&self, r: BlobRef) -> Option<&[u8]> {
+        let segment = self.segments.get(r.seg as usize)?.as_ref()?;
+        let start = usize::try_from(r.off).ok()?;
+        segment.get(start..start.checked_add(r.len as usize)?)
     }
 
     /// Decompresses the text behind `r`. A frame that fails to decode or
@@ -122,17 +169,15 @@ impl TextSegments {
         if r.len == 0 {
             return Some(String::new());
         }
-        let segment = self.segments.get(r.seg as usize)?;
-        let start = usize::try_from(r.off).ok()?;
-        let frame = segment.get(start..start.checked_add(r.len as usize)?)?;
-        decompress(frame)
+        decompress(self.frame(r)?)
     }
 
-    /// Total bytes of all segments.
+    /// Total bytes of all mapped segments.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn disk_bytes(&self) -> u64 {
         self.segments
             .iter()
+            .flatten()
             .map(|segment| segment.len() as u64)
             .sum()
     }

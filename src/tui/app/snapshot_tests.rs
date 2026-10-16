@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::test_support::{conversation, unknown_fingerprints};
+use crate::store::test_support::conversation;
 use crate::time_filter::TimeFilter;
 use chrono::TimeZone;
 
@@ -7,11 +7,7 @@ const HOUR_MS: i64 = 3_600_000;
 
 fn publish(conversations: &[Conversation]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    let corpus = crate::store::generation::Corpus::new(
-        conversations,
-        unknown_fingerprints(conversations.len()),
-    );
-    crate::store::generation::publish(dir.path(), &corpus).unwrap();
+    crate::store::generation::publish(dir.path(), conversations).unwrap();
     dir
 }
 
@@ -314,8 +310,7 @@ fn newer_generation_swaps_in_and_reruns_the_query_keeping_selection() {
     let same = crate::store::Snapshot::open(root.path(), true, TimeFilter::default()).unwrap();
     assert!(!app.swap_search_index(same), "same generation");
 
-    let corpus = crate::store::generation::Corpus::new(&loaded, unknown_fingerprints(loaded.len()));
-    crate::store::generation::publish(root.path(), &corpus).unwrap();
+    crate::store::generation::publish(root.path(), &loaded).unwrap();
     let newer = crate::store::Snapshot::open(root.path(), true, TimeFilter::default()).unwrap();
     assert!(app.swap_search_index(newer));
     wait_for_search(&mut app);

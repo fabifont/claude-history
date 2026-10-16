@@ -606,10 +606,6 @@ impl App {
         self.readiness.reconcile != ReconcileState::Done
     }
 
-    pub(crate) fn shared_conversations(&self) -> Arc<Vec<Conversation>> {
-        self.conversations.clone()
-    }
-
     // Getters for UI access
     pub fn filtered(&self) -> &[usize] {
         &self.filtered
