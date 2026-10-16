@@ -1514,6 +1514,177 @@ mod tests {
         }
     }
 
+    /// Words that stress normalization and term boundaries: chars whose
+    /// lowercase changes length or adds word starts, self-overlapping
+    /// versions, words around `TERM_CAP` with multibyte chars at the cut,
+    /// pair prefixes that split a multibyte char, and long ideograph runs.
+    const ADVERSARIAL_VOCAB: &[&str] = &[
+        "İstanbul",
+        "DİYARBAKIR",
+        "istanbul",
+        "stanbul",
+        "cafe\u{301}",
+        "café",
+        "\u{212A}elvin",
+        "kelvin",
+        "ΛΟΓΟΣ",
+        "λογος",
+        "straße",
+        "STRASSE",
+        "ǅemal",
+        "v1.1.1",
+        "1.1",
+        "1.1.1",
+        "aaa.aaa.aaa",
+        "a.a",
+        "x::y::z",
+        "::new",
+        "#intro",
+        "C++",
+        ".NET",
+        "abcdefghijklmnopqrstuvwé",
+        "abcdefghijklmnopqrstuvwx",
+        "abcdefghijklmnopqrstuvwxyz",
+        "abcdefghijklmnopqrstuvw测",
+        "abé",
+        "ab",
+        "测试",
+        "这是测试会话的内容",
+        "一二三四五六七八九十百千",
+        "x一二三四五六七八九十百千",
+        "调用API接口和JSON数据",
+        "ひらがなとカタカナ",
+        "これは",
+        "한국어",
+        "emoji🚀rocket",
+        "🎉",
+        "naïve—dash",
+        "“quotes”",
+        "foo(bar,",
+        "error",
+        "handling",
+        "e",
+    ];
+    const ADVERSARIAL_SEPARATORS: &[&str] = &[
+        " ", " ", "  ", "_", "-", "/", ".", "\n", ", ", "\u{3001}", "\u{3000}", "\u{2014}", "\t",
+        "",
+    ];
+
+    fn adversarial_corpus(seed: u64, docs: usize) -> (Vec<Conversation>, DateTime<Local>) {
+        let mut rng = Rng(seed);
+        let now = Local.timestamp_opt(1_760_000_000, 0).unwrap();
+        let conversations = (0..docs)
+            .map(|i| {
+                let mut text = String::new();
+                let mut own = String::new();
+                for _ in 0..rng.below(60) {
+                    let word = rng.pick(ADVERSARIAL_VOCAB);
+                    let separator = rng.pick(ADVERSARIAL_SEPARATORS);
+                    text.push_str(word);
+                    text.push_str(separator);
+                    if rng.below(3) == 0 {
+                        own.push_str(word);
+                        own.push_str(separator);
+                    }
+                }
+                let project = (rng.below(4) > 0).then(|| rng.pick(ADVERSARIAL_VOCAB));
+                let title = (rng.below(5) == 0).then(|| {
+                    format!(
+                        "{} {}",
+                        rng.pick(ADVERSARIAL_VOCAB),
+                        rng.pick(ADVERSARIAL_VOCAB)
+                    )
+                });
+                let age = Duration::hours(rng.below(24 * 30) as i64 / 6 * 6);
+                let mut conversation = conv(
+                    &text,
+                    project,
+                    title.as_deref(),
+                    None,
+                    now - age,
+                    &format!("/{i:04}"),
+                );
+                conversation.own_text = own.into();
+                conversation
+            })
+            .collect();
+        (conversations, now)
+    }
+
+    fn adversarial_queries(seed: u64) -> Vec<String> {
+        let mut rng = Rng(seed);
+        let mut queries: Vec<String> = ADVERSARIAL_VOCAB.iter().map(|w| w.to_string()).collect();
+        for _ in 0..200 {
+            let words = 1 + rng.below(3);
+            let mut query = (0..words)
+                .map(|_| {
+                    let word = rng.pick(ADVERSARIAL_VOCAB);
+                    let cuts: Vec<usize> = word
+                        .char_indices()
+                        .map(|(i, _)| i)
+                        .chain([word.len()])
+                        .filter(|&i| i > 0)
+                        .collect();
+                    let end = cuts[rng.below(cuts.len())];
+                    // Sometimes a suffix too, to probe inner and mid-word matches.
+                    let start = if rng.below(4) == 0 {
+                        word.char_indices()
+                            .map(|(i, _)| i)
+                            .nth(1)
+                            .unwrap_or(0)
+                            .min(end)
+                    } else {
+                        0
+                    };
+                    word[start..end].to_owned()
+                })
+                .filter(|w| !w.is_empty())
+                .collect::<Vec<_>>()
+                .join(rng.pick(&[" ", " ", "-", "_", "  "]));
+            match rng.below(6) {
+                0 => query = format!("\"{query}\""),
+                1 => query = format!("{query} \"{}\"", rng.pick(ADVERSARIAL_VOCAB)),
+                2 => query = format!("\"{query}"),
+                _ => {}
+            }
+            queries.push(query);
+        }
+        queries
+    }
+
+    /// Generated corpora built from `ADVERSARIAL_VOCAB`, searched through the
+    /// index and in memory, in both modes. Reports every query that differs.
+    /// Run with
+    /// `cargo test --bin claude-history search_qa_adversarial -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "slow; run with --ignored"]
+    fn search_qa_adversarial_corpora_match_in_memory_search() {
+        let mut failures = Vec::new();
+        for seed in [11, 12, 13, 14, 0x51ed_270b_2717_4c2f] {
+            let (conversations, now) = adversarial_corpus(seed, 400);
+            let own = Corpus::user_only(conversations.clone());
+            let corpus = Corpus::new(conversations);
+            for query in adversarial_queries(seed) {
+                for (mode, corpus) in [("all", &corpus), ("own", &own)] {
+                    for page in [1, 20] {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            corpus.check(&query, now, page);
+                        }));
+                        if result.is_err() {
+                            failures.push(format!("seed {seed} {mode} page {page}: {query:?}"));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} mismatches:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
     /// Asserts that searching the generation `CURRENT` names under `root`
     /// returns the in-memory results over `conversations`, in both modes.
     fn check_generation(

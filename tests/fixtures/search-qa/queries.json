@@ -1,0 +1,1543 @@
+[
+{
+"id": 1,
+"group": "words",
+"q": "authentication",
+"expect": [
+"A1"
+]
+},
+{
+"id": 2,
+"group": "words",
+"q": "auth",
+"expect": [
+"A1",
+"A2"
+]
+},
+{
+"id": 3,
+"group": "words",
+"q": "AUTH",
+"expect": [
+"A1",
+"A2"
+]
+},
+{
+"id": 4,
+"group": "words",
+"q": "red",
+"expect": [
+"A5"
+],
+"note": "not inside fired (A3)"
+},
+{
+"id": 5,
+"group": "words",
+"q": "ired",
+"expect": []
+},
+{
+"id": 6,
+"group": "words",
+"q": "config",
+"expect": [
+"A4",
+"H3",
+"Y1"
+],
+"note": "Y1 says configure"
+},
+{
+"id": 7,
+"group": "words",
+"q": "Config",
+"expect": [
+"A4",
+"H3",
+"Y1"
+],
+"note": "Y1 says configure"
+},
+{
+"id": 8,
+"group": "words",
+"q": "systemctl",
+"expect": [
+"A6"
+]
+},
+{
+"id": 9,
+"group": "words",
+"q": "zzqqxx",
+"expect": []
+},
+{
+"id": 10,
+"group": "multi",
+"q": "error handling",
+"expect": [
+"B1",
+"B2",
+"B4"
+],
+"order": true,
+"note": "B1 adjacent first, B3 lacks handling"
+},
+{
+"id": 11,
+"group": "multi",
+"q": "handling error",
+"expect": [
+"B4",
+"B1",
+"B2"
+],
+"order": true
+},
+{
+"id": 12,
+"group": "multi",
+"q": "cache",
+"expect": [
+"B5",
+"B6"
+],
+"order": true
+},
+{
+"id": 13,
+"group": "multi",
+"q": "cache cache",
+"expect": [
+"B5",
+"B6"
+],
+"order": true
+},
+{
+"id": 14,
+"group": "multi",
+"q": "error handling zzqqxx",
+"expect": []
+},
+{
+"id": 15,
+"group": "multi",
+"q": "parser fragile error",
+"expect": [
+"B1"
+]
+},
+{
+"id": 20,
+"group": "separators",
+"q": "api key",
+"expect": [
+"S1",
+"S2",
+"S3"
+],
+"order": true
+},
+{
+"id": 21,
+"group": "separators",
+"q": "api_key",
+"expect": [
+"S1"
+]
+},
+{
+"id": 22,
+"group": "separators",
+"q": "API_KEY",
+"expect": [
+"S1"
+]
+},
+{
+"id": 23,
+"group": "separators",
+"q": "api-key",
+"expect": [
+"S1",
+"S2",
+"S3"
+],
+"order": true
+},
+{
+"id": 24,
+"group": "separators",
+"q": "lexindex",
+"expect": [
+"S4"
+]
+},
+{
+"id": 25,
+"group": "separators",
+"q": "lexindex.rs",
+"expect": [
+"S4"
+]
+},
+{
+"id": 26,
+"group": "separators",
+"q": "src/search/query.rs",
+"expect": [
+"S4"
+]
+},
+{
+"id": 27,
+"group": "separators",
+"q": "rs",
+"expect": [
+"S4",
+"S10"
+],
+"order": true
+},
+{
+"id": 28,
+"group": "separators",
+"q": "HashMap",
+"expect": [
+"S5"
+]
+},
+{
+"id": 29,
+"group": "separators",
+"q": "collections::HashMap",
+"expect": [
+"S5"
+]
+},
+{
+"id": 30,
+"group": "separators",
+"q": "::new",
+"expect": [],
+"user": [
+"S5"
+],
+"note": "query starting with punctuation needs a non-alphanumeric char before it"
+},
+{
+"id": 31,
+"group": "separators",
+"q": "camelCase",
+"expect": [
+"S6"
+]
+},
+{
+"id": 32,
+"group": "separators",
+"q": "UserName",
+"expect": [],
+"user": [
+"S6"
+],
+"note": "camelCase is not split"
+},
+{
+"id": 33,
+"group": "separators",
+"q": "parseHTTP",
+"expect": [
+"S6"
+]
+},
+{
+"id": 34,
+"group": "separators",
+"q": "v1.2",
+"expect": [
+"S7"
+]
+},
+{
+"id": 35,
+"group": "separators",
+"q": "1.2.3",
+"expect": [],
+"user": [
+"S7"
+],
+"note": "digits after a letter are mid-word"
+},
+{
+"id": 36,
+"group": "separators",
+"q": "2.0",
+"expect": [
+"S7"
+]
+},
+{
+"id": 37,
+"group": "separators",
+"q": "1.1",
+"expect": [
+"S14",
+"H3"
+],
+"user": [
+"S14",
+"H3"
+],
+"note": "v1.1.1 holds 1.1 at a word start (after the first dot)"
+},
+{
+"id": 38,
+"group": "separators",
+"q": "\"1.1\"",
+"expect": [
+"S14",
+"H3"
+]
+},
+{
+"id": 39,
+"group": "separators",
+"q": "example.com",
+"expect": [
+"S8"
+]
+},
+{
+"id": 40,
+"group": "separators",
+"q": "example",
+"expect": [
+"S8",
+"S9"
+],
+"order": true
+},
+{
+"id": 41,
+"group": "separators",
+"q": "getting-started",
+"expect": [
+"S8"
+]
+},
+{
+"id": 42,
+"group": "separators",
+"q": "lang=en",
+"expect": [
+"S8"
+]
+},
+{
+"id": 43,
+"group": "separators",
+"q": "#intro",
+"expect": [],
+"user": [
+"S8"
+]
+},
+{
+"id": 44,
+"group": "separators",
+"q": "https://example.com/docs",
+"expect": [
+"S8"
+]
+},
+{
+"id": 45,
+"group": "separators",
+"q": "raine.qa@example.org",
+"expect": [
+"S9"
+]
+},
+{
+"id": 46,
+"group": "separators",
+"q": "Cargo.toml",
+"expect": [
+"S10"
+]
+},
+{
+"id": 47,
+"group": "separators",
+"q": ".toml",
+"expect": [],
+"user": [
+"S10"
+]
+},
+{
+"id": 48,
+"group": "separators",
+"q": "README",
+"expect": [
+"S10"
+]
+},
+{
+"id": 49,
+"group": "separators",
+"q": "conversations_streaming",
+"expect": [
+"S11"
+],
+"note": "not subconversations_streaming (S12)"
+},
+{
+"id": 50,
+"group": "separators",
+"q": "aaa.aaa",
+"expect": [
+"M1"
+]
+},
+{
+"id": 51,
+"group": "separators",
+"q": "C++",
+"expect": [
+"M3"
+]
+},
+{
+"id": 52,
+"group": "separators",
+"q": ".NET",
+"expect": [
+"M3"
+]
+},
+{
+"id": 53,
+"group": "separators",
+"q": "bold",
+"expect": [
+"M2"
+]
+},
+{
+"id": 54,
+"group": "separators",
+"q": "code_span",
+"expect": [
+"M2"
+]
+},
+{
+"id": 55,
+"group": "separators",
+"q": "“quotes”",
+"expect": [
+"M4"
+]
+},
+{
+"id": 60,
+"group": "literals",
+"q": "\"Config\"",
+"expect": [
+"A4",
+"H3"
+]
+},
+{
+"id": 61,
+"group": "literals",
+"q": "\"config\"",
+"expect": [
+"A4",
+"H3",
+"Y1"
+],
+"note": "Y1 says configure"
+},
+{
+"id": 62,
+"group": "literals",
+"q": "\"DEPLOYMENT_TOKEN\"",
+"expect": [
+"L1"
+]
+},
+{
+"id": 63,
+"group": "literals",
+"q": "\"deployment token\"",
+"expect": [
+"L2"
+]
+},
+{
+"id": 64,
+"group": "literals",
+"q": "deployment token",
+"expect": [
+"L1",
+"L2"
+],
+"order": true
+},
+{
+"id": 65,
+"group": "literals",
+"q": "\"Quick Brown\"",
+"expect": [
+"L3"
+]
+},
+{
+"id": 66,
+"group": "literals",
+"q": "\"quick brown\"",
+"expect": [
+"L3",
+"L4"
+],
+"order": true
+},
+{
+"id": 67,
+"group": "literals",
+"q": "\"foo(bar, baz)\"",
+"expect": [
+"L5"
+]
+},
+{
+"id": 68,
+"group": "literals",
+"q": "\"foo\"",
+"expect": [
+"L5",
+"L6"
+],
+"order": true
+},
+{
+"id": 69,
+"group": "literals",
+"q": "\"bar\"",
+"expect": [
+"L5",
+"L6"
+],
+"order": true
+},
+{
+"id": 70,
+"group": "literals",
+"q": "\"brown fox",
+"expect": [
+"L3",
+"L4"
+],
+"order": true,
+"note": "unterminated quote"
+},
+{
+"id": 71,
+"group": "literals",
+"q": "\"quick",
+"expect": [
+"L3",
+"L4"
+],
+"order": true
+},
+{
+"id": 72,
+"group": "literals",
+"q": "deploy \"DEPLOYMENT_TOKEN\"",
+"expect": [
+"L1"
+]
+},
+{
+"id": 73,
+"group": "literals",
+"q": "metrics \"DEPLOYMENT_TOKEN\"",
+"expect": []
+},
+{
+"id": 74,
+"group": "literals",
+"q": "\"x.foo.bar\"",
+"expect": [
+"L6"
+]
+},
+{
+"id": 75,
+"group": "literals",
+"q": "\"foo-bar\"",
+"expect": [
+"L6"
+]
+},
+{
+"id": 76,
+"group": "literals",
+"q": "\"quotes\"",
+"expect": [
+"M4"
+]
+},
+{
+"id": 77,
+"group": "literals",
+"q": "\"needle_token\"",
+"expect": [
+"H1",
+"H3"
+]
+},
+{
+"id": 78,
+"group": "literals",
+"q": "\"Straße\"",
+"expect": [
+"U3",
+"H2",
+"H3"
+]
+},
+{
+"id": 79,
+"group": "literals",
+"q": "\"stanbul\"",
+"expect": []
+},
+{
+"id": 80,
+"group": "unicode",
+"q": "café",
+"expect": [
+"U1"
+],
+"user": [
+"U1",
+"U2"
+],
+"note": "U2 is decomposed e + U+0301"
+},
+{
+"id": 81,
+"group": "unicode",
+"q": "cafe",
+"expect": [
+"U2"
+],
+"user": [
+"U1",
+"U2"
+]
+},
+{
+"id": 82,
+"group": "unicode",
+"q": "naïve",
+"expect": [
+"U1",
+"M4"
+],
+"order": true
+},
+{
+"id": 83,
+"group": "unicode",
+"q": "résumé",
+"expect": [
+"U1"
+],
+"user": [
+"U1",
+"U2"
+]
+},
+{
+"id": 84,
+"group": "unicode",
+"q": "straße",
+"expect": [
+"U3",
+"H2",
+"H3"
+]
+},
+{
+"id": 85,
+"group": "unicode",
+"q": "strasse",
+"expect": [
+"U4"
+],
+"user": [
+"U3",
+"U4",
+"H2"
+],
+"note": "no full case folding"
+},
+{
+"id": 86,
+"group": "unicode",
+"q": "istanbul",
+"expect": [],
+"user": [
+"U5",
+"H2",
+"H3"
+],
+"note": "İ lowercases to i + U+0307"
+},
+{
+"id": 87,
+"group": "unicode",
+"q": "İstanbul",
+"expect": [
+"U5",
+"H2",
+"H3"
+]
+},
+{
+"id": 88,
+"group": "unicode",
+"q": "stanbul",
+"expect": [
+"U5",
+"H2",
+"H3"
+],
+"user": [],
+"note": "U+0307 is not alphanumeric, so stanbul starts a word"
+},
+{
+"id": 89,
+"group": "unicode",
+"q": "diyarbakir",
+"expect": [],
+"user": [
+"U5",
+"H3"
+]
+},
+{
+"id": 90,
+"group": "unicode",
+"q": "kelvin",
+"expect": [
+"U6",
+"H2",
+"H3"
+]
+},
+{
+"id": 91,
+"group": "unicode",
+"q": "🎉",
+"expect": [
+"U7",
+"E1",
+"E2",
+"E3",
+"E4"
+]
+},
+{
+"id": 92,
+"group": "unicode",
+"q": "🚀",
+"expect": [],
+"user": [
+"U7"
+]
+},
+{
+"id": 93,
+"group": "unicode",
+"q": "rocket",
+"expect": [
+"U7"
+]
+},
+{
+"id": 94,
+"group": "unicode",
+"q": "école",
+"expect": [
+"U8"
+]
+},
+{
+"id": 95,
+"group": "unicode",
+"q": "ÉTÉ",
+"expect": [
+"U8"
+]
+},
+{
+"id": 96,
+"group": "unicode",
+"q": "ünïcödé",
+"expect": [
+"H1",
+"H3"
+]
+},
+{
+"id": 100,
+"group": "cjk",
+"q": "测试",
+"expect": [
+"K1",
+"K2",
+"K6",
+"H1",
+"H4"
+]
+},
+{
+"id": 101,
+"group": "cjk",
+"q": "会话",
+"expect": [
+"K1",
+"K2",
+"H1",
+"H4"
+]
+},
+{
+"id": 102,
+"group": "cjk",
+"q": "测试会话",
+"expect": [
+"K1",
+"H1",
+"H4"
+]
+},
+{
+"id": 103,
+"group": "cjk",
+"q": "API接口",
+"expect": [
+"K3"
+]
+},
+{
+"id": 104,
+"group": "cjk",
+"q": "接口",
+"expect": [
+"K3"
+]
+},
+{
+"id": 105,
+"group": "cjk",
+"q": "JSON",
+"expect": [],
+"user": [
+"K3",
+"H4"
+],
+"note": "Latin word inside a CJK run"
+},
+{
+"id": 106,
+"group": "cjk",
+"q": "ひらがな",
+"expect": [],
+"user": [
+"K4"
+],
+"note": "kana are not in the CJK fallback range"
+},
+{
+"id": 107,
+"group": "cjk",
+"q": "これは",
+"expect": [
+"K4"
+]
+},
+{
+"id": 108,
+"group": "cjk",
+"q": "カタカナ",
+"expect": [],
+"user": [
+"K4"
+]
+},
+{
+"id": 109,
+"group": "cjk",
+"q": "검색",
+"expect": [
+"K5"
+]
+},
+{
+"id": 110,
+"group": "cjk",
+"q": "테스트",
+"expect": [
+"K5"
+]
+},
+{
+"id": 111,
+"group": "cjk",
+"q": "测试 ired",
+"expect": [
+"K6"
+],
+"user": [],
+"note": "a CJK word turns every query word into a substring match"
+},
+{
+"id": 112,
+"group": "cjk",
+"q": "测试 testing",
+"expect": [
+"K6"
+]
+},
+{
+"id": 113,
+"group": "cjk",
+"q": "内容",
+"expect": [
+"K1",
+"H4"
+]
+},
+{
+"id": 120,
+"group": "long",
+"q": "pneumonoultramicroscopicsilicovolcanoconiosis",
+"expect": [
+"W1"
+]
+},
+{
+"id": 121,
+"group": "long",
+"q": "pneumonoultramicroscopic",
+"expect": [
+"W1",
+"W2"
+],
+"order": true
+},
+{
+"id": 122,
+"group": "long",
+"q": "pneumonoultramicroscopicsilicovolcanoconiosi",
+"expect": [
+"W1",
+"W2"
+],
+"order": true
+},
+{
+"id": 123,
+"group": "long",
+"q": "一二三四五六七八九十百千",
+"expect": [
+"W3",
+"W4"
+]
+},
+{
+"id": 124,
+"group": "long",
+"q": "三四五六七八九十百千",
+"expect": [
+"W3",
+"W4"
+]
+},
+{
+"id": 125,
+"group": "long",
+"q": "error handling in the parser is fragile error handling in the parser is fragile error handling in the parser is fragile",
+"expect": [
+"B1"
+]
+},
+{
+"id": 126,
+"group": "long",
+"q": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+"expect": []
+},
+{
+"id": 130,
+"group": "fields",
+"q": "zanzibar",
+"expect": [
+"F1",
+"F2",
+"F3",
+"F4",
+"F5"
+],
+"order": true,
+"note": "title > summary+body = project > body"
+},
+{
+"id": 131,
+"group": "recency",
+"q": "quokka",
+"expect": [
+"R1",
+"R2",
+"R3"
+],
+"order": true
+},
+{
+"id": 132,
+"group": "recency",
+"q": "quokka habitat survey",
+"expect": [
+"R1",
+"R2",
+"R3"
+],
+"order": true
+},
+{
+"id": 133,
+"group": "sources",
+"q": "platypus",
+"expect": [
+"P2",
+"P3",
+"P1",
+"P4"
+],
+"order": true
+},
+{
+"id": 134,
+"group": "sources",
+"q": "kangaroo_route",
+"expect": [
+"P2"
+]
+},
+{
+"id": 135,
+"group": "sources",
+"q": "zebra-stripes",
+"expect": [
+"P4"
+],
+"note": "Codex tool output"
+},
+{
+"id": 136,
+"group": "sources",
+"q": "found zanzibar.txt",
+"expect": [
+"F5"
+],
+"note": "Claude tool output"
+},
+{
+"id": 137,
+"group": "scope",
+"q": "wombat",
+"expect": [
+"X3",
+"X6"
+],
+"order": true,
+"oracle": [
+"X1",
+"X2",
+"X3",
+"X4",
+"X5",
+"X6"
+],
+"agent": [
+"X2",
+"X3",
+"X4",
+"X5",
+"X6"
+],
+"note": "TUI hides X1 path, X2 project, X4/X5 kinds; agent search --all-kinds honours exclude_paths only"
+},
+{
+"id": 138,
+"group": "uuid",
+"q": "\"@Q2\"",
+"expect": [
+"Q1"
+],
+"note": "quoted Q2 session id: text match in Q1"
+},
+{
+"id": 139,
+"group": "uuid",
+"q": "@Q2:8",
+"expect": [
+"Q1"
+],
+"user": [
+"Q1",
+"Q2"
+],
+"note": "first 8 hex digits of Q2's id"
+},
+{
+"id": 140,
+"group": "multi",
+"q": "authentication noted",
+"expect": [
+"A1"
+],
+"note": "words in different messages of A1"
+},
+{
+"id": 141,
+"group": "fields",
+"q": "migration zanzibar",
+"expect": [
+"F1"
+],
+"note": "title only"
+},
+{
+"id": 142,
+"group": "fields",
+"q": "fields zanzibar",
+"expect": [
+"F1",
+"F2",
+"F4",
+"F5"
+],
+"order": true,
+"note": "project word plus title/summary/body"
+},
+{
+"id": 143,
+"group": "literals",
+"q": "\"Foo\" \"foo\"",
+"expect": [],
+"note": "no Foo with capital F in corpus"
+},
+{
+"id": 144,
+"group": "literals",
+"q": "\"",
+"expect": "ALL",
+"note": "lone quote browses"
+},
+{
+"id": 145,
+"group": "words",
+"q": "-",
+"expect": "ALL",
+"note": "separator-only query browses"
+},
+{
+"id": 146,
+"group": "words",
+"q": "_",
+"expect": [],
+"note": "identifier literal _ needs a word start"
+},
+{
+"id": 147,
+"group": "uuid",
+"q": "@Q2",
+"expect": [
+"Q2"
+],
+"note": "pasted UUID jumps to the session in the TUI; other surfaces search the text",
+"oracle": [
+"Q1"
+],
+"agent": [
+"Q1"
+]
+},
+{
+"id": 148,
+"group": "uuid",
+"q": "@Q2:36",
+"expect": [
+"Q2"
+],
+"note": "pasted UUID jumps to the session in the TUI; other surfaces search the text",
+"oracle": [
+"Q1"
+],
+"agent": [
+"Q1"
+]
+},
+{
+"id": 150,
+"group": "unicode",
+"q": "λογος",
+"expect": [
+"G2"
+],
+"user": [
+"G1",
+"G2"
+],
+"note": "final sigma: ΛΟΓΟΣ lowercases per char to λογοσ"
+},
+{
+"id": 151,
+"group": "unicode",
+"q": "ΛΟΓΟΣ",
+"expect": [
+"G1"
+],
+"user": [
+"G1",
+"G2"
+]
+},
+{
+"id": 160,
+"group": "user-only",
+"q": "ocelot",
+"expect": [
+"Y1"
+],
+"user_only": true
+},
+{
+"id": 161,
+"group": "user-only",
+"q": "tapir",
+"expect": [
+"Y1"
+],
+"user_only": true,
+"note": "text around a system reminder"
+},
+{
+"id": 162,
+"group": "user-only",
+"q": "lynx",
+"expect": [],
+"user_only": true,
+"note": "assistant reply"
+},
+{
+"id": 163,
+"group": "user-only",
+"q": "caracal",
+"expect": [],
+"user_only": true,
+"note": "tool output"
+},
+{
+"id": 164,
+"group": "user-only",
+"q": "serval",
+"expect": [],
+"user_only": true,
+"note": "system reminder"
+},
+{
+"id": 165,
+"group": "user-only",
+"q": "margay",
+"expect": [],
+"user_only": true,
+"note": "local command stdout"
+},
+{
+"id": 166,
+"group": "user-only",
+"q": "jaguarundi",
+"expect": [
+"Y1"
+],
+"user_only": true,
+"note": "skill invocation args"
+},
+{
+"id": 167,
+"group": "user-only",
+"q": "consult",
+"expect": [
+"Y1"
+],
+"user_only": true,
+"note": "skill invocation reads /consult"
+},
+{
+"id": 168,
+"group": "user-only",
+"q": "kinkajou",
+"expect": [],
+"user_only": true,
+"note": "injected skill body"
+},
+{
+"id": 169,
+"group": "user-only",
+"q": "quoll",
+"expect": [],
+"user_only": true,
+"note": "title"
+},
+{
+"id": 170,
+"group": "user-only",
+"q": "numbat",
+"expect": [],
+"user_only": true,
+"note": "summary"
+},
+{
+"id": 171,
+"group": "user-only",
+"q": "useronly",
+"expect": [],
+"user_only": true,
+"note": "project name"
+},
+{
+"id": 172,
+"group": "user-only",
+"q": "interrupted",
+"expect": [],
+"user_only": true,
+"note": "interruption marker"
+},
+{
+"id": 173,
+"group": "user-only",
+"q": "sloth",
+"expect": [],
+"user_only": true,
+"note": "Stop hook feedback"
+},
+{
+"id": 174,
+"group": "user-only",
+"q": "pangolin",
+"expect": [
+"Y2"
+],
+"user_only": true,
+"note": "typed '[Image' with no closing bracket"
+},
+{
+"id": 175,
+"group": "user-only",
+"q": "axolotl",
+"expect": [
+"Y3"
+],
+"user_only": true,
+"note": "typed '<system-reminder>' with no closing tag"
+},
+{
+"id": 176,
+"group": "user-only",
+"q": "okapi",
+"expect": [
+"Y4"
+],
+"user_only": true
+},
+{
+"id": 177,
+"group": "user-only",
+"q": "bonobo",
+"expect": [],
+"user_only": true
+},
+{
+"id": 178,
+"group": "user-only",
+"q": "gibbon",
+"expect": [],
+"user_only": true,
+"note": "Pi custom message"
+},
+{
+"id": 179,
+"group": "user-only",
+"q": "tamarin",
+"expect": [],
+"user_only": true,
+"note": "Pi skill body"
+},
+{
+"id": 180,
+"group": "user-only",
+"q": "marmoset",
+"expect": [
+"Y4"
+],
+"user_only": true,
+"note": "Pi skill args"
+},
+{
+"id": 181,
+"group": "user-only",
+"q": "narwhal",
+"expect": [
+"Y5"
+],
+"user_only": true
+},
+{
+"id": 182,
+"group": "user-only",
+"q": "manatee",
+"expect": [],
+"user_only": true
+},
+{
+"id": 183,
+"group": "user-only",
+"q": "beluga",
+"expect": [],
+"user_only": true,
+"note": "Codex AGENTS.md context"
+},
+{
+"id": 184,
+"group": "user-only",
+"q": "dugong",
+"expect": [],
+"user_only": true,
+"note": "Codex environment context"
+},
+{
+"id": 185,
+"group": "user-only",
+"q": "walrus",
+"expect": [],
+"user_only": true,
+"note": "subagent prompt: child has no own text"
+},
+{
+"id": 186,
+"group": "user-only",
+"q": "gecko",
+"expect": [
+"Y7"
+],
+"user_only": true
+},
+{
+"id": 187,
+"group": "user-only",
+"q": "iguana",
+"expect": [],
+"user_only": true
+},
+{
+"id": 188,
+"group": "user-only",
+"q": "vicuna",
+"expect": [
+"Y8"
+],
+"user_only": true
+},
+{
+"id": 189,
+"group": "user-only",
+"q": "\"ocelot logging\"",
+"expect": [
+"Y1"
+],
+"user_only": true
+},
+{
+"id": 190,
+"group": "user-only",
+"q": "ocelot \"lynx\"",
+"expect": [],
+"user_only": true,
+"note": "literal must be in own text too"
+},
+{
+"id": 191,
+"group": "user-only",
+"q": "merge",
+"expect": [
+"Y4"
+],
+"user_only": true
+},
+{
+"id": 192,
+"group": "user-only",
+"q": "walrus",
+"expect": [
+"Y6"
+],
+"note": "normal search finds the subagent (hidden kind)"
+},
+{
+"id": 193,
+"group": "user-only",
+"q": "lynx",
+"expect": [
+"Y1"
+],
+"note": "normal search still finds replies"
+},
+{
+"id": 200,
+"group": "multi",
+"q": "fiesta 🎉",
+"expect": [
+"E1",
+"E4",
+"E2",
+"E3"
+],
+"order": true,
+"note": "E1 has the words adjacent; the rest by recency"
+},
+{
+"id": 201,
+"group": "multi",
+"q": "fiesta time",
+"expect": [
+"E1"
+],
+"order": true
+}
+]
