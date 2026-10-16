@@ -177,10 +177,26 @@ impl SearchWorker {
     fn apply(&mut self, command: SearchCommand) {
         match command {
             SearchCommand::UpdateData { conversations } => {
-                self.searchable = Arc::new(
-                    self.index_pool
-                        .install(|| search::precompute_search_text(&conversations)),
-                );
+                // Text is normalized once per conversation text: an `Arc`
+                // still held by the previous corpus has the same contents.
+                let normalized: HashMap<usize, Arc<str>> = self
+                    .conversations
+                    .iter()
+                    .zip(self.searchable.iter())
+                    .map(|(conversation, searchable)| {
+                        (
+                            conversation.full_text.as_ptr() as usize,
+                            searchable.body_lower.clone(),
+                        )
+                    })
+                    .collect();
+                self.searchable = Arc::new(self.index_pool.install(|| {
+                    search::precompute_search_text_reusing(&conversations, |conversation| {
+                        normalized
+                            .get(&(conversation.full_text.as_ptr() as usize))
+                            .cloned()
+                    })
+                }));
                 self.conversations = conversations;
             }
             SearchCommand::UseIndex(index) => self.index = index,

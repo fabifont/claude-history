@@ -104,7 +104,6 @@ fn snapshot_rows_show_before_loading_and_swap_keeps_selection() {
 fn query_typed_over_snapshot_runs_after_loading() {
     let mut corpus = corpus();
     corpus[1].full_text = "needle".into();
-    corpus[1].search_text_lower = "needle".into();
     let root = publish(&corpus);
     let mut app = loading_app(None, vec![]);
     show(&mut app, &root, TimeFilter::default());
@@ -203,10 +202,6 @@ fn needle_corpus() -> Vec<Conversation> {
     let mut corpus = corpus();
     corpus[0].full_text = format!("{} hidden needle here", "padding ".repeat(400)).into();
     corpus[2].full_text = "needle in the newest".into();
-    for conversation in &mut corpus {
-        conversation.search_text_lower =
-            crate::search::normalize_for_search(&conversation.full_text).into();
-    }
     corpus
 }
 
@@ -305,7 +300,6 @@ fn newer_generation_swaps_in_and_reruns_the_query_keeping_selection() {
     let mut loaded = corpus.clone();
     loaded.push(conversation("/p/-tmp-beta/d.jsonl", 4 * HOUR_MS));
     loaded[3].full_text = "late needle".into();
-    loaded[3].search_text_lower = "late needle".into();
     app.append_conversations(loaded.clone());
     app.finish_loading();
     type_query(&mut app, "needle");

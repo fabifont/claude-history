@@ -1,6 +1,5 @@
 use crate::agent::refs::MessageRange;
 use crate::history::Conversation;
-use crate::search::normalize_for_search;
 use chrono::{DateTime, Local};
 use std::path::PathBuf;
 
@@ -33,7 +32,6 @@ pub fn one_message_conversation(
         semantic_route_text: "".into(),
         semantic_turns: vec![text.to_string()].into(),
         semantic_turn_ranges: vec![MessageRange::single(1)],
-        search_text_lower: normalize_for_search(&full_text).into(),
         project_name: project.map(str::to_string),
         project_path: None,
         cwd: None,

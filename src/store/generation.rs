@@ -246,7 +246,6 @@ impl Generation {
             semantic_route_text: empty.clone(),
             semantic_turns: Arc::from(Vec::new()),
             semantic_turn_ranges: Vec::new(),
-            search_text_lower: empty,
             project_name: (project.flags & project_flags::NAME != 0)
                 .then(|| self.str(project.name).to_owned()),
             project_path: (project.flags & project_flags::PATH != 0)

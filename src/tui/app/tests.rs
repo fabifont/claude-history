@@ -20,7 +20,6 @@ fn conversation(project: Option<&str>, project_dir: &str, uuid: &str, text: &str
         semantic_route_text: "".into(),
         semantic_turns: vec![text.to_string()].into(),
         semantic_turn_ranges: vec![crate::agent::refs::MessageRange::single(1)],
-        search_text_lower: search::normalize_for_search(text).into(),
         project_name: project.map(str::to_string),
         project_path: None,
         cwd: None,

@@ -17,7 +17,6 @@ use crate::claude::{
 use crate::cli::DebugLevel;
 use crate::debug;
 use crate::error::Result;
-use crate::search::normalize_for_search;
 use crate::semantic::filter::{SemanticTurnRole, filter_turn};
 use chrono::{DateTime, Local};
 use std::collections::{HashMap, VecDeque};
@@ -496,9 +495,6 @@ pub fn process_conversation_reader<R: BufRead>(
     let agent_search_text = normalize_whitespace(&agent_search_parts.join(" "));
     let semantic_route_text = super::semantic_route_text(&full_text, &agent_search_text);
 
-    // Pre-normalize search text to avoid re-normalizing on every startup
-    let search_text_lower = normalize_for_search(&full_text);
-
     let semantic_pairs = semantic_turns
         .into_iter()
         .zip(semantic_turn_ranges)
@@ -551,7 +547,6 @@ pub fn process_conversation_reader<R: BufRead>(
         semantic_route_text: semantic_route_text.into(),
         semantic_turns: semantic_turns.into(),
         semantic_turn_ranges,
-        search_text_lower: search_text_lower.into(),
         project_name: None,
         project_path: None,
         cwd: extracted_cwd,
@@ -1463,11 +1458,6 @@ mod tests {
             conv.full_text
         );
         assert!(
-            conv.search_text_lower.contains("verbose tool output"),
-            "Tool result should remain in lexical search_text_lower: {}",
-            conv.search_text_lower
-        );
-        assert!(
             !conv
                 .semantic_turns
                 .join(" ")
@@ -1503,7 +1493,7 @@ mod tests {
         let conv = parse_jsonl(&content).unwrap().unwrap();
 
         assert!(conv.full_text.contains(middle));
-        assert!(conv.search_text_lower.contains(middle));
+        assert!(crate::search::normalize_for_search(&conv.full_text).contains(middle));
     }
 
     #[test]
@@ -1583,11 +1573,6 @@ mod tests {
                 "{included} missing from {}",
                 conv.full_text
             );
-            assert!(
-                conv.search_text_lower.contains(included),
-                "{included} missing from {}",
-                conv.search_text_lower
-            );
         }
         assert!(!conv.full_text.contains("/cwd/private-sentinel"));
         assert_eq!(conv.project_name, None);
@@ -1615,7 +1600,9 @@ mod tests {
 
         let conv = parse_jsonl(&content).unwrap().unwrap();
         assert!(conv.full_text.contains("local stdout payload"));
-        assert!(conv.search_text_lower.contains("local stdout payload"));
+        assert!(
+            crate::search::normalize_for_search(&conv.full_text).contains("local stdout payload")
+        );
         assert_eq!(
             conv.semantic_turns.to_vec(),
             vec![

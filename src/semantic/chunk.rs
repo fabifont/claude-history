@@ -255,7 +255,6 @@ mod tests {
             semantic_route_text: "".into(),
             semantic_turn_ranges: (1..=semantic_turns.len()).map(MessageRange::single).collect(),
             semantic_turns: semantic_turns.into(),
-            search_text_lower: "title sentinel summary sentinel cwd sentinel project sentinel tool output sentinel full text only sentinel".into(),
             project_name: Some("project sentinel".to_string()),
             project_path: Some(PathBuf::from("/projects/project-a")),
             cwd: Some(PathBuf::from("/cwd/sentinel")),

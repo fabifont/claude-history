@@ -17,9 +17,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const CACHE_MAGIC: [u8; 8] = *b"CLHIST01";
 const PI_CACHE_MAGIC: [u8; 8] = *b"PIHIST01";
 const OMP_CACHE_MAGIC: [u8; 8] = *b"OMHIST01";
-const SCHEMA_VERSION: u32 = 12;
-const PI_SCHEMA_VERSION: u32 = 2;
-const OMP_SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 13;
+const PI_SCHEMA_VERSION: u32 = 3;
+const OMP_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct PiCache {
@@ -63,7 +63,6 @@ pub struct CacheEntry {
     pub semantic_turns: Vec<String>,
     #[serde(default)]
     pub semantic_turn_ranges: Vec<MessageRange>,
-    pub search_text_lower: String,
     pub cwd: Option<PathBuf>,
     pub message_count: usize,
     pub parse_errors: Vec<CachedParseError>,
@@ -245,7 +244,6 @@ pub fn empty_entry(file_size: u64, mtime: SystemTime) -> CacheEntry {
         semantic_route_text: String::new(),
         semantic_turns: Vec::new(),
         semantic_turn_ranges: Vec::new(),
-        search_text_lower: String::new(),
         cwd: None,
         message_count: 0,
         parse_errors: Vec::new(),
@@ -277,7 +275,6 @@ pub fn entry_from_conversation(
         semantic_route_text: conv.semantic_route_text.to_string(),
         semantic_turns: conv.semantic_turns.to_vec(),
         semantic_turn_ranges: conv.semantic_turn_ranges.clone(),
-        search_text_lower: conv.search_text_lower.to_string(),
         cwd: conv.cwd.clone(),
         message_count: conv.message_count,
         parse_errors: conv
@@ -340,7 +337,6 @@ pub fn conversation_from_owned_entry(
         semantic_route_text: entry.semantic_route_text.into(),
         semantic_turns: entry.semantic_turns.into(),
         semantic_turn_ranges: entry.semantic_turn_ranges,
-        search_text_lower: entry.search_text_lower.into(),
         project_name: None,
         project_path: None,
         cwd: entry.cwd,
@@ -375,7 +371,6 @@ pub fn entry_matches(entry: &CacheEntry, file_size: u64, mtime: SystemTime) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::normalize_for_search;
     use std::time::Duration;
 
     fn make_test_conversation() -> Conversation {
@@ -394,7 +389,6 @@ mod tests {
             semantic_route_text: "semantic route text".into(),
             semantic_turns: vec!["Hello world".to_string(), "Hi there".to_string()].into(),
             semantic_turn_ranges: vec![MessageRange::single(1), MessageRange::single(2)],
-            search_text_lower: normalize_for_search("Hello world Hi there").into(),
             project_name: Some("test-project".to_string()),
             project_path: Some(PathBuf::from("/test/project")),
             cwd: Some(PathBuf::from("/test/cwd")),
@@ -452,7 +446,6 @@ mod tests {
         assert_eq!(restored.agent_search_text, conv.agent_search_text);
         assert_eq!(restored.semantic_turns, conv.semantic_turns);
         assert_eq!(restored.semantic_turn_ranges, conv.semantic_turn_ranges);
-        assert_eq!(restored.search_text_lower, conv.search_text_lower);
         assert_eq!(restored.cwd, conv.cwd);
         assert_eq!(restored.message_count, conv.message_count);
         assert_eq!(restored.summary, conv.summary);

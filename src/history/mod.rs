@@ -118,8 +118,6 @@ pub struct Conversation {
     pub semantic_route_text: Arc<str>,
     pub semantic_turns: Arc<[String]>,
     pub semantic_turn_ranges: Vec<crate::agent::refs::MessageRange>,
-    /// Pre-normalized lowercase search text (avoids re-normalizing on every startup)
-    pub search_text_lower: Arc<str>,
     pub project_name: Option<String>,
     pub project_path: Option<PathBuf>,
     /// The working directory extracted from the JSONL file (the actual cwd)

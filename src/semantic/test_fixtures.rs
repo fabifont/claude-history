@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use crate::agent::refs::MessageRange;
 use crate::history::Conversation;
-use crate::search::normalize_for_search;
 use chrono::Local;
 
 #[cfg(test)]
@@ -19,7 +18,6 @@ pub struct SemanticConversationFixture {
     preview_first: String,
     preview_last: String,
     full_text: String,
-    search_text_lower: String,
     project_name: String,
     project_path: PathBuf,
     cwd: Option<PathBuf>,
@@ -49,7 +47,6 @@ impl SemanticConversationFixture {
             preview_first: preview.to_string(),
             preview_last: preview.to_string(),
             full_text: full_text.to_string(),
-            search_text_lower: full_text.to_string(),
             project_name: "project sentinel".to_string(),
             project_path: PathBuf::from("/projects/project-sentinel"),
             cwd: Some(PathBuf::from("/cwd/sentinel")),
@@ -64,7 +61,6 @@ impl SemanticConversationFixture {
         self.preview_first = title.clone();
         self.preview_last = title.clone();
         self.full_text = title.clone();
-        self.search_text_lower = title.clone();
         self.custom_title = Some(title);
         self
     }
@@ -82,11 +78,6 @@ impl SemanticConversationFixture {
 
     pub fn with_summary(mut self, summary: Option<&str>) -> Self {
         self.summary = summary.map(ToString::to_string);
-        self
-    }
-
-    pub fn with_normalized_search_text_lower(mut self) -> Self {
-        self.search_text_lower = normalize_for_search(&self.full_text);
         self
     }
 
@@ -113,7 +104,6 @@ impl SemanticConversationFixture {
                 .map(MessageRange::single)
                 .collect(),
             semantic_turns: self.semantic_turns.into(),
-            search_text_lower: self.search_text_lower.into(),
             project_name: Some(self.project_name),
             project_path: Some(self.project_path),
             cwd: self.cwd,

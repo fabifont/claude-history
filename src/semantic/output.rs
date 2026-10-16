@@ -93,7 +93,6 @@ mod tests {
             semantic_route_text: "".into(),
             semantic_turns: vec![].into(),
             semantic_turn_ranges: vec![],
-            search_text_lower: "".into(),
             project_name: Some("project-a".to_string()),
             project_path: None,
             cwd: None,

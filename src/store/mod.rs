@@ -300,7 +300,6 @@ pub(crate) mod test_support {
             semantic_route_text: empty.clone(),
             semantic_turns: Arc::from(Vec::new()),
             semantic_turn_ranges: Vec::new(),
-            search_text_lower: "full text".into(),
             project_name,
             project_path: None,
             cwd: None,

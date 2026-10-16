@@ -1326,7 +1326,6 @@ mod tests {
             semantic_route_text: "".into(),
             semantic_turns: vec![title.to_string()].into(),
             semantic_turn_ranges: vec![MessageRange::single(1)],
-            search_text_lower: title.to_string().into(),
             project_name: Some("project-a".to_string()),
             project_path: None,
             cwd: None,

@@ -566,9 +566,7 @@ mod tests {
     const WORKER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
     fn conversation(path: &str, semantic_turns: Vec<&str>) -> Conversation {
-        SemanticConversationFixture::new(path, semantic_turns)
-            .with_normalized_search_text_lower()
-            .build()
+        SemanticConversationFixture::new(path, semantic_turns).build()
     }
 
     fn corpus(conversations: Vec<Conversation>) -> Arc<Vec<Arc<Conversation>>> {

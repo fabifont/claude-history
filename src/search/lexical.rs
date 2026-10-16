@@ -42,20 +42,28 @@ pub fn is_uuid(query: &str) -> bool {
         .all(|(part, &len)| part.len() == len && part.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
-/// Build searchable index from conversations using pre-normalized search text.
-/// The body shares the conversation's search_text_lower; only the small
-/// title, summary, and project fields are normalized here.
+/// Build searchable index from conversations, normalizing their text.
 pub fn precompute_search_text(conversations: &[Conversation]) -> Vec<SearchableConversation> {
-    precompute_search_text_with(conversations, false)
+    precompute_search_text_with(conversations, false, |_| None)
+}
+
+/// Like `precompute_search_text`, taking each conversation's normalized body
+/// from `reuse` when it has one, so text normalized before is not redone.
+pub fn precompute_search_text_reusing(
+    conversations: &[Conversation],
+    reuse: impl Fn(&Conversation) -> Option<Arc<str>> + Sync,
+) -> Vec<SearchableConversation> {
+    precompute_search_text_with(conversations, false, reuse)
 }
 
 pub fn precompute_agent_search_text(conversations: &[Conversation]) -> Vec<SearchableConversation> {
-    precompute_search_text_with(conversations, true)
+    precompute_search_text_with(conversations, true, |_| None)
 }
 
 fn precompute_search_text_with(
     conversations: &[Conversation],
     include_agent_text: bool,
+    reuse: impl Fn(&Conversation) -> Option<Arc<str>> + Sync,
 ) -> Vec<SearchableConversation> {
     conversations
         .par_iter()
@@ -77,7 +85,8 @@ fn precompute_search_text_with(
                 .map(|n| normalize_for_search(n))
                 .unwrap_or_default();
             SearchableConversation {
-                body_lower: body_search_text_lower(conv, include_agent_text),
+                body_lower: reuse(conv)
+                    .unwrap_or_else(|| body_search_text_lower(conv, include_agent_text)),
                 title_lower,
                 summary_lower,
                 project_lower,
@@ -88,12 +97,13 @@ fn precompute_search_text_with(
 }
 
 fn body_search_text_lower(conversation: &Conversation, include_agent_text: bool) -> Arc<str> {
+    let body = normalize_for_search(&conversation.full_text);
     if !include_agent_text || conversation.agent_search_text.is_empty() {
-        conversation.search_text_lower.clone()
+        body.into()
     } else {
         format!(
             "{} {}",
-            conversation.search_text_lower,
+            body,
             normalize_for_search(&conversation.agent_search_text)
         )
         .into()
@@ -588,8 +598,6 @@ mod tests {
     use chrono::TimeZone;
 
     /// Create a test conversation with optional metadata.
-    /// Rebuilds search_text_lower to match production behavior:
-    /// custom_title + summary are prepended to body text before normalization.
     fn make_conv_full(
         text: &str,
         project: Option<&str>,
