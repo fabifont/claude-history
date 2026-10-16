@@ -53,6 +53,8 @@ pub(super) enum SearchCommand {
         query: String,
         generation: u64,
         mode: ListSearchMode,
+        /// Search only the text the person typed (`Conversation::own_text`).
+        user_only: bool,
     },
 }
 
@@ -74,6 +76,7 @@ pub(super) struct SearchResponse {
     pub(super) complete: bool,
     pub(super) generation: u64,
     pub(super) mode: ListSearchMode,
+    pub(super) user_only: bool,
     /// Evidence keyed like `filtered`.
     pub(super) evidence: HashMap<usize, search::LexicalEvidence>,
 }
@@ -85,20 +88,46 @@ const TOP_PAGE: usize = 50;
 const COMPLETE_STEP: usize = 256;
 const MAX_EVIDENCE_ROWS: usize = 200;
 
+/// With `user_only`, evidence comes from the text the person typed, shown
+/// even where the preview already holds the match, since the preview mixes
+/// in other messages.
 fn build_search_evidence(
     conversations: &[Conversation],
     filtered: &[usize],
     parsed: &ParsedQuery,
+    user_only: bool,
 ) -> HashMap<usize, search::LexicalEvidence> {
     filtered
         .iter()
         .take(MAX_EVIDENCE_ROWS)
         .filter_map(|&index| {
             let conversation = &conversations[index];
-            search::build_lexical_evidence(&conversation.full_text, &conversation.preview, parsed)
-                .map(|evidence| (index, evidence))
+            if user_only {
+                search::build_lexical_evidence(&conversation.own_text, "", parsed)
+            } else {
+                search::build_lexical_evidence(
+                    &conversation.full_text,
+                    &conversation.preview,
+                    parsed,
+                )
+            }
+            .map(|evidence| (index, evidence))
         })
         .collect()
+}
+
+/// Evidence for card `doc` of `index`, as `build_search_evidence` builds it.
+pub(super) fn index_evidence(
+    index: &store::SearchIndex,
+    doc: u32,
+    parsed: &ParsedQuery,
+    user_only: bool,
+) -> Option<search::LexicalEvidence> {
+    if user_only {
+        search::build_lexical_evidence(&index.own_text(doc), "", parsed)
+    } else {
+        search::build_lexical_evidence(&index.text(doc), index.cards().preview(doc), parsed)
+    }
 }
 
 /// Evidence for `docs` that `evidence` does not hold yet, read from their
@@ -107,6 +136,7 @@ fn add_index_evidence(
     index: &store::SearchIndex,
     docs: &[u32],
     parsed: &ParsedQuery,
+    user_only: bool,
     evidence: &mut HashMap<usize, search::LexicalEvidence>,
 ) {
     let missing: Vec<u32> = docs
@@ -117,9 +147,7 @@ fn add_index_evidence(
     let found: Vec<(usize, search::LexicalEvidence)> = missing
         .par_iter()
         .filter_map(|&doc| {
-            let text = index.text(doc);
-            search::build_lexical_evidence(&text, index.cards().preview(doc), parsed)
-                .map(|evidence| (doc as usize, evidence))
+            index_evidence(index, doc, parsed, user_only).map(|evidence| (doc as usize, evidence))
         })
         .collect();
     evidence.extend(found);
@@ -132,6 +160,9 @@ struct SearchWorker {
     queued: VecDeque<SearchCommand>,
     conversations: Arc<Vec<Conversation>>,
     searchable: Arc<Vec<SearchableConversation>>,
+    /// `search::user_only_view` of `conversations` and its search data,
+    /// built on the first user-only search.
+    own: Option<(Vec<Conversation>, Vec<SearchableConversation>)>,
     index: Option<IndexScope>,
     /// Ranks loaded conversations one query at a time, leaving the other
     /// cores to the UI and loader.
@@ -154,6 +185,7 @@ impl SearchWorker {
                     mut query,
                     mut generation,
                     mut mode,
+                    mut user_only,
                 } => {
                     // Only the newest query matters; apply everything sent
                     // before it.
@@ -168,17 +200,21 @@ impl SearchWorker {
                                 query: q,
                                 generation: g,
                                 mode: m,
+                                user_only: u,
                             } => {
                                 query = q;
                                 generation = g;
                                 mode = m;
+                                user_only = u;
                             }
                             other => self.apply(other),
                         }
                     }
                     match self.index.clone() {
-                        Some(scope) => self.search_index(&scope, &query, generation, mode),
-                        None => self.search_memory(&query, generation, mode),
+                        Some(scope) => {
+                            self.search_index(&scope, &query, generation, mode, user_only)
+                        }
+                        None => self.search_memory(&query, generation, mode, user_only),
                     }
                 }
                 other => self.apply(other),
@@ -210,19 +246,38 @@ impl SearchWorker {
                     })
                 }));
                 self.conversations = conversations;
+                self.own = None;
             }
             SearchCommand::UseIndex(index) => self.index = index,
             SearchCommand::Search { .. } => unreachable!("searches are not applied"),
         }
     }
 
-    fn search_memory(&self, query: &str, generation: u64, mode: ListSearchMode) {
-        let (conversations, searchable) = (&self.conversations, &self.searchable);
+    fn search_memory(
+        &mut self,
+        query: &str,
+        generation: u64,
+        mode: ListSearchMode,
+        user_only: bool,
+    ) {
+        if user_only && self.own.is_none() {
+            let conversations = &self.conversations;
+            self.own = Some(self.index_pool.install(|| {
+                let view = search::user_only_view(conversations);
+                let searchable = search::precompute_search_text(&view);
+                (view, searchable)
+            }));
+        }
+        let (searched, searchable) = match &self.own {
+            Some((view, searchable)) if user_only => (view.as_slice(), searchable.as_slice()),
+            _ => (self.conversations.as_slice(), self.searchable.as_slice()),
+        };
+        let conversations = &self.conversations;
         let (filtered, evidence) = self.memory_pool.install(|| {
             let now = chrono::Local::now();
-            let filtered = search::search(conversations, searchable, query, now);
+            let filtered = search::search(searched, searchable, query, now);
             let parsed = ParsedQuery::parse(query);
-            let evidence = build_search_evidence(conversations, &filtered, &parsed);
+            let evidence = build_search_evidence(conversations, &filtered, &parsed, user_only);
             (filtered, evidence)
         });
         let _ = self.responses.send(SearchResponse {
@@ -231,6 +286,7 @@ impl SearchWorker {
             complete: true,
             generation,
             mode,
+            user_only,
             evidence,
         });
     }
@@ -243,6 +299,7 @@ impl SearchWorker {
         query: &str,
         generation: u64,
         mode: ListSearchMode,
+        user_only: bool,
     ) {
         let index = &scope.index;
         let in_scope = |doc: u32| scope.docs[doc as usize];
@@ -254,16 +311,18 @@ impl SearchWorker {
                 complete,
                 generation,
                 mode,
+                user_only,
                 evidence: HashMap::clone(evidence),
             });
         };
         let pool = &self.index_pool;
         let mut evidence = HashMap::new();
-        let mut ranking = pool.install(|| index.search(query, chrono::Local::now(), &in_scope));
+        let mut ranking =
+            pool.install(|| index.search(query, chrono::Local::now(), &in_scope, user_only));
 
         let top: Vec<u32> =
             pool.install(|| ranking.top(TOP_PAGE).iter().map(|hit| hit.doc).collect());
-        pool.install(|| add_index_evidence(index, &top, &parsed, &mut evidence));
+        pool.install(|| add_index_evidence(index, &top, &parsed, user_only, &mut evidence));
         if top.len() < TOP_PAGE {
             send(&top, true, &evidence);
             return;
@@ -287,7 +346,7 @@ impl SearchWorker {
         let docs: Vec<u32> =
             pool.install(|| ranking.complete().iter().map(|hit| hit.doc).collect());
         let shown = &docs[..docs.len().min(MAX_EVIDENCE_ROWS)];
-        pool.install(|| add_index_evidence(index, shown, &parsed, &mut evidence));
+        pool.install(|| add_index_evidence(index, shown, &parsed, user_only, &mut evidence));
         send(&docs, true, &evidence);
     }
 }
@@ -317,6 +376,7 @@ pub(super) fn spawn_search_worker() -> (mpsc::Sender<SearchCommand>, mpsc::Recei
                 queued: VecDeque::new(),
                 conversations: Arc::default(),
                 searchable: Arc::default(),
+                own: None,
                 index: None,
                 memory_pool,
                 index_pool,
@@ -646,6 +706,7 @@ impl App {
             query,
             generation: self.search_generation,
             mode: self.list_search_mode,
+            user_only: self.searches_user_only(),
         });
     }
 
@@ -697,6 +758,7 @@ impl App {
                 query: query.clone(),
                 generation,
                 mode: ListSearchMode::Semantic,
+                user_only: false,
             });
         }
         if !self.send_semantic_command(SemanticWorkerCommand::Search {
@@ -746,6 +808,7 @@ impl App {
             };
             if response.generation == self.search_generation
                 && response.mode == self.list_search_mode
+                && response.user_only == self.searches_user_only()
                 && (response.mode == ListSearchMode::Lexical || semantic_fallback_pending)
                 && index_current
             {
@@ -1005,6 +1068,37 @@ impl App {
         } else {
             self.dispatch_search();
         }
+    }
+
+    /// Searches only the text the person typed, or everything again,
+    /// keeping the query and the selected session.
+    pub(super) fn toggle_user_only(&mut self) {
+        self.user_only = !self.user_only;
+        if self.list_search_mode == ListSearchMode::Semantic {
+            // Semantic search ranks whole conversations; see
+            // `searches_user_only`.
+            return;
+        }
+        if self.selection_anchor.is_none() {
+            self.selection_anchor = self.get_selected_path();
+        }
+        self.invalidate_search_generation();
+        if self.query.trim().is_empty() || !self.readiness.lexical {
+            self.update_filter();
+        } else {
+            self.dispatch_search();
+        }
+    }
+
+    pub fn user_only(&self) -> bool {
+        self.user_only
+    }
+
+    /// Whether queries match only the text the person typed: user-only is
+    /// on and the mode is lexical. Semantic search embeds chunks that mix
+    /// both sides of the conversation, so it ignores the toggle.
+    pub(crate) fn searches_user_only(&self) -> bool {
+        self.user_only && self.list_search_mode == ListSearchMode::Lexical
     }
 
     /// Switches to `mode` the way toggling does, when it is not the mode.

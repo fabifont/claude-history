@@ -24,6 +24,7 @@ fn test_conversation(path: PathBuf, custom_title: Option<String>) -> Conversatio
         semantic_turns: vec!["hello body".to_string()].into(),
         semantic_turn_ranges: vec![crate::agent::refs::MessageRange::single(1)],
         full_text: full_text.into(),
+        own_text: "".into(),
         agent_search_text: "".into(),
         semantic_route_text: "".into(),
         project_name: Some("project".to_string()),

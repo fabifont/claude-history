@@ -260,6 +260,21 @@ fn render_list_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         ]);
     }
 
+    if app.user_only() {
+        // Semantic search ignores the toggle; the marker says so.
+        let label = if app.searches_user_only() {
+            "you only"
+        } else {
+            "you only: not in semantic"
+        };
+        spans.extend([
+            Span::styled(keys.user_only.short_label(), key_style),
+            Span::styled("\u{b7}", label_style),
+            Span::styled(label, Style::default().fg(rgb(th().accent)).bold()),
+            Span::raw("  "),
+        ]);
+    }
+
     if app.semantic_toggle_available() {
         let mode_style = if app.list_search_mode() == ListSearchMode::Semantic {
             Style::default().fg(rgb(th().accent)).bold()
@@ -1364,6 +1379,10 @@ fn render_help_overlay(
             (
                 keys.all_kinds.help_label(),
                 "Show/hide automated and subagent sessions",
+            ),
+            (
+                keys.user_only.help_label(),
+                "Search only your own messages (lexical)",
             ),
             ("Esc".into(), "Quit"),
         ];
@@ -2751,6 +2770,7 @@ mod tests {
             preview_first: "lexical preview sentinel".into(),
             preview_last: "lexical preview sentinel".into(),
             full_text: "tool output sentinel summary sentinel cwd sentinel".into(),
+            own_text: "".into(),
             agent_search_text: "".into(),
             semantic_route_text: "".into(),
             semantic_turns: vec!["semantic visible text".to_string()].into(),

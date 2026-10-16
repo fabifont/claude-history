@@ -165,6 +165,17 @@ pub struct SemRow {
     pub hash: u64,
 }
 
+/// Where a card's own text (`Conversation::own_text`) lives in the
+/// generation's own-text segments, parallel to the card rows.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
+pub struct OwnRow {
+    /// Frame in `own-NNNN.zst`; empty for a card without own text.
+    pub blob: BlobRef,
+    /// Hash of the own text, so equal hashes imply equal text.
+    pub hash: u64,
+}
+
 /// One index segment of a generation. Docs of the segment that no card
 /// points at are dead and skipped by queries.
 #[repr(C)]
@@ -200,6 +211,8 @@ pub struct Header {
     pub locs_off: u64,
     /// `SemRow[row_count]`.
     pub sems_off: u64,
+    /// `OwnRow[row_count]`.
+    pub owns_off: u64,
     /// `IndexSegRow[seg_count]`, ascending ids.
     pub segs_off: u64,
     /// `IgnoredRow[ignored_count]`.
@@ -211,7 +224,7 @@ pub struct Header {
 }
 
 pub const MAGIC: [u8; 8] = *b"CHGEN\0\0\0";
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 
 pub fn source_to_u8(source: crate::history::model::SourceKind) -> u8 {
     match source {
@@ -255,9 +268,10 @@ mod tests {
         assert_eq!(std::mem::size_of::<Fingerprint>(), 16);
         assert_eq!(std::mem::size_of::<IndexLoc>(), 8);
         assert_eq!(std::mem::size_of::<SemRow>(), 24);
+        assert_eq!(std::mem::size_of::<OwnRow>(), 24);
         assert_eq!(std::mem::size_of::<IndexSegRow>(), 8);
         assert_eq!(std::mem::size_of::<IgnoredRow>(), 24);
-        assert_eq!(std::mem::size_of::<Header>(), 104);
+        assert_eq!(std::mem::size_of::<Header>(), 112);
     }
 
     #[test]

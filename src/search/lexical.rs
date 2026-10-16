@@ -110,6 +110,27 @@ fn body_search_text_lower(conversation: &Conversation, include_agent_text: bool)
     }
 }
 
+/// `conversations` reduced to what the person typed, for searching only
+/// their own messages: the body is `Conversation::own_text`, and title,
+/// summary, project and agent text are gone, so they neither match nor score.
+pub fn user_only_view(conversations: &[Conversation]) -> Vec<Conversation> {
+    conversations
+        .par_iter()
+        .map(|conversation| Conversation {
+            full_text: conversation.own_text.clone(),
+            agent_search_text: "".into(),
+            semantic_route_text: "".into(),
+            semantic_turns: Arc::from(Vec::new()),
+            semantic_turn_ranges: Vec::new(),
+            parse_errors: Vec::new(),
+            project_name: None,
+            summary: None,
+            custom_title: None,
+            ..conversation.clone()
+        })
+        .collect()
+}
+
 /// Filter and score conversations based on query
 /// Returns indices into the original conversations vec, sorted by score descending
 pub fn search(

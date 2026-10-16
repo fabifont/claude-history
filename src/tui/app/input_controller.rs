@@ -472,6 +472,10 @@ impl App {
             self.toggle_all_kinds();
             return None;
         }
+        if self.keys.user_only.matches(code, modifiers) {
+            self.toggle_user_only();
+            return None;
+        }
 
         match code {
             _ if self.keys.rename.matches(code, modifiers) => {

@@ -178,6 +178,7 @@ fn read_conversations(
         Contents::Cards => None,
         Contents::Full => Some((
             generation.open_text_files()?,
+            generation.open_own_files()?,
             generation.open_semantic_files()?,
         )),
     };
@@ -189,9 +190,10 @@ fn read_conversations(
             if !keep(&conversation) {
                 return Some(None);
             }
-            if let Some((text, semantic)) = &files {
+            if let Some((text, own, semantic)) = &files {
                 let row = &generation.rows()[doc as usize];
                 conversation.full_text = text.read(row.text)?.into();
+                conversation.own_text = own.read(generation.owns()[doc as usize].blob)?.into();
                 let sem = &generation.sems()[doc as usize];
                 if sem.hash != 0 {
                     semantic::SemanticDoc::decode(&semantic.read_bytes(sem.blob)?)?
@@ -380,21 +382,39 @@ fn in_time(time: &TimeFilter, row: &card::CardRow) -> bool {
             .is_some_and(|timestamp| time.matches(timestamp))
 }
 
-/// A generation's cards, suffix index and text, ready for lexical search.
+/// A generation's cards, suffix indexes and texts, ready for lexical search.
 pub struct SearchIndex {
     cards: Snapshot,
     index: segments::IndexSet,
     text: text::TextSegments,
     docs: search::SearchDocs,
+    own: OwnText,
+}
+
+/// The index and text of what the person typed, searched without card
+/// fields.
+struct OwnText {
+    index: segments::IndexSet,
+    text: text::TextSegments,
+    docs: search::SearchDocs,
+    generation: Arc<Generation>,
 }
 
 impl SearchIndex {
-    /// Opens the index and text of the generation behind `cards`; `None`
+    /// Opens the indexes and texts of the generation behind `cards`; `None`
     /// when it has none usable.
     pub fn open(cards: Snapshot) -> Option<Self> {
-        let (index, text) = cards.generation.open_search_files()?;
+        let (index, text) = cards.generation.open_search_files(lexindex::Field::Body)?;
+        let (own_index, own_text) = cards.generation.open_search_files(lexindex::Field::Own)?;
+        let docs = search::SearchDocs::from_generation(&cards.generation);
         Some(Self {
-            docs: search::SearchDocs::from_generation(&cards.generation),
+            own: OwnText {
+                index: own_index,
+                text: own_text,
+                docs: docs.without_fields(),
+                generation: cards.generation.clone(),
+            },
+            docs,
             cards,
             index,
             text,
@@ -405,20 +425,47 @@ impl SearchIndex {
         &self.cards
     }
 
-    /// Starts `query` over the documents for which `scope` holds.
+    /// Starts `query` over the documents for which `scope` holds. With
+    /// `user_only`, a document is its own text alone (`Conversation::
+    /// own_text`): every word and literal must occur there, and title,
+    /// summary and project neither match nor score.
     pub fn search<'a>(
         &'a self,
         query: &str,
         now: DateTime<Local>,
         scope: &(dyn Fn(u32) -> bool + Sync),
+        user_only: bool,
     ) -> search::Ranking<'a> {
-        search::search(&self.index, &self.docs, self, query, now, scope)
+        if user_only {
+            let own = &self.own;
+            search::search(&own.index, &own.docs, own, query, now, scope)
+        } else {
+            search::search(&self.index, &self.docs, self, query, now, scope)
+        }
     }
 
     /// `Conversation::full_text` of card `doc`, decompressed from its frame.
     pub fn text(&self, doc: u32) -> String {
         let row = &self.cards.generation.rows()[doc as usize];
         self.text.read(row.text).unwrap_or_default()
+    }
+
+    /// `Conversation::own_text` of card `doc`, decompressed from its frame.
+    pub fn own_text(&self, doc: u32) -> String {
+        self.own.read(doc)
+    }
+}
+
+impl OwnText {
+    fn read(&self, doc: u32) -> String {
+        let row = &self.generation.owns()[doc as usize];
+        self.text.read(row.blob).unwrap_or_default()
+    }
+}
+
+impl search::TextSource for OwnText {
+    fn full_text(&self, doc: u32) -> Cow<'_, str> {
+        Cow::Owned(self.read(doc))
     }
 }
 
@@ -617,6 +664,7 @@ pub(crate) mod test_support {
             preview_first: "first".into(),
             preview_last: "last".into(),
             full_text: "full text".into(),
+            own_text: "".into(),
             agent_search_text: empty.clone(),
             semantic_route_text: empty.clone(),
             semantic_turns: Arc::from(Vec::new()),

@@ -251,6 +251,7 @@ mod tests {
             preview_first: "visible user text".into(),
             preview_last: "visible assistant text".into(),
             full_text: "title sentinel summary sentinel cwd sentinel project sentinel tool output sentinel full text only sentinel".into(),
+            own_text: "".into(),
             agent_search_text: "".into(),
             semantic_route_text: "".into(),
             semantic_turn_ranges: (1..=semantic_turns.len()).map(MessageRange::single).collect(),

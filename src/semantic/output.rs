@@ -89,6 +89,7 @@ mod tests {
             preview_first: "preview title".into(),
             preview_last: "preview title".into(),
             full_text: "".into(),
+            own_text: "".into(),
             agent_search_text: "".into(),
             semantic_route_text: "".into(),
             semantic_turns: vec![].into(),

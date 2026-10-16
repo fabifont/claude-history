@@ -479,7 +479,7 @@ fn indexed_literal_semantic_response(
         }
     }
     let scope = |doc: u32| in_scope.get(doc as usize).copied().unwrap_or(false);
-    let mut ranking = texts.search(parsed.raw(), chrono::Local::now(), &scope);
+    let mut ranking = texts.search(parsed.raw(), chrono::Local::now(), &scope, false);
     let filtered: Vec<usize> = ranking
         .complete()
         .iter()

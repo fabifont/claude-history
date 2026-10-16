@@ -16,6 +16,7 @@ fn conversation(project: Option<&str>, project_dir: &str, uuid: &str, text: &str
         preview_first: text.to_string().into(),
         preview_last: text.to_string().into(),
         full_text: text.to_string().into(),
+        own_text: "".into(),
         agent_search_text: "".into(),
         semantic_route_text: "".into(),
         semantic_turns: vec![text.to_string()].into(),
@@ -329,6 +330,7 @@ fn stale_response_with_current_generation_but_old_mode_is_ignored() {
         complete: true,
         generation: 7,
         mode: ListSearchMode::Lexical,
+        user_only: false,
         evidence: HashMap::new(),
     })
     .unwrap();
@@ -629,6 +631,7 @@ fn semantic_search_dispatches_lexical_fallback() {
         query,
         generation,
         mode,
+        user_only,
     } = search_rx.try_recv().unwrap()
     else {
         panic!("expected lexical fallback search");
@@ -636,6 +639,7 @@ fn semantic_search_dispatches_lexical_fallback() {
     assert_eq!(query, "needle");
     assert_eq!(generation, app.search_generation());
     assert_eq!(mode, ListSearchMode::Semantic);
+    assert!(!user_only);
 }
 
 #[test]
@@ -793,6 +797,7 @@ fn semantic_search_worker_returns_lexical_fallback() {
         query: "emoji".to_string(),
         generation: 7,
         mode: ListSearchMode::Semantic,
+        user_only: false,
     })
     .unwrap();
 
@@ -839,6 +844,7 @@ fn semantic_search_applies_lexical_fallback_while_pending() {
         complete: true,
         generation: 7,
         mode: ListSearchMode::Semantic,
+        user_only: false,
         evidence: HashMap::new(),
     })
     .unwrap();
@@ -870,6 +876,7 @@ fn empty_lexical_fallback_keeps_results_visible_while_semantic_search_is_pending
         complete: true,
         generation: 7,
         mode: ListSearchMode::Semantic,
+        user_only: false,
         evidence: HashMap::new(),
     })
     .unwrap();
@@ -900,6 +907,7 @@ fn semantic_search_ignores_lexical_fallback_after_completion() {
         complete: true,
         generation: 7,
         mode: ListSearchMode::Semantic,
+        user_only: false,
         evidence: HashMap::new(),
     })
     .unwrap();
@@ -1597,6 +1605,7 @@ fn uuid_dispatch_invalidates_stale_search_response() {
         complete: true,
         generation: 1,
         mode: ListSearchMode::Lexical,
+        user_only: false,
         evidence: HashMap::new(),
     })
     .unwrap();
@@ -1638,6 +1647,7 @@ fn show_conversations_invalidates_stale_loading_search_response() {
         complete: true,
         generation: 1,
         mode: ListSearchMode::Lexical,
+        user_only: false,
         evidence: HashMap::new(),
     })
     .unwrap();

@@ -1322,6 +1322,7 @@ mod tests {
             preview_first: title.to_string().into(),
             preview_last: title.to_string().into(),
             full_text: title.to_string().into(),
+            own_text: "".into(),
             agent_search_text: "".into(),
             semantic_route_text: "".into(),
             semantic_turns: vec![title.to_string()].into(),

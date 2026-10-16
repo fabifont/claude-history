@@ -98,6 +98,7 @@ impl SemanticConversationFixture {
             preview_first: self.preview_first.into(),
             preview_last: self.preview_last.into(),
             full_text: self.full_text.into(),
+            own_text: "".into(),
             agent_search_text: "".into(),
             semantic_route_text: semantic_route_text.into(),
             semantic_turn_ranges: (1..=self.semantic_turns.len())

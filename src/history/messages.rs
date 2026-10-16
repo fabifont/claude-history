@@ -178,6 +178,96 @@ pub(crate) fn extract_skill_preview(message: &str) -> Option<String> {
     Some(command_name.to_string())
 }
 
+/// Text that opens a user record written by the tool rather than typed:
+/// interruption markers, compaction summaries and continuations, hook
+/// feedback and prompt suggestion requests.
+const GENERATED_PREFIXES: &[&str] = &[
+    "[Request interrupted by user",
+    "This session is being continued from a previous conversation",
+    "Compaction completed. Continue.",
+    "Stop hook feedback:",
+    "[SUGGESTION MODE:",
+];
+
+/// Spans the tool inserts into typed text, removed with their contents.
+const INSERTED_SPANS: &[(&str, &str)] = &[
+    ("<system-reminder>", "</system-reminder>"),
+    ("<task-notification>", "</task-notification>"),
+    ("<local-command-stdout>", "</local-command-stdout>"),
+    ("<local-command-stderr>", "</local-command-stderr>"),
+    ("<bash-stdout>", "</bash-stdout>"),
+    ("<bash-stderr>", "</bash-stderr>"),
+    ("[Image", "]"),
+];
+
+/// What the person typed in one text part of a top-level user message, or
+/// `None` when the tool wrote the part: what `is_clear_metadata_message`
+/// rejects and texts starting with `GENERATED_PREFIXES`. A skill invocation
+/// reads as its command line (`/name args`), a Codex realtime delegation as
+/// the spoken input it carries, and `INSERTED_SPANS` are removed from the
+/// rest.
+pub(crate) fn authored_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if is_clear_metadata_message(trimmed)
+        || GENERATED_PREFIXES
+            .iter()
+            .any(|prefix| trimmed.starts_with(prefix))
+    {
+        return None;
+    }
+    if let Some(delegation) = trimmed.strip_prefix("<realtime_delegation>") {
+        // The transcript beside the input holds both sides of the call.
+        let input = delegation
+            .split_once("<input>")?
+            .1
+            .split_once("</input>")?
+            .0;
+        let input = input.trim();
+        return (!input.is_empty()).then(|| input.to_owned());
+    }
+    if let Some(command) = extract_skill_preview(trimmed).or_else(|| pi_skill_command(trimmed)) {
+        return Some(command);
+    }
+    let mut kept = trimmed.to_owned();
+    for (open, close) in INSERTED_SPANS {
+        kept = without_spans(&kept, open, close);
+    }
+    let kept = kept
+        .replace("<bash-input>", "")
+        .replace("</bash-input>", "");
+    let kept = kept.trim();
+    (!kept.is_empty()).then(|| kept.to_owned())
+}
+
+/// The command line of a Pi skill invocation, which inlines the skill as
+/// `<skill name="NAME" ...>...</skill>` followed by the typed arguments.
+fn pi_skill_command(text: &str) -> Option<String> {
+    let rest = text.strip_prefix("<skill name=\"")?;
+    let name = &rest[..rest.find('"')?];
+    let args = text[text.find("</skill>")? + "</skill>".len()..].trim();
+    Some(if args.is_empty() {
+        format!("/{name}")
+    } else {
+        format!("/{name} {args}")
+    })
+}
+
+/// `text` without the spans from `open` to the next `close`. An unclosed
+/// span runs to the end.
+fn without_spans(text: &str, open: &str, close: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(open) {
+        kept.push_str(&rest[..start]);
+        let after = &rest[start + open.len()..];
+        rest = after
+            .find(close)
+            .map_or("", |end| &after[end + close.len()..]);
+    }
+    kept.push_str(rest);
+    kept
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,5 +451,60 @@ mod tests {
         let mut ordinals = MessageOrdinals::new();
         assert_eq!(ordinals.place(&event(progress)), Placement::Message(1));
         assert_eq!(ordinals.count(), 1);
+    }
+
+    #[test]
+    fn authored_text_keeps_what_the_person_typed() {
+        assert_eq!(
+            authored_text("  fix the cache  ").as_deref(),
+            Some("fix the cache")
+        );
+        assert_eq!(
+            authored_text(
+                "<command-message>consult</command-message>\n<command-name>/consult</command-name>\n<command-args>how to X</command-args>"
+            )
+            .as_deref(),
+            Some("/consult how to X")
+        );
+        assert_eq!(
+            authored_text(
+                "<skill name=\"merge\" location=\"/s/SKILL.md\">\nbody\n</skill>\n\n--keep"
+            )
+            .as_deref(),
+            Some("/merge --keep")
+        );
+        assert_eq!(
+            authored_text("look [Image #1] here<system-reminder>injected</system-reminder> now")
+                .as_deref(),
+            Some("look  here now")
+        );
+        assert_eq!(
+            authored_text("<bash-input>ls -la</bash-input><bash-stdout>out</bash-stdout>")
+                .as_deref(),
+            Some("ls -la")
+        );
+        assert_eq!(
+            authored_text(
+                "<realtime_delegation>\n  <input>What is Aven project</input>\n  \
+                 <transcript_delta>assistant:  Let me check that.\nuser:  What is Aven \
+                 project</transcript_delta>\n</realtime_delegation>"
+            )
+            .as_deref(),
+            Some("What is Aven project")
+        );
+        for generated in [
+            "[Request interrupted by user for tool use]",
+            "This session is being continued from a previous conversation that ran out",
+            "Base directory for this skill: /x",
+            "<local-command-caveat>Caveat</local-command-caveat>",
+            "<local-command-stdout>done</local-command-stdout>",
+            "<command-name>/clear</command-name>",
+            "Stop hook feedback:\n[done]",
+            "<task-notification>finished</task-notification>",
+            "[Image: source: /tmp/a.png]",
+            "  ",
+        ] {
+            assert_eq!(authored_text(generated), None, "{generated:?}");
+        }
     }
 }

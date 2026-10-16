@@ -1,8 +1,8 @@
 //! Folds a `Transcript` into the fields the conversation list and search
-//! index store: previews, full text, semantic turns and their message
-//! ranges, route text, token totals and duration.
+//! index store: previews, full text, own text, semantic turns and their
+//! message ranges, route text, token totals and duration.
 
-use super::messages::{MessageOrdinals, Placement, extract_skill_preview};
+use super::messages::{MessageOrdinals, Placement, authored_text, extract_skill_preview};
 use super::model::{
     Event, EventKind, ExecutionMode, HeadStatus, Message, Part, Relationship, Role, Transcript,
     Usage, Visibility,
@@ -44,6 +44,8 @@ pub fn index(transcript: &Transcript) -> Result<Conversation, Skipped> {
 pub struct Indexer {
     all_parts: Vec<String>,
     agent_search_parts: Vec<String>,
+    /// What the person typed, part by part; see `Conversation::own_text`.
+    own_parts: Vec<String>,
     semantic_turns: Vec<String>,
     semantic_turn_ranges: Vec<MessageRange>,
     preview_parts: Vec<String>,
@@ -90,6 +92,14 @@ impl Indexer {
                         let Placement::Message(ordinal) = placement else {
                             return;
                         };
+                        if message.parent_tool_use_id.is_none() {
+                            self.own_parts.extend(message.parts.iter().filter_map(
+                                |part| match part {
+                                    Part::Text(text) => authored_text(text),
+                                    _ => None,
+                                },
+                            ));
+                        }
                         // Skill invocations preview as the command line
                         // (e.g. "/consult how to do X?") instead of the tags.
                         let effective_preview = extract_skill_preview(&preview_text)
@@ -181,6 +191,7 @@ impl Indexer {
         let Self {
             all_parts,
             agent_search_parts,
+            own_parts,
             semantic_turns,
             semantic_turn_ranges,
             preview_parts,
@@ -243,6 +254,13 @@ impl Indexer {
             child: matches!(transcript.relationship, Relationship::Child { .. }),
             orphaned: transcript.head == HeadStatus::Orphaned,
         };
+        // A child conversation's prompts come from the conversation that
+        // started it.
+        let own_text = if provenance.child {
+            String::new()
+        } else {
+            normalize_whitespace(&own_parts.join(" "))
+        };
         // Conversations hidden by default are not embedded.
         let (semantic_turns, semantic_turn_ranges): (Vec<_>, Vec<_>) = semantic_turns
             .into_iter()
@@ -275,6 +293,7 @@ impl Indexer {
             preview_first,
             preview_last: preview_last.into(),
             full_text: full_text.into(),
+            own_text: own_text.into(),
             agent_search_text: agent_search_text.into(),
             semantic_route_text: semantic_route_text.into(),
             semantic_turns: semantic_turns.into(),

@@ -8,6 +8,9 @@
 //! base.short  header | ShortRow[] | columns
 //! ```
 //!
+//! Each segment indexes every `Field` of its documents in its own files,
+//! `own-base.*` for `Field::Own`, under the same doc ids.
+//!
 //! A document has one term per word start of its normalized text: the rest
 //! of that space-delimited chunk, cut to `TERM_CAP` bytes on a char
 //! boundary. When the chunk rest fits uncut and the chunk is followed by a
@@ -60,24 +63,48 @@ pub const POST_FILE: &str = "base.post";
 #[cfg(test)]
 pub const SHORT_FILE: &str = "base.short";
 
+/// The text of a conversation an index covers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Field {
+    /// `Conversation::full_text`.
+    Body,
+    /// `Conversation::own_text`.
+    Own,
+}
+
+impl Field {
+    pub const ALL: [Field; 2] = [Field::Body, Field::Own];
+}
+
 /// File stem of index segment `id`: `base` for segment 0, `delta-NNNN` for
-/// the others.
-pub fn segment_stem(id: u32) -> String {
-    if id == 0 {
+/// the others, prefixed with `own-` for `Field::Own`.
+pub fn segment_stem(id: u32, field: Field) -> String {
+    let stem = if id == 0 {
         "base".to_owned()
     } else {
         format!("delta-{id:04}")
+    };
+    match field {
+        Field::Body => stem,
+        Field::Own => format!("own-{stem}"),
     }
 }
 
-/// The three file names of index segment `id`.
-pub fn segment_files(id: u32) -> [String; 3] {
-    let stem = segment_stem(id);
+/// The three file names of `field` in index segment `id`.
+pub fn segment_files(id: u32, field: Field) -> [String; 3] {
+    let stem = segment_stem(id, field);
     [
         format!("{stem}.fst"),
         format!("{stem}.post"),
         format!("{stem}.short"),
     ]
+}
+
+/// Every file of index segment `id`, all fields.
+pub fn all_segment_files(id: u32) -> impl Iterator<Item = String> {
+    Field::ALL
+        .into_iter()
+        .flat_map(move |field| segment_files(id, field))
 }
 
 /// `remap` value of a document that no longer exists.
@@ -340,9 +367,9 @@ pub struct Built {
 }
 
 impl Built {
-    /// Writes the files of index segment `id` into `dir`.
-    pub fn write(&self, dir: &Path, id: u32) -> io::Result<()> {
-        let [fst, post, short] = segment_files(id);
+    /// Writes the `field` files of index segment `id` into `dir`.
+    pub fn write(&self, dir: &Path, id: u32, field: Field) -> io::Result<()> {
+        let [fst, post, short] = segment_files(id, field);
         write_synced(&dir.join(fst), &self.fst)?;
         write_synced(&dir.join(post), &self.post)?;
         write_synced(&dir.join(short), &self.short)
@@ -677,11 +704,11 @@ fn table<T>(len: usize, count: u32) -> Option<Range<usize>> {
 }
 
 impl LexIndex {
-    /// Opens the files of index segment `id` in `dir`, built for `n_docs`
-    /// documents. Returns
-    /// `None` when any file is missing or fails validation.
-    pub fn open(dir: &Path, id: u32, n_docs: u32) -> Option<Self> {
-        let [fst, post, short] = segment_files(id);
+    /// Opens the `field` files of index segment `id` in `dir`, built for
+    /// `n_docs` documents. Returns `None` when any file is missing or fails
+    /// validation.
+    pub fn open(dir: &Path, id: u32, field: Field, n_docs: u32) -> Option<Self> {
+        let [fst, post, short] = segment_files(id, field);
         let fst = map_file(&dir.join(fst))?;
         let post = map_file(&dir.join(post))?;
         let short = map_file(&dir.join(short))?;
@@ -1008,8 +1035,8 @@ mod tests {
         let lowered: Vec<String> = texts.iter().map(|t| normalize_for_search(t)).collect();
         let built = build(lowered.len(), |doc| Cow::Borrowed(&lowered[doc as usize]));
         let dir = tempfile::tempdir().unwrap();
-        built.write(dir.path(), 0).unwrap();
-        let index = LexIndex::open(dir.path(), 0, lowered.len() as u32).unwrap();
+        built.write(dir.path(), 0, Field::Body).unwrap();
+        let index = LexIndex::open(dir.path(), 0, Field::Body, lowered.len() as u32).unwrap();
         (dir, index)
     }
 
@@ -1181,17 +1208,23 @@ mod tests {
     #[test]
     fn open_rejects_corrupt_or_mismatched_files() {
         let (dir, _index) = index_of(&["alpha beta", "gamma"]);
-        assert!(LexIndex::open(dir.path(), 0, 3).is_none(), "doc count");
+        assert!(
+            LexIndex::open(dir.path(), 0, Field::Body, 3).is_none(),
+            "doc count"
+        );
         for file in [FST_FILE, POST_FILE, SHORT_FILE] {
             let path = dir.path().join(file);
             let original = std::fs::read(&path).unwrap();
             let mut bytes = original.clone();
             bytes[0] = b'X';
             std::fs::write(&path, &bytes).unwrap();
-            assert!(LexIndex::open(dir.path(), 0, 2).is_none(), "{file} magic");
+            assert!(
+                LexIndex::open(dir.path(), 0, Field::Body, 2).is_none(),
+                "{file} magic"
+            );
             std::fs::write(&path, &original[..original.len().min(20)]).unwrap();
             assert!(
-                LexIndex::open(dir.path(), 0, 2).is_none(),
+                LexIndex::open(dir.path(), 0, Field::Body, 2).is_none(),
                 "{file} truncated"
             );
             std::fs::write(&path, &original).unwrap();
@@ -1202,7 +1235,7 @@ mod tests {
         bytes[row + 16..row + 24].copy_from_slice(&u64::MAX.to_le_bytes());
         std::fs::write(&short, &bytes).unwrap();
         assert!(
-            LexIndex::open(dir.path(), 0, 2).is_none(),
+            LexIndex::open(dir.path(), 0, Field::Body, 2).is_none(),
             "short row bounds"
         );
     }
@@ -1239,10 +1272,10 @@ mod tests {
         let built_first = build(first.len(), |doc| Cow::Borrowed(&first[doc as usize]));
         let built_second = build(second.len(), |doc| Cow::Borrowed(&second[doc as usize]));
         let dir = tempfile::tempdir().unwrap();
-        built_first.write(dir.path(), 0).unwrap();
-        built_second.write(dir.path(), 3).unwrap();
-        let a = LexIndex::open(dir.path(), 0, first.len() as u32).unwrap();
-        let b = LexIndex::open(dir.path(), 3, second.len() as u32).unwrap();
+        built_first.write(dir.path(), 0, Field::Body).unwrap();
+        built_second.write(dir.path(), 3, Field::Body).unwrap();
+        let a = LexIndex::open(dir.path(), 0, Field::Body, first.len() as u32).unwrap();
+        let b = LexIndex::open(dir.path(), 3, Field::Body, second.len() as u32).unwrap();
 
         // Drop every third doc of the first source and interleave the rest
         // in reverse order.
@@ -1268,13 +1301,13 @@ mod tests {
         }
 
         let merged = merge(&[(&a, &remap_a), (&b, &remap_b)], new_order.len());
-        merged.write(dir.path(), 7).unwrap();
-        let merged = LexIndex::open(dir.path(), 7, new_order.len() as u32).unwrap();
+        merged.write(dir.path(), 7, Field::Body).unwrap();
+        let merged = LexIndex::open(dir.path(), 7, Field::Body, new_order.len() as u32).unwrap();
         let rebuilt = build(new_order.len(), |doc| {
             Cow::Borrowed(new_order[doc as usize])
         });
-        rebuilt.write(dir.path(), 8).unwrap();
-        let rebuilt = LexIndex::open(dir.path(), 8, new_order.len() as u32).unwrap();
+        rebuilt.write(dir.path(), 8, Field::Body).unwrap();
+        let rebuilt = LexIndex::open(dir.path(), 8, Field::Body, new_order.len() as u32).unwrap();
 
         for word in words_of(&texts) {
             assert_eq!(

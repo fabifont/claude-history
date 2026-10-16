@@ -516,6 +516,7 @@ mod tests {
             preview_first: preview.to_string().into(),
             preview_last: preview.to_string().into(),
             full_text: full_text.to_string().into(),
+            own_text: "".into(),
             agent_search_text: "".into(),
             semantic_route_text: "".into(),
             semantic_turns: vec![full_text.to_string()].into(),

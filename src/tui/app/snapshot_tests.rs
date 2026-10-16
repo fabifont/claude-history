@@ -586,6 +586,39 @@ fn hidden_kinds_toggle_in_and_out_of_the_list_and_its_search() {
 }
 
 #[test]
+fn user_only_searches_what_the_person_typed_and_keeps_the_query() {
+    let mut corpus = corpus();
+    corpus[0].full_text = "the walrus assigns, the walrus returns".into();
+    corpus[1].full_text = "how does the walrus work".into();
+    corpus[1].own_text = "how does the walrus work".into();
+    corpus[2].own_text = "nothing relevant".into();
+    let root = publish(&corpus);
+    let mut app = loading_app(None, vec![]);
+    show(&mut app, &root, TimeFilter::default());
+    assert!(app.open_search_index());
+    type_query(&mut app, "walrus");
+    wait_for_search(&mut app);
+    let both = ["/p/-tmp-alpha/a.jsonl", "/p/-tmp-beta/b.jsonl"];
+    assert_eq!(listed_paths(&app), both);
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE, 20);
+
+    let toggle = app.keys().user_only;
+    app.handle_key(toggle.code, toggle.modifiers, 20);
+    wait_for_search(&mut app);
+    assert!(app.user_only());
+    assert_eq!(app.query(), "walrus");
+    assert_eq!(listed_paths(&app), ["/p/-tmp-beta/b.jsonl"]);
+    let evidence = app.lexical_evidence(app.filtered()[0]).unwrap();
+    assert_eq!(evidence.text, "how does the walrus work");
+
+    app.handle_key(toggle.code, toggle.modifiers, 20);
+    wait_for_search(&mut app);
+    assert!(!app.user_only());
+    assert_eq!(listed_paths(&app), both);
+    assert_eq!(app.selected(), Some(1));
+}
+
+#[test]
 fn exclude_paths_hide_cards_by_cwd_in_list_search_and_semantic_scope() {
     use crate::history::model::SourceKind;
     let hidden_uuid = "6dd62dc0-8b64-4f5e-a651-5bd95216478e";

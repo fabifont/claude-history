@@ -147,7 +147,7 @@ fn add_written(outcome: &mut Outcome, publish: Publish, written: Written) {
 
 /// `CURRENT` when it opens with its search files.
 fn open_base(root: &Path) -> Option<Generation> {
-    Generation::open(root).filter(|generation| generation.open_search_files().is_some())
+    Generation::open(root).filter(|generation| generation.has_search_files())
 }
 
 /// A conversation found by the scan.
@@ -451,6 +451,7 @@ mod tests {
     use super::*;
     use crate::history::omp_loader::OmpSessionRoot;
     use crate::history::pi_loader::PiSessionRoot;
+    use crate::store::lexindex::Field;
     use std::fs;
     use std::time::Duration;
 
@@ -540,7 +541,7 @@ mod tests {
 
         fn text_of(&self, path: &Path) -> String {
             let generation = self.current();
-            let (_, text) = generation.open_search_files().unwrap();
+            let (_, text) = generation.open_search_files(Field::Body).unwrap();
             let row = generation
                 .rows()
                 .iter()
@@ -700,7 +701,7 @@ mod tests {
         assert!(fixture.text_of(&a).contains("appended zebra"));
         let generation = fixture.current();
         assert_eq!(generation.segs().len(), 2);
-        let (index, _) = generation.open_search_files().unwrap();
+        let (index, _) = generation.open_search_files(Field::Body).unwrap();
         assert_eq!(
             index
                 .prefix_tf("zebra")
@@ -879,7 +880,7 @@ mod tests {
             .filter(|name| name.starts_with("delta-"))
             .count();
         assert_eq!(files, 0);
-        let (index, _) = generation.open_search_files().unwrap();
+        let (index, _) = generation.open_search_files(Field::Body).unwrap();
         assert_eq!(
             index.prefix_tf("doc1").iter().filter(|&&tf| tf > 0).count(),
             111

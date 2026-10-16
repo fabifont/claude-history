@@ -7,12 +7,15 @@
 //! CURRENT         name of the live generation, e.g. "g000012"
 //! g000012/
 //!   manifest      header | CardRow[] | ProjectRow[] | Fingerprint[] |
-//!                 IndexLoc[] | SemRow[] | IndexSegRow[] | IgnoredRow[] |
-//!                 string heap
+//!                 IndexLoc[] | SemRow[] | OwnRow[] | IndexSegRow[] |
+//!                 IgnoredRow[] | string heap
 //!   text-NNNN.zst conversation text, one zstd frame per card (see `text`)
 //!   sem-NNNN.zst  semantic data, one zstd frame per card (see `semantic`)
+//!   own-NNNN.zst  text the person typed, one zstd frame per card
 //!   base.*        suffix index segment 0 (see `lexindex`)
 //!   delta-NNNN.*  further index segments (see `segments`)
+//!   own-base.*, own-delta-NNNN.*
+//!                 the same segments over the text the person typed
 //! ```
 //!
 //! A generation is built in `gNNN.tmp/`, synced and renamed into place before
@@ -24,10 +27,10 @@
 
 use super::card::{
     BlobRef, CardRow, Fingerprint, Header, IgnoredRow, IndexLoc, IndexSegRow, MAGIC, NO_DURATION,
-    PREVIEW_CAP, ProjectRow, SemRow, StrRef, VERSION, cap_preview, card_flags, project_flags,
-    source_from_u8, source_to_u8,
+    OwnRow, PREVIEW_CAP, ProjectRow, SemRow, StrRef, VERSION, cap_preview, card_flags,
+    project_flags, source_from_u8, source_to_u8,
 };
-use super::lexindex::{self, LexIndex};
+use super::lexindex::{self, Field, LexIndex};
 use super::segments::IndexSet;
 use super::semantic::{self, SemanticDoc};
 use super::text::{self, TextSegments};
@@ -62,6 +65,7 @@ pub struct Generation {
     fingerprints: Range<usize>,
     locs: Range<usize>,
     sems: Range<usize>,
+    owns: Range<usize>,
     segs: Range<usize>,
     ignored: Range<usize>,
     heap: Range<usize>,
@@ -152,11 +156,17 @@ impl Generation {
             std::mem::size_of::<SemRow>(),
             locs.end as u64,
         )?;
+        let owns = section(
+            header.owns_off,
+            u64::from(header.row_count),
+            std::mem::size_of::<OwnRow>(),
+            sems.end as u64,
+        )?;
         let segs = section(
             header.segs_off,
             u64::from(header.seg_count),
             std::mem::size_of::<IndexSegRow>(),
-            sems.end as u64,
+            owns.end as u64,
         )?;
         let ignored = section(
             header.ignored_off,
@@ -175,6 +185,7 @@ impl Generation {
             fingerprints,
             locs,
             sems,
+            owns,
             segs,
             ignored,
             heap,
@@ -191,6 +202,8 @@ impl Generation {
             bytemuck::try_cast_slice(&generation.map[generation.locs.clone()]).ok()?;
         let _: &[SemRow] =
             bytemuck::try_cast_slice(&generation.map[generation.sems.clone()]).ok()?;
+        let _: &[OwnRow] =
+            bytemuck::try_cast_slice(&generation.map[generation.owns.clone()]).ok()?;
         let segs: &[IndexSegRow] =
             bytemuck::try_cast_slice(&generation.map[generation.segs.clone()]).ok()?;
         let ignored: &[IgnoredRow] =
@@ -226,18 +239,34 @@ impl Generation {
         &self.name
     }
 
-    /// Opens this generation's index segments and text segments. `None`
-    /// when any is missing or invalid.
-    pub fn open_search_files(&self) -> Option<(IndexSet, TextSegments)> {
-        let index = IndexSet::open(&self.dir, self.segs(), self.locs())?;
-        let text = TextSegments::open(&self.dir, text::TEXT, self.rows().iter().map(|r| r.text))?;
+    /// Opens this generation's `field` index segments and the text segments
+    /// they index. `None` when any is missing or invalid.
+    pub fn open_search_files(&self, field: Field) -> Option<(IndexSet, TextSegments)> {
+        let index = IndexSet::open(&self.dir, field, self.segs(), self.locs())?;
+        let text = match field {
+            Field::Body => self.open_text_files()?,
+            Field::Own => self.open_own_files()?,
+        };
         Some((index, text))
+    }
+
+    /// Whether the search files of every field open.
+    pub fn has_search_files(&self) -> bool {
+        Field::ALL
+            .into_iter()
+            .all(|field| self.open_search_files(field).is_some())
     }
 
     /// Opens this generation's text segments. `None` when one is missing
     /// or invalid.
     pub fn open_text_files(&self) -> Option<TextSegments> {
         TextSegments::open(&self.dir, text::TEXT, self.rows().iter().map(|r| r.text))
+    }
+
+    /// Opens this generation's own-text segments. `None` when one is
+    /// missing or invalid.
+    pub fn open_own_files(&self) -> Option<TextSegments> {
+        TextSegments::open(&self.dir, text::OWN, self.owns().iter().map(|r| r.blob))
     }
 
     /// Opens this generation's semantic segments. `None` when one is
@@ -263,6 +292,11 @@ impl Generation {
     /// Semantic data location of each card.
     pub fn sems(&self) -> &[SemRow] {
         bytemuck::cast_slice(&self.map[self.sems.clone()])
+    }
+
+    /// Own-text location of each card.
+    pub fn owns(&self) -> &[OwnRow] {
+        bytemuck::cast_slice(&self.map[self.owns.clone()])
     }
 
     pub fn segs(&self) -> &[IndexSegRow] {
@@ -338,6 +372,7 @@ impl Generation {
             preview_first,
             preview_last,
             full_text: empty.clone(),
+            own_text: empty.clone(),
             agent_search_text: empty.clone(),
             semantic_route_text: empty.clone(),
             semantic_turns: Arc::from(Vec::new()),
@@ -467,6 +502,7 @@ pub struct CardData {
     timestamp_ms: i64,
     total_tokens: u64,
     text_hash: u64,
+    own_hash: u64,
     sem_hash: u64,
     path: String,
     session_id: String,
@@ -505,6 +541,7 @@ impl CardData {
             timestamp_ms: conversation.timestamp.timestamp_millis(),
             total_tokens: conversation.total_tokens,
             text_hash: hash64(conversation.full_text.as_bytes()),
+            own_hash: hash64(conversation.own_text.as_bytes()),
             sem_hash,
             path: path_str(&conversation.path).into_owned(),
             session_id: conversation.session_id.clone(),
@@ -544,6 +581,7 @@ impl CardData {
             timestamp_ms: row.timestamp_ms,
             total_tokens: row.total_tokens,
             text_hash: row.text_hash,
+            own_hash: generation.owns()[index].hash,
             sem_hash: generation.sems()[index].hash,
             path: str(row.path),
             session_id: str(row.session_id),
@@ -561,11 +599,12 @@ impl CardData {
     }
 }
 
-/// A card with where its text, semantic data and index doc live.
+/// A card with where its text, own text, semantic data and index doc live.
 struct Entry {
     card: CardData,
     fingerprint: Fingerprint,
     text: BlobRef,
+    own: BlobRef,
     sem: BlobRef,
     loc: IndexLoc,
 }
@@ -667,6 +706,13 @@ fn build_manifest(
             hash: entry.card.sem_hash,
         })
         .collect();
+    let owns: Vec<OwnRow> = entries
+        .iter()
+        .map(|entry| OwnRow {
+            blob: entry.own,
+            hash: entry.card.own_hash,
+        })
+        .collect();
     let ignored: Vec<IgnoredRow> = ignored
         .iter()
         .map(|(path, fingerprint)| IgnoredRow {
@@ -681,7 +727,8 @@ fn build_manifest(
     let fingerprints_off = align(projects_off + std::mem::size_of_val(projects.as_slice()));
     let locs_off = align(fingerprints_off + std::mem::size_of_val(fingerprints.as_slice()));
     let sems_off = align(locs_off + std::mem::size_of_val(locs.as_slice()));
-    let segs_off = align(sems_off + std::mem::size_of_val(sems.as_slice()));
+    let owns_off = align(sems_off + std::mem::size_of_val(sems.as_slice()));
+    let segs_off = align(owns_off + std::mem::size_of_val(owns.as_slice()));
     let ignored_off = align(segs_off + std::mem::size_of_val(segs));
     let heap_off = align(ignored_off + std::mem::size_of_val(ignored.as_slice()));
     let header = Header {
@@ -695,6 +742,7 @@ fn build_manifest(
         fingerprints_off: fingerprints_off as u64,
         locs_off: locs_off as u64,
         sems_off: sems_off as u64,
+        owns_off: owns_off as u64,
         segs_off: segs_off as u64,
         ignored_off: ignored_off as u64,
         heap_off: heap_off as u64,
@@ -714,6 +762,8 @@ fn build_manifest(
     out.extend_from_slice(bytemuck::cast_slice(&locs));
     out.resize(sems_off, 0);
     out.extend_from_slice(bytemuck::cast_slice(&sems));
+    out.resize(owns_off, 0);
+    out.extend_from_slice(bytemuck::cast_slice(&owns));
     out.resize(segs_off, 0);
     out.extend_from_slice(bytemuck::cast_slice(segs));
     out.resize(ignored_off, 0);
@@ -809,8 +859,8 @@ pub struct Written {
 /// Publishes `update` as a new generation under the lock's root. New
 /// conversations identical to a base card keep that card. When nothing
 /// differs from `base`, nothing is written. Otherwise the new conversations'
-/// text goes into one new text segment, their semantic data into one new
-/// semantic segment and their index into one new index segment; unchanged
+/// text, own text and semantic data each go into one new segment of their
+/// kind and their index, every field, into one new index segment; unchanged
 /// segments of `base` are linked, not copied.
 pub fn publish_update(lock: &PublishLock, update: Update) -> io::Result<(Publish, Written)> {
     let Update {
@@ -875,22 +925,29 @@ pub fn publish_update(lock: &PublishLock, update: Update) -> io::Result<(Publish
     let mut segs: Vec<IndexSegRow> = Vec::new();
     let mut text_segs: BTreeSet<u32> = BTreeSet::new();
     let mut sem_segs: BTreeSet<u32> = BTreeSet::new();
+    let mut own_segs: BTreeSet<u32> = BTreeSet::new();
     if let Some(base) = base {
         let locs = base.locs();
         let sems = base.sems();
+        let owns = base.owns();
         for &(row, fingerprint) in &kept {
             let card = &base_rows[row as usize];
             let sem = sems[row as usize].blob;
+            let own = owns[row as usize].blob;
             if card.text.len > 0 {
                 text_segs.insert(card.text.seg);
             }
             if sem.len > 0 {
                 sem_segs.insert(sem.seg);
             }
+            if own.len > 0 {
+                own_segs.insert(own.seg);
+            }
             entries.push(Entry {
                 card: CardData::from_row(base, row as usize),
                 fingerprint,
                 text: card.text,
+                own,
                 sem,
                 loc: locs[row as usize],
             });
@@ -910,8 +967,11 @@ pub fn publish_update(lock: &PublishLock, update: Update) -> io::Result<(Publish
         for &seg in &sem_segs {
             staged.link(&base.dir, &text::kind_file(text::SEM, seg))?;
         }
+        for &seg in &own_segs {
+            staged.link(&base.dir, &text::kind_file(text::OWN, seg))?;
+        }
         for seg in &segs {
-            for file in lexindex::segment_files(seg.id) {
+            for file in lexindex::all_segment_files(seg.id) {
                 staged.link(&base.dir, &file)?;
             }
         }
@@ -937,24 +997,45 @@ pub fn publish_update(lock: &PublishLock, update: Update) -> io::Result<(Publish
         } else {
             vec![BlobRef::default(); added.len()]
         };
-        let built = lexindex::build(texts.len(), |doc| {
-            Cow::Owned(normalize_for_search(texts[doc as usize]))
-        });
-        built.write(&staged.dir, index_seg)?;
-        written.bytes += built.disk_bytes();
+        let owns: Vec<&str> = added
+            .iter()
+            .map(|(_, _, conversation, _)| &*conversation.own_text)
+            .collect();
+        let own_refs = if owns.iter().any(|own| !own.is_empty()) {
+            let own_seg = own_segs.last().map_or(0, |seg| seg + 1);
+            let path = staged.dir.join(text::kind_file(text::OWN, own_seg));
+            let refs = text::write_segment(&path, own_seg, &owns)?;
+            written.bytes += fs::metadata(&path)?.len();
+            refs
+        } else {
+            vec![BlobRef::default(); added.len()]
+        };
+        for (field, texts) in [(Field::Body, &texts), (Field::Own, &owns)] {
+            let built = lexindex::build(texts.len(), |doc| {
+                Cow::Owned(normalize_for_search(texts[doc as usize]))
+            });
+            built.write(&staged.dir, index_seg, field)?;
+            written.bytes += built.disk_bytes();
+        }
         written.docs = added.len();
         drop(texts);
+        drop(owns);
         segs.push(IndexSegRow {
             id: index_seg,
             n_docs: added.len() as u32,
         });
-        for (doc, (((card, fingerprint, _, _), text), sem)) in
-            added.into_iter().zip(refs).zip(sem_refs).enumerate()
+        for (doc, ((((card, fingerprint, _, _), text), own), sem)) in added
+            .into_iter()
+            .zip(refs)
+            .zip(own_refs)
+            .zip(sem_refs)
+            .enumerate()
         {
             entries.push(Entry {
                 card,
                 fingerprint,
                 text,
+                own,
                 sem,
                 loc: IndexLoc {
                     seg: index_seg,
@@ -998,9 +1079,9 @@ impl MergePolicy {
 
 /// Merges index segments of `base` (which must be `CURRENT` with its search
 /// files) as `policy` asks: everything into a new base, or all deltas into
-/// one delta. Text and semantic segments with too much dead data are
-/// rewritten by copying the live frames. Postings are merged as they are,
-/// without reading text.
+/// one delta, every field alike. Text, own-text and semantic segments with
+/// too much dead data are rewritten by copying the live frames. Postings are
+/// merged as they are, without reading text.
 /// Writes nothing when no threshold is crossed.
 pub fn compact(
     lock: &PublishLock,
@@ -1027,12 +1108,22 @@ pub fn compact(
 
     let text_refs: Vec<BlobRef> = rows.iter().map(|row| row.text).collect();
     let sem_refs: Vec<BlobRef> = base.sems().iter().map(|row| row.blob).collect();
+    let own_refs: Vec<BlobRef> = base.owns().iter().map(|row| row.blob).collect();
     let rewrite_text = garbage_segments(&base.dir, text::TEXT, &text_refs, policy, full);
     let rewrite_sem = garbage_segments(&base.dir, text::SEM, &sem_refs, policy, full);
-    if !full && !merge_deltas && rewrite_text.is_empty() && rewrite_sem.is_empty() {
+    let rewrite_own = garbage_segments(&base.dir, text::OWN, &own_refs, policy, full);
+    if !full
+        && !merge_deltas
+        && rewrite_text.is_empty()
+        && rewrite_sem.is_empty()
+        && rewrite_own.is_empty()
+    {
         return Ok((Publish::Unchanged, Written::default()));
     }
-    let Some((index, text)) = base.open_search_files() else {
+    let (Some((index, text)), Some((own_index, own))) = (
+        base.open_search_files(Field::Body),
+        base.open_search_files(Field::Own),
+    ) else {
         return Err(io::Error::other("generation has no usable search files"));
     };
     let Some(sem) = base.open_semantic_files() else {
@@ -1043,7 +1134,7 @@ pub fn compact(
     let mut written = Written::default();
     let mut new_locs: Vec<IndexLoc> = locs.to_vec();
     let mut new_segs: Vec<IndexSegRow> = Vec::new();
-    let sources = index.sources();
+    let sources = [index.sources(), own_index.sources()];
     let merged: Vec<usize> = if full {
         (0..segs.len()).collect()
     } else if merge_deltas {
@@ -1070,7 +1161,7 @@ pub fn compact(
         let remaps: Vec<Vec<u32>> = merged
             .iter()
             .map(|&at| {
-                sources[at]
+                sources[0][at]
                     .1
                     .iter()
                     .map(|&row| {
@@ -1083,18 +1174,21 @@ pub fn compact(
                     .collect()
             })
             .collect();
-        let inputs: Vec<(&LexIndex, &[u32])> = merged
-            .iter()
-            .zip(&remaps)
-            .map(|(&at, remap)| (sources[at].0, remap.as_slice()))
-            .collect();
-        let built = lexindex::merge(&inputs, next as usize);
-        built.write(&staged.dir, id)?;
-        written.bytes += built.disk_bytes();
+        // Every field's segments hold the same docs, so one remap serves all.
+        for (field, sources) in Field::ALL.into_iter().zip(&sources) {
+            let inputs: Vec<(&LexIndex, &[u32])> = merged
+                .iter()
+                .zip(&remaps)
+                .map(|(&at, remap)| (sources[at].0, remap.as_slice()))
+                .collect();
+            let built = lexindex::merge(&inputs, next as usize);
+            built.write(&staged.dir, id, field)?;
+            written.bytes += built.disk_bytes();
+        }
         written.docs = next as usize;
         for (at, seg) in segs.iter().enumerate() {
             if !merged.contains(&at) && live[at] > 0 {
-                for file in lexindex::segment_files(seg.id) {
+                for file in lexindex::all_segment_files(seg.id) {
                     staged.link(&base.dir, &file)?;
                 }
                 new_segs.push(*seg);
@@ -1105,7 +1199,7 @@ pub fn compact(
     } else {
         for (at, seg) in segs.iter().enumerate() {
             if live[at] > 0 {
-                for file in lexindex::segment_files(seg.id) {
+                for file in lexindex::all_segment_files(seg.id) {
                     staged.link(&base.dir, &file)?;
                 }
                 new_segs.push(*seg);
@@ -1132,12 +1226,23 @@ pub fn compact(
         &mut written,
     )?;
 
+    let new_own = carry_segments(
+        &staged,
+        &base.dir,
+        text::OWN,
+        &own,
+        &own_refs,
+        &rewrite_own,
+        &mut written,
+    )?;
+
     let fingerprints = base.fingerprints();
     let mut entries: Vec<Entry> = (0..rows.len())
         .map(|row| Entry {
             card: CardData::from_row(base, row),
             fingerprint: fingerprints[row],
             text: new_text[row],
+            own: new_own[row],
             sem: new_sem[row],
             loc: new_locs[row],
         })
@@ -1287,7 +1392,7 @@ pub fn publish_all(
     lock: &PublishLock,
     conversations: &[Conversation],
 ) -> io::Result<(Publish, Written)> {
-    let base = Generation::open(&lock.root).filter(|base| base.open_search_files().is_some());
+    let base = Generation::open(&lock.root).filter(|base| base.has_search_files());
     publish_update(
         lock,
         Update {
@@ -1452,7 +1557,7 @@ mod tests {
         conversations[1].full_text = "".into();
         publish_sample(dir.path(), &conversations);
         let generation = Generation::open(dir.path()).unwrap();
-        let (index, text) = generation.open_search_files().unwrap();
+        let (index, text) = generation.open_search_files(Field::Body).unwrap();
         let rows = generation.rows();
         assert_eq!(text.read(rows[0].text).as_deref(), Some(""));
         assert_eq!(
@@ -1638,7 +1743,7 @@ mod tests {
     }
 
     fn texts_of(generation: &Generation) -> Vec<String> {
-        let (_, text) = generation.open_search_files().unwrap();
+        let (_, text) = generation.open_search_files(Field::Body).unwrap();
         generation
             .rows()
             .iter()
@@ -1649,16 +1754,17 @@ mod tests {
     /// Every card's tf for `word`, checked against an index built from
     /// scratch over the same texts.
     fn assert_index_matches_text(generation: &Generation, words: &[&str]) {
-        let (index, _) = generation.open_search_files().unwrap();
+        let (index, _) = generation.open_search_files(Field::Body).unwrap();
         let lowered: Vec<String> = texts_of(generation)
             .iter()
             .map(|text| normalize_for_search(text))
             .collect();
         let dir = tempfile::tempdir().unwrap();
         lexindex::build(lowered.len(), |doc| Cow::Borrowed(&lowered[doc as usize]))
-            .write(dir.path(), 0)
+            .write(dir.path(), 0, lexindex::Field::Body)
             .unwrap();
-        let fresh = LexIndex::open(dir.path(), 0, lowered.len() as u32).unwrap();
+        let fresh =
+            LexIndex::open(dir.path(), 0, lexindex::Field::Body, lowered.len() as u32).unwrap();
         for word in words {
             assert_eq!(index.prefix_tf(word), fresh.prefix_tf(word), "{word:?}");
             assert_eq!(index.inner_tf(word), fresh.inner_tf(word), "{word:?}");

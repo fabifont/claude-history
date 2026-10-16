@@ -28,6 +28,7 @@ pub fn one_message_conversation(
         preview_first: text.to_string().into(),
         preview_last: text.to_string().into(),
         full_text: full_text.clone().into(),
+        own_text: "".into(),
         agent_search_text: "".into(),
         semantic_route_text: "".into(),
         semantic_turns: vec![text.to_string()].into(),

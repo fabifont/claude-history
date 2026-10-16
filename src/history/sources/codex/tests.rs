@@ -223,6 +223,10 @@ fn legacy_rollouts_decode_event_messages_and_function_calls() {
     assert!(conversation.full_text.contains("zebra-stripes.txt"));
     assert!(!conversation.full_text.contains("legacy injected context"));
     assert_eq!(
+        conversation.own_text.as_ref(),
+        "How do I list the zebra files?"
+    );
+    assert_eq!(
         conversation.preview_first.as_ref(),
         "How do I list the zebra files? ... Run `ls zebra` to see zebra-stripes.txt."
     );
@@ -270,6 +274,10 @@ fn paginated_rollouts_decode_turn_items_and_custom_tools() {
     assert_eq!(conversation.total_tokens, 7000 + 160);
     assert!(conversation.full_text.starts_with("Named in Codex "));
     assert!(conversation.full_text.contains("walrus ok"));
+    assert_eq!(
+        conversation.own_text.as_ref(),
+        "Explain the walrus operator Now show a narwhal example"
+    );
 }
 
 #[test]
@@ -286,6 +294,8 @@ fn forks_inherit_the_base_prefix_and_reverts_keep_their_own() {
     assert!(mentions(&fork, Visibility::Dialogue, "ocelot"));
     let conversation = index::index(&fork).unwrap();
     assert!(!conversation.full_text.contains("walrus"));
+    assert!(!conversation.own_text.contains("walrus"));
+    assert!(conversation.own_text.contains("ocelot"));
     // Only the fork's own usage, beyond the base's cumulative count.
     assert_eq!(conversation.total_tokens, (4000 + 140) - (3000 + 100));
 
@@ -356,6 +366,8 @@ fn exec_runs_are_automated_and_subagents_children() {
     let conversation = index::index(&sub).unwrap();
     assert!(conversation.provenance.child && conversation.provenance.hidden_by_default());
     assert!(conversation.semantic_turns.is_empty());
+    // The parent wrote the subagent's prompt.
+    assert_eq!(conversation.own_text.as_ref(), "");
 
     let archived = adapter.resolve(ARCH, far_future()).unwrap();
     assert!(adapter.thread_of(&archived).unwrap().archived);

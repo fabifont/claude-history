@@ -7,7 +7,7 @@
 //! at are dead and skipped.
 
 use super::card::{IndexLoc, IndexSegRow};
-use super::lexindex::{DEAD, LexIndex};
+use super::lexindex::{DEAD, Field, LexIndex};
 use std::path::Path;
 
 pub struct IndexSet {
@@ -32,10 +32,10 @@ impl IndexSet {
         }
     }
 
-    /// Opens the segments `segs` in `dir` for cards located at `locs`.
-    /// `None` when a segment is missing or invalid, or a card points outside
-    /// the segments.
-    pub fn open(dir: &Path, segs: &[IndexSegRow], locs: &[IndexLoc]) -> Option<Self> {
+    /// Opens the `field` files of the segments `segs` in `dir` for cards
+    /// located at `locs`. `None` when a segment is missing or invalid, or a
+    /// card points outside the segments.
+    pub fn open(dir: &Path, field: Field, segs: &[IndexSegRow], locs: &[IndexLoc]) -> Option<Self> {
         let n_docs = u32::try_from(locs.len()).ok()?;
         let mut remaps: Vec<Vec<u32>> = segs
             .iter()
@@ -53,7 +53,7 @@ impl IndexSet {
             .iter()
             .zip(remaps)
             .map(|(seg, remap)| {
-                let index = LexIndex::open(dir, seg.id, seg.n_docs)?;
+                let index = LexIndex::open(dir, seg.id, field, seg.n_docs)?;
                 let identity = segs.len() == 1
                     && remap.len() == n_docs as usize
                     && remap

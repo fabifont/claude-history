@@ -247,6 +247,7 @@ JSONL files and their matching session artifact directories.
 | `Ctrl+X`                | Delete conversation              |
 | `Ctrl+L`                | Refresh sessions                 |
 | `Ctrl+G`                | Show / hide exec and subagents   |
+| `Ctrl+V`                | Search only your own messages    |
 | `Tab`                   | Toggle all / workspace scope     |
 | `Ctrl+T`                | Toggle lexical / semantic search |
 | `?`                     | Show keyboard shortcuts          |
@@ -343,6 +344,21 @@ it as transcript text instead.
 Results are ranked by relevance using field-aware scoring: matches in the
 title, project name, and summary are weighted higher than body text. Within
 equally relevant results, recent conversations rank first.
+
+#### Search only your own messages
+
+Press `Ctrl+V` in the list to match only what you typed: the status bar shows
+`^V·you only`, and a conversation is found only when every word and every
+quoted phrase of the query occurs in your own messages. Assistant replies, tool
+calls and results, injected context such as system reminders and hook output,
+history a Codex thread inherits from the thread it forked, and prompts that
+another conversation wrote for a subagent don't count, and neither do the
+title, summary or project name. Snippets come from your own messages too.
+Pressing `Ctrl+V` again searches everything; the query and selection stay
+either way.
+
+Semantic search ranks whole conversations, so it ignores the toggle and the
+status bar says `you only: not in semantic`.
 
 ### Time filtering
 
@@ -706,7 +722,8 @@ pager = true
 # Example: default_args = ["--yolo"]
 
 [keys]
-# Customize keybindings (default: ctrl+r, ctrl+f, f2, ctrl+x, ctrl+l, ctrl+g)
+# Customize keybindings (default: ctrl+r, ctrl+f, f2, ctrl+x, ctrl+l, ctrl+g,
+# ctrl+v)
 # Supports ctrl+<key>, alt+<key>, single-character keys, and f1-f12
 # rename = "alt+r"
 # fork = "alt+f"
@@ -766,6 +783,7 @@ Customize the keybindings for list actions. Values are key combinations like
 - `refresh` (string): Refresh sessions from disk (default: `"ctrl+l"`)
 - `all_kinds` (string): Show or hide automated (Codex exec) and subagent
   conversations (default: `"ctrl+g"`)
+- `user_only` (string): Search only your own messages (default: `"ctrl+v"`)
 
 #### Search options
 

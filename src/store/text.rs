@@ -5,7 +5,8 @@
 //! are written whole and never modified, so a later generation can link an
 //! unchanged segment instead of rewriting it and add new segments beside it;
 //! collection still only unlinks whole directories. Semantic data (see
-//! `semantic`) is stored the same way in `sem-NNNN.zst`.
+//! `semantic`) is stored the same way in `sem-NNNN.zst`, and the text the
+//! person typed (`Conversation::own_text`) in `own-NNNN.zst`.
 
 use super::card::BlobRef;
 use rayon::prelude::*;
@@ -26,6 +27,8 @@ const MAX_TEXT: u64 = 1 << 32;
 pub const TEXT: &str = "text";
 /// File name prefix of semantic data segments.
 pub const SEM: &str = "sem";
+/// File name prefix of own-text segments.
+pub const OWN: &str = "own";
 
 pub fn segment_file(seg: u32) -> String {
     kind_file(TEXT, seg)
@@ -35,7 +38,7 @@ pub fn segment_path(dir: &Path, seg: u32) -> PathBuf {
     dir.join(segment_file(seg))
 }
 
-/// Segment `seg` of the segments named `kind` (`TEXT` or `SEM`).
+/// Segment `seg` of the segments named `kind` (`TEXT`, `SEM` or `OWN`).
 pub fn kind_file(kind: &str, seg: u32) -> String {
     format!("{kind}-{seg:04}.zst")
 }

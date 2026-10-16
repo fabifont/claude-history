@@ -331,6 +331,7 @@ pub struct KeysConfig {
     pub delete: Option<KeyBinding>,
     pub refresh: Option<KeyBinding>,
     pub all_kinds: Option<KeyBinding>,
+    pub user_only: Option<KeyBinding>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -433,6 +434,8 @@ pub struct KeyBindings {
     pub refresh: KeyBinding,
     /// Lists or hides automated and child conversations
     pub all_kinds: KeyBinding,
+    /// Searches only the user's own messages, or everything
+    pub user_only: KeyBinding,
 }
 
 impl Default for KeyBindings {
@@ -462,6 +465,10 @@ impl Default for KeyBindings {
                 code: KeyCode::Char('g'),
                 modifiers: KeyModifiers::CONTROL,
             },
+            user_only: KeyBinding {
+                code: KeyCode::Char('v'),
+                modifiers: KeyModifiers::CONTROL,
+            },
         }
     }
 }
@@ -478,6 +485,7 @@ impl KeyBindings {
                 delete: cfg.delete.unwrap_or(defaults.delete),
                 refresh: cfg.refresh.unwrap_or(defaults.refresh),
                 all_kinds: cfg.all_kinds.unwrap_or(defaults.all_kinds),
+                user_only: cfg.user_only.unwrap_or(defaults.user_only),
             },
         }
     }

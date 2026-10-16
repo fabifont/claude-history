@@ -117,6 +117,8 @@ pub struct App {
     workspace_filter: bool,
     /// Whether automated and child conversations are listed
     all_kinds: bool,
+    /// Whether lexical search matches only the text the person typed
+    user_only: bool,
     /// The encoded project directory name for the current workspace (for filtering)
     current_project_dir_name: Option<String>,
     /// Exact project names hidden from list-mode display
@@ -199,6 +201,7 @@ impl App {
             keys: parts.keys,
             workspace_filter: parts.workspace_filter,
             all_kinds: parts.all_kinds,
+            user_only: false,
             current_project_dir_name: parts.current_project_dir_name,
             excluded_projects: parts.excluded_projects,
             excluded_paths: parts.excluded_paths,
@@ -703,10 +706,16 @@ impl App {
             if doc == NO_DOC {
                 continue;
             }
-            let text = index.text(doc);
-            if let Some(evidence) =
-                search::build_lexical_evidence(&text, &self.conversations[row].preview, &parsed)
-            {
+            let evidence = if self.searches_user_only() {
+                search::build_lexical_evidence(&index.own_text(doc), "", &parsed)
+            } else {
+                search::build_lexical_evidence(
+                    &index.text(doc),
+                    &self.conversations[row].preview,
+                    &parsed,
+                )
+            };
+            if let Some(evidence) = evidence {
                 self.lexical_evidence.insert(row, evidence);
             }
         }

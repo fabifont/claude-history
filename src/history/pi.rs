@@ -995,6 +995,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(conversation.full_text.contains("visible hook"));
+        // Hook messages and tool results are not the person's own text.
+        assert_eq!(conversation.own_text.as_ref(), "question");
         assert_eq!(conversation.total_tokens, 77);
         let projection = parse_reader(std::io::Cursor::new(content), None)
             .unwrap()

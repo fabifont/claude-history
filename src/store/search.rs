@@ -106,6 +106,27 @@ impl SearchDocs {
         Self { docs, projects }
     }
 
+    /// The same documents without title, summary or project, so that only
+    /// the indexed text matches and scores.
+    pub fn without_fields(&self) -> Self {
+        Self {
+            docs: self
+                .docs
+                .iter()
+                .map(|doc| DocFields {
+                    title_lower: String::new(),
+                    summary_lower: String::new(),
+                    project: 0,
+                    timestamp_ms: doc.timestamp_ms,
+                })
+                .collect(),
+            projects: vec![ProjectFields {
+                name: None,
+                lower: String::new(),
+            }],
+        }
+    }
+
     fn project(&self, doc: u32) -> &ProjectFields {
         &self.projects[self.docs[doc as usize].project as usize]
     }
@@ -774,7 +795,9 @@ pub(crate) mod oracle {
 
     use super::*;
     use crate::history::Conversation;
-    use crate::search::{SearchableConversation, debug_search, precompute_search_text};
+    use crate::search::{
+        SearchableConversation, debug_search, precompute_search_text, user_only_view,
+    };
     use crate::store::card::BlobRef;
     use crate::store::lexindex;
     use crate::store::text::{self, TextSegments};
@@ -834,10 +857,16 @@ pub(crate) mod oracle {
                 Cow::Owned(normalize_for_search(&conversations[doc as usize].full_text))
             });
             let dir = tempfile::tempdir().unwrap();
-            built.write(dir.path(), 0).unwrap();
+            built.write(dir.path(), 0, lexindex::Field::Body).unwrap();
             let build_time = started.elapsed();
             let index = IndexSet::single(
-                lexindex::LexIndex::open(dir.path(), 0, conversations.len() as u32).unwrap(),
+                lexindex::LexIndex::open(
+                    dir.path(),
+                    0,
+                    lexindex::Field::Body,
+                    conversations.len() as u32,
+                )
+                .unwrap(),
             );
             let texts: Vec<&str> = conversations.iter().map(|c| &*c.full_text).collect();
             let refs = text::write_segment(&text::segment_path(dir.path(), 0), 0, &texts).unwrap();
@@ -853,6 +882,12 @@ pub(crate) mod oracle {
                 conversations,
                 _dir: dir,
             }
+        }
+
+        /// The corpus searched in user-only mode: `user_only_view` of
+        /// `conversations`, whose doc ids are the same.
+        pub(crate) fn user_only(conversations: Vec<Conversation>) -> Self {
+            Self::new(user_only_view(&into_doc_order(conversations)))
         }
 
         pub(crate) fn expected(&self, query: &str, now: DateTime<Local>) -> Vec<Hit> {
@@ -1333,14 +1368,23 @@ mod tests {
 
     fn generated_corpus(seed: u64, docs: usize) -> (Vec<Conversation>, DateTime<Local>) {
         let mut rng = Rng(seed);
+        // Separate, so own text leaves the rest of the corpus as it was.
+        let mut own_rng = Rng(seed ^ 0x5555);
         let now = Local.timestamp_opt(1_760_000_000, 0).unwrap();
         let conversations = (0..docs)
             .map(|i| {
                 let len = rng.below(120);
                 let mut text = String::new();
+                let mut own = String::new();
                 for _ in 0..len {
-                    text.push_str(rng.pick(VOCAB));
-                    text.push_str(rng.pick(SEPARATORS));
+                    let word = rng.pick(VOCAB);
+                    let separator = rng.pick(SEPARATORS);
+                    text.push_str(word);
+                    text.push_str(separator);
+                    if own_rng.below(3) == 0 {
+                        own.push_str(word);
+                        own.push_str(separator);
+                    }
                 }
                 let project = rng.pick(PROJECTS);
                 let project = (rng.below(5) > 0).then_some(project);
@@ -1350,14 +1394,16 @@ mod tests {
                     (rng.below(6) == 0).then(|| format!("{} {}", rng.pick(VOCAB), rng.pick(VOCAB)));
                 // Coarse timestamps, so some tie.
                 let age = Duration::hours(rng.below(24 * 30) as i64 / 6 * 6);
-                conv(
+                let mut conversation = conv(
                     &text,
                     project,
                     title.as_deref(),
                     summary.as_deref(),
                     now - age,
                     &format!("/{i:04}"),
-                )
+                );
+                conversation.own_text = own.into();
+                conversation
             })
             .collect();
         (conversations, now)
@@ -1456,18 +1502,20 @@ mod tests {
     fn generated_corpora_match_in_memory_search() {
         for seed in [1, 2, 3, 0x9e37_79b9_7f4a_7c15] {
             let (conversations, now) = generated_corpus(seed, 300);
+            let own = Corpus::user_only(conversations.clone());
             let corpus = Corpus::new(conversations);
             assert!(corpus.build.parts > 1);
             for query in generated_queries(seed) {
                 for page in [1, 20] {
                     corpus.check(&query, now, page);
+                    own.check(&query, now, page);
                 }
             }
         }
     }
 
     /// Asserts that searching the generation `CURRENT` names under `root`
-    /// returns the in-memory results over `conversations`.
+    /// returns the in-memory results over `conversations`, in both modes.
     fn check_generation(
         root: &std::path::Path,
         conversations: &[Conversation],
@@ -1475,14 +1523,17 @@ mod tests {
         now: DateTime<Local>,
     ) {
         let corpus = Corpus::new(conversations.to_vec());
+        let own = Corpus::user_only(conversations.to_vec());
         let snapshot =
             crate::store::Snapshot::open(root, false, crate::time_filter::TimeFilter::default())
                 .unwrap();
         let index = crate::store::SearchIndex::open(snapshot).unwrap();
         for query in queries {
-            let mut ranking = index.search(query, now, &|_| true);
-            let all = ranking.complete().to_vec();
-            super::oracle::assert_same_hits(query, &all, &corpus.expected(query, now));
+            for (user_only, corpus) in [(false, &corpus), (true, &own)] {
+                let mut ranking = index.search(query, now, &|_| true, user_only);
+                let all = ranking.complete().to_vec();
+                super::oracle::assert_same_hits(query, &all, &corpus.expected(query, now));
+            }
         }
     }
 
@@ -1507,6 +1558,10 @@ mod tests {
                 for conversation in live.iter_mut().skip(round).step_by(17) {
                     conversation.full_text =
                         format!("{} {}", conversation.full_text, VOCAB[round]).into();
+                }
+                for conversation in live.iter_mut().skip(round).step_by(23) {
+                    conversation.own_text =
+                        format!("{} {}", conversation.own_text, VOCAB[round + 1]).into();
                 }
                 let removed = (round * 37) % live.len();
                 live.remove(removed);
@@ -1659,13 +1714,24 @@ mod tests {
     #[ignore]
     fn real_corpus_oracle() {
         let corpus = real_corpus();
+        let own = Corpus::user_only(corpus.conversations.clone());
+        let own_bytes: usize = own.conversations.iter().map(|c| c.full_text.len()).sum();
+        let stats = &own.build;
+        eprintln!(
+            "own text {:.1} MB, index {:.1} MB, own-0000.zst {:.1} MB",
+            own_bytes as f64 / 1e6,
+            (stats.fst_bytes + stats.post_bytes + stats.short_bytes) as f64 / 1e6,
+            own.frames.segments.disk_bytes() as f64 / 1e6
+        );
         let now = Local::now();
-        for query in REAL_QUERIES {
-            let stats = corpus.check(query, now, 50);
-            eprintln!(
-                "ok {query:?}: {} candidates, {} texts read",
-                stats.candidates, stats.texts_read
-            );
+        for (mode, corpus) in [("all", &corpus), ("own", &own)] {
+            for query in REAL_QUERIES {
+                let stats = corpus.check(query, now, 50);
+                eprintln!(
+                    "ok {mode} {query:?}: {} candidates, {} texts read",
+                    stats.candidates, stats.texts_read
+                );
+            }
         }
     }
 
@@ -1722,10 +1788,17 @@ mod tests {
     #[test]
     #[ignore]
     fn real_corpus_query_latency() {
-        const PAGE: usize = 50;
-        const RUNS: usize = 5;
         let corpus = real_corpus();
         let now = Local::now();
+        report_query_latency("all", &corpus, now);
+        let own = Corpus::user_only(corpus.conversations.clone());
+        report_query_latency("own", &own, now);
+    }
+
+    /// Times `REAL_QUERIES` over `corpus` and prints them labeled `mode`.
+    fn report_query_latency(mode: &str, corpus: &Corpus, now: DateTime<Local>) {
+        const PAGE: usize = 50;
+        const RUNS: usize = 5;
         let median = |mut samples: Vec<f64>| {
             samples.sort_by(f64::total_cmp);
             samples[samples.len() / 2]
@@ -1775,7 +1848,7 @@ mod tests {
                     .collect(),
             );
             eprintln!(
-                "{query:?}: {hits} hits, {} candidates | page {page:.2} ms, {} reads \
+                "{mode} {query:?}: {hits} hits, {} candidates | page {page:.2} ms, {} reads \
                  ({:.1} MB) | complete {complete:.2} ms, {} reads ({:.1} MB) | in-memory \
                  {scan:.1} ms",
                 page_stats.candidates,
@@ -1799,7 +1872,7 @@ mod tests {
         ] {
             values.sort_by(f64::total_cmp);
             eprintln!(
-                "{name}: p50 {:.2} p95 {:.2} max {:.2}",
+                "{mode} {name}: p50 {:.2} p95 {:.2} max {:.2}",
                 percentile(&values, 0.5),
                 percentile(&values, 0.95),
                 values[values.len() - 1]

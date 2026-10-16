@@ -70,6 +70,11 @@ pub struct Conversation {
     /// Preview showing last 3 messages (used when show_last=true)
     pub preview_last: Arc<str>,
     pub full_text: Arc<str>,
+    /// What the person typed: the authored text parts of top-level user
+    /// messages (see `messages::authored_text`), without tool results,
+    /// injected or inherited records, or subagent prompts. Empty for a child
+    /// conversation, whose prompts another conversation wrote.
+    pub own_text: Arc<str>,
     pub agent_search_text: Arc<str>,
     pub semantic_route_text: Arc<str>,
     pub semantic_turns: Arc<[String]>,
