@@ -174,7 +174,8 @@ impl AgentService {
         let mut conversations =
             crate::store::load_conversations(false, None, crate::store::Contents::Full)?;
         conversations.retain(|conversation| {
-            !project_is_excluded(&conversation.path, &agent_config.exclude_projects)
+            !conversation.provenance.hidden_by_default()
+                && !project_is_excluded(&conversation.path, &agent_config.exclude_projects)
                 && time.matches(conversation.timestamp)
         });
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
@@ -214,7 +215,7 @@ impl AgentService {
             request.tui_semantic_search,
         );
         let (mut keys, mut base_warnings) =
-            discover_agent_keys(current_project_dir_name.as_deref())?;
+            discover_agent_keys(current_project_dir_name.as_deref(), Some(&conversations))?;
         keys.retain(|key| !project_is_excluded(&key.path, &agent_config.exclude_projects));
         if time.is_active() {
             // Key discovery walks the projects directory independently, so
@@ -347,7 +348,7 @@ impl AgentService {
         let config = config::load_config()?;
         let search_config = config.search.unwrap_or_default();
         let agent_config = config.agent.unwrap_or_default();
-        let (keys, _) = discover_agent_keys(None)?;
+        let (keys, _) = discover_agent_keys(None, None)?;
         let resolved = resolve_agent_conversation_arg(&args.conversation, Some(&keys))?;
         let transcript = self
             .load_transcript(&resolved.key.path)
@@ -430,8 +431,13 @@ impl AgentService {
     }
 }
 
+/// Keys of every Claude, Pi and OMP transcript on disk, and of the listed
+/// Codex threads among `listed`, else among the store's conversations.
+/// Codex keys need the thread's working directory, which only decoding
+/// reveals, so they come from the cards the store keeps.
 fn discover_agent_keys(
     project_filter: Option<&str>,
+    listed: Option<&[history::Conversation]>,
 ) -> Result<(Vec<agent::refs::AgentConversationKey>, Vec<AgentWarning>)> {
     let root = history::get_claude_projects_root().map_err(structured_agent_error)?;
     let projects = if root.exists() {
@@ -611,10 +617,29 @@ fn discover_agent_keys(
             });
         }
     }
+    let loaded;
+    let listed = match listed {
+        Some(listed) => listed,
+        None => {
+            loaded = crate::store::load_conversations(false, None, crate::store::Contents::Cards)?;
+            &loaded
+        }
+    };
+    keys.extend(
+        listed
+            .iter()
+            .filter(|conversation| {
+                conversation.source == history::Source::Codex
+                    && !conversation.provenance.hidden_by_default()
+            })
+            .filter_map(|conversation| {
+                agent::refs::AgentConversationKey::from_conversation(conversation).ok()
+            }),
+    );
     if keys.is_empty() && !root.exists() {
         return Err(AgentError::io(
             Some(&root.to_string_lossy()),
-            "no Claude, Pi, or OMP history storage is available",
+            "no Claude, Pi, OMP, or Codex history storage is available",
         )
         .into());
     }
@@ -1360,7 +1385,7 @@ impl AgentService {
         let keys = match keys {
             Some(keys) => keys,
             None => {
-                discovered = discover_agent_keys(None)?.0;
+                discovered = discover_agent_keys(None, None)?.0;
                 &discovered
             }
         };
@@ -1452,7 +1477,7 @@ impl AgentService {
         let keys = match keys {
             Some(keys) => keys,
             None => {
-                discovered = discover_agent_keys(None)?.0;
+                discovered = discover_agent_keys(None, None)?.0;
                 &discovered
             }
         };

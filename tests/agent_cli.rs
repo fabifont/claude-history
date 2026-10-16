@@ -679,3 +679,80 @@ fn lexical_and_exact_search_omit_semantic_breakdowns() {
         }
     }
 }
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("create directory");
+    for entry in std::fs::read_dir(from).expect("list directory") {
+        let path = entry.expect("directory entry").path();
+        let target = to.join(path.file_name().expect("file name"));
+        if path.is_dir() {
+            copy_dir(&path, &target);
+        } else {
+            std::fs::copy(&path, &target).expect("copy file");
+        }
+    }
+}
+
+#[test]
+fn codex_threads_support_agent_search_read_and_outline() {
+    const FORK: &str = "01a00000-0000-7000-8000-000000000003";
+    const EXEC: &str = "01a00000-0000-7000-8000-000000000006";
+    let config = tempfile::tempdir().expect("config");
+    let codex = tempfile::tempdir().expect("codex home");
+    copy_dir(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex"),
+        codex.path(),
+    );
+    let run_codex = |args: &[&str]| {
+        command(&config.path().join("home"))
+            .env("CLAUDE_CONFIG_DIR", config.path())
+            .env(
+                "PI_CODING_AGENT_SESSION_DIR",
+                config.path().join("empty-agent-sessions"),
+            )
+            .env("CODEX_HOME", codex.path())
+            .args(args)
+            .output()
+            .expect("run claude-history with a Codex home")
+    };
+
+    let search = run_codex(&["agent", "search", "--lexical", "ocelot example"]);
+    assert!(
+        search.status.success(),
+        "{}",
+        String::from_utf8_lossy(&search.stderr)
+    );
+    let search_text = String::from_utf8_lossy(&search.stdout);
+    assert!(
+        search_text.contains(&format!("uuid={FORK}")),
+        "{search_text}"
+    );
+    let reference = first_ref(&search.stdout);
+
+    let read = run_codex(&["agent", "read", &reference]);
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    let read_text = String::from_utf8_lossy(&read.stdout);
+    assert!(
+        read_text.contains("Here is an ocelot example."),
+        "{read_text}"
+    );
+    // The history the fork continues from is the base thread's own.
+    assert!(!read_text.contains("walrus"), "{read_text}");
+
+    let outline = run_codex(&["agent", "outline", &reference]);
+    assert!(
+        outline.status.success(),
+        "{}",
+        String::from_utf8_lossy(&outline.stderr)
+    );
+    assert!(String::from_utf8_lossy(&outline.stdout).contains("ocelot"));
+
+    // exec runs stay out of agent search like they stay out of the list.
+    let hidden = run_codex(&["agent", "search", "--lexical", "iguana report"]);
+    assert!(hidden.status.success());
+    assert!(!String::from_utf8_lossy(&hidden.stdout).contains(EXEC));
+}
