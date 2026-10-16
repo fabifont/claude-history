@@ -20,7 +20,7 @@
 
 use super::card::card_flags;
 use super::generation::Generation;
-use super::lexindex::{LexIndex, TERM_CAP};
+use super::lexindex::{self, LexIndex, TERM_CAP};
 use crate::search::lexical::{
     WEIGHT_BODY, WEIGHT_PROJECT, WEIGHT_SUMMARY, WEIGHT_TITLE, adjacency_score, adjacent_pairs,
     count_adjacent_pairs, count_prefix_matches, freshness_bonus, identifier_literals,
@@ -657,37 +657,49 @@ fn literals_match(full_text: &str, project_name: Option<&str>, literals: &[Liter
     }
 }
 
-/// Documents that can contain every literal, from the words of each literal
-/// that start at a word start (all but the first); `None` when no literal
-/// has such a word.
+/// Documents that can contain every literal; `None` when no literal has a
+/// term to look up.
+///
+/// A literal occurrence starts at a word start, and so does every word inside
+/// it, so the normalized text holds, at each of those positions, an index term
+/// that starts with the term the literal itself yields there. A document
+/// lacking any of a literal's terms can still match through the text the
+/// literal corpus appends: the project name, after a space.
 fn literal_mask(index: &LexIndex, docs: &SearchDocs, literals: &[Literal]) -> Option<Vec<bool>> {
-    let words: Vec<String> = literals
-        .iter()
-        .flat_map(|literal| {
-            normalize_for_search(literal.text())
-                .split(' ')
-                .skip(1)
-                .filter(|word| !word.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    if words.is_empty() {
-        return None;
-    }
-    let mut mask = vec![true; docs.docs.len()];
-    for word in &words {
-        let tf = index.prefix_tf(word);
+    let mut mask: Option<Vec<bool>> = None;
+    for literal in literals {
+        let lowered = normalize_for_search(literal.text());
+        let mut terms = Vec::new();
+        lexindex::for_each_term(&lowered, |term| terms.push(term));
+        terms.sort_unstable();
+        terms.dedup();
+        if terms.is_empty() {
+            continue;
+        }
+        let tfs: Vec<Vec<u8>> = terms.par_iter().map(|term| index.prefix_tf(term)).collect();
         let in_project: Vec<bool> = docs
             .projects
             .iter()
-            .map(|project| count_prefix_matches(&project.lower, word, 1) > 0)
+            .map(|project| project_may_hold(&lowered, project))
             .collect();
+        let mask = mask.get_or_insert_with(|| vec![true; docs.docs.len()]);
         for (doc, keep) in mask.iter_mut().enumerate() {
-            *keep &= tf[doc] > 0 || in_project[docs.docs[doc].project as usize];
+            *keep &=
+                in_project[docs.docs[doc].project as usize] || tfs.iter().all(|tf| tf[doc] > 0);
         }
     }
-    Some(mask)
+    mask
+}
+
+/// Whether a normalized literal can occur in, or run into, `project`'s name.
+fn project_may_hold(lowered: &str, project: &ProjectFields) -> bool {
+    if project.name.as_deref().is_none_or(str::is_empty) {
+        return false;
+    }
+    project.lower.contains(lowered)
+        || lowered
+            .match_indices(' ')
+            .any(|(i, _)| project.lower.starts_with(&lowered[i + 1..]))
 }
 
 #[cfg(test)]
@@ -1038,15 +1050,56 @@ mod tests {
             assert_eq!(stats.texts_read, 0, "{query}");
         }
 
-        // Literals are verified only as far as the page needs.
+        // Literal candidates are the documents holding the literal's terms,
+        // here half the corpus, verified only as far as the page needs.
         let query = "alpha \"beta filler\"";
-        assert_eq!(corpus.check(query, now, 5).texts_read, 200);
+        let stats = corpus.check(query, now, 5);
+        assert_eq!((stats.candidates, stats.texts_read), (100, 100));
         let texts = super::oracle::Texts(&corpus.conversations);
         let mut ranking = search(&corpus.index, &corpus.docs, &texts, query, now, &|_| true);
         assert_eq!(ranking.top(5).len(), 5);
         let threads = rayon::current_num_threads();
         let read = ranking.stats().texts_read;
         assert!(read <= 2 * 5 + 4 * threads, "read {read}");
+    }
+
+    #[test]
+    fn literals_match_at_word_starts_and_into_the_project_name() {
+        let now = Local.timestamp_opt(1_760_000_000, 0).unwrap();
+        let texts = [
+            ("load_all_conversations_streaming()", None),
+            ("subconversations_streaming", None),
+            ("ship the deploy", Some("error-reporter")),
+            ("deploy error later", None),
+            ("", Some("error-reporter")),
+        ];
+        let conversations = texts
+            .iter()
+            .enumerate()
+            .map(|(i, (text, project))| {
+                conv(
+                    text,
+                    *project,
+                    None,
+                    None,
+                    now - Duration::hours(i as i64),
+                    &format!("/{i}"),
+                )
+            })
+            .collect();
+        let corpus = Corpus::new(conversations);
+        let docs = |query: &str| -> Vec<u32> {
+            corpus.check(query, now, 10);
+            let texts = super::oracle::Texts(&corpus.conversations);
+            let mut ranking = search(&corpus.index, &corpus.docs, &texts, query, now, &|_| true);
+            ranking.complete().iter().map(|hit| hit.doc).collect()
+        };
+
+        assert_eq!(docs("\"conversations_streaming\""), [0]);
+        assert_eq!(docs("\"onversations\""), [] as [u32; 0]);
+        assert_eq!(docs("\"deploy error\""), [2, 3]);
+        assert_eq!(docs("\"deploy error-rep\""), [2]);
+        assert_eq!(docs("\"reporter\""), [2, 4]);
     }
 
     #[test]
@@ -1261,6 +1314,17 @@ mod tests {
             "e7d318b1",
             "zzz",
             "error zzz",
+            "\"rror\"",
+            "\"bar\"",
+            "\"_bar\"",
+            "\"KEY\"",
+            "\"2.3\"",
+            "\"aïve\"",
+            "\"试\"",
+            "\"y\"",
+            "\"r_bar cache\"",
+            "\"superlongidentifierwithoutanybreaks42 tmux\"",
+            "error \"andling\"",
         ]
         .into_iter()
         .map(str::to_owned)
