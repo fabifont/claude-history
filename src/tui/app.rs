@@ -101,6 +101,8 @@ pub struct App {
     app_mode: AppMode,
     /// Status message with timestamp for auto-clear
     status_message: Option<(String, std::time::Instant)>,
+    /// Progress of the reconcile pass shown as indexing
+    indexing: Option<crate::store::progress::Indexing>,
     /// Persistent view setting: tool display mode
     tool_display: ToolDisplayMode,
     /// Persistent view setting: whether to show thinking blocks
@@ -186,6 +188,7 @@ impl App {
             dialog_mode: DialogMode::None,
             app_mode: parts.app_mode,
             status_message: None,
+            indexing: None,
             tool_display: parts.tool_display,
             show_thinking: parts.show_thinking,
             show_timing: false,
@@ -734,6 +737,48 @@ impl App {
         };
     }
 
+    /// Records the progress the running reconcile pass reports, if any,
+    /// and whether a pass still runs. The indicator stays up until no pass
+    /// runs, and a pass that was shown then leaves a completion message.
+    pub fn set_index_progress(
+        &mut self,
+        progress: Option<crate::store::progress::Indexing>,
+        running: bool,
+    ) {
+        if progress.is_some() {
+            self.indexing = progress;
+        } else if !running && let Some(shown) = self.indexing.take() {
+            self.set_status_message(format!("Indexed {} sessions", group_digits(shown.total)));
+        }
+    }
+
+    /// Reports a reconcile pass that failed with `message`.
+    pub fn index_failed(&mut self, message: &str) {
+        self.indexing = None;
+        self.set_status_message(format!("Indexing failed: {message}"));
+    }
+
+    /// Bottom bar text while a reconcile pass is shown as indexing.
+    pub fn indexing_status_text(&self) -> Option<String> {
+        let progress = self.indexing?;
+        let mut text = if progress.done < progress.total {
+            format!(
+                "Indexing sessions\u{2026} {} / {}",
+                group_digits(progress.done),
+                group_digits(progress.total)
+            )
+        } else {
+            format!(
+                "Finishing index\u{2026} {} sessions",
+                group_digits(progress.total)
+            )
+        };
+        if !self.query.trim().is_empty() {
+            text.push_str("  \u{b7}  results may be incomplete");
+        }
+        Some(text)
+    }
+
     // Getters for UI access
     pub fn filtered(&self) -> &[usize] {
         &self.filtered
@@ -880,6 +925,19 @@ impl App {
             false
         }
     }
+}
+
+/// `n` with its thousands separated by commas, e.g. "7,185".
+fn group_digits(n: usize) -> String {
+    let digits = n.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 #[cfg(test)]

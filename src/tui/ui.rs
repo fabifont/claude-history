@@ -200,7 +200,10 @@ fn render_list_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let dim_key_style = Style::default().fg(rgb(th().dim_key));
     let dim_label_style = Style::default().fg(rgb(th().dim_label));
 
-    if let Some(status) = app.semantic_activity_status_text() {
+    if let Some(status) = app
+        .semantic_activity_status_text()
+        .or_else(|| app.indexing_status_text())
+    {
         render_activity_status(frame, &status, area);
         return;
     }

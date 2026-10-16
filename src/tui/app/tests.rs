@@ -1745,3 +1745,72 @@ fn single_file_mode_has_no_project_exclusions() {
     assert!(app.excluded_projects.is_empty());
     assert!(app.is_single_file_mode());
 }
+
+#[test]
+fn indexing_shows_progress_then_a_completion_message() {
+    use crate::store::progress::Indexing;
+    let mut app = app(vec![conversation(None, "-tmp", "a", "alpha")], vec![]);
+    app.set_index_progress(
+        Some(Indexing {
+            done: 2345,
+            total: 7185,
+        }),
+        true,
+    );
+    assert_eq!(
+        app.indexing_status_text().as_deref(),
+        Some("Indexing sessions\u{2026} 2,345 / 7,185")
+    );
+    app.query = "alpha".to_string();
+    assert_eq!(
+        app.indexing_status_text().as_deref(),
+        Some("Indexing sessions\u{2026} 2,345 / 7,185  \u{b7}  results may be incomplete")
+    );
+    app.query.clear();
+
+    // The progress file is gone but the pass has not exited yet.
+    app.set_index_progress(None, true);
+    assert!(app.indexing_status_text().is_some());
+    assert!(app.status_message().is_none());
+
+    app.set_index_progress(None, false);
+    assert_eq!(app.indexing_status_text(), None);
+    let (message, _) = app.status_message().unwrap();
+    assert_eq!(message, "Indexed 7,185 sessions");
+}
+
+#[test]
+fn a_pass_never_shown_leaves_no_completion_message() {
+    let mut app = app(vec![conversation(None, "-tmp", "a", "alpha")], vec![]);
+    app.set_index_progress(None, true);
+    app.set_index_progress(None, false);
+    assert_eq!(app.indexing_status_text(), None);
+    assert!(app.status_message().is_none());
+}
+
+#[test]
+fn a_failed_pass_shows_its_error_instead_of_completing() {
+    use crate::store::progress::Indexing;
+    let mut app = app(vec![conversation(None, "-tmp", "a", "alpha")], vec![]);
+    app.set_index_progress(Some(Indexing { done: 5, total: 5 }), true);
+    assert_eq!(
+        app.indexing_status_text().as_deref(),
+        Some("Finishing index\u{2026} 5 sessions")
+    );
+    app.index_failed("No space left on device (os error 28)");
+    app.set_index_progress(None, false);
+    assert_eq!(app.indexing_status_text(), None);
+    let (message, _) = app.status_message().unwrap();
+    assert_eq!(
+        message,
+        "Indexing failed: No space left on device (os error 28)"
+    );
+}
+
+#[test]
+fn group_digits_separates_thousands() {
+    assert_eq!(super::group_digits(0), "0");
+    assert_eq!(super::group_digits(999), "999");
+    assert_eq!(super::group_digits(1000), "1,000");
+    assert_eq!(super::group_digits(1234567), "1,234,567");
+}

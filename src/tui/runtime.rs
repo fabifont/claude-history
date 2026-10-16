@@ -323,21 +323,50 @@ impl Store {
     }
 
     /// Records that the running pass exited with `status`, and starts the
-    /// next one when one was asked for or the store was locked.
-    fn reconciled(&mut self, status: Option<std::process::ExitStatus>, tx: &Sender<RuntimeEvent>) {
+    /// next one when one was asked for or the store was locked. Returns why
+    /// the pass failed, if it did.
+    fn reconciled(
+        &mut self,
+        status: Option<std::process::ExitStatus>,
+        tx: &Sender<RuntimeEvent>,
+    ) -> Option<String> {
         self.running = false;
+        let mut failure = None;
         match status {
             Some(status) if status.code() == Some(RECONCILE_BUSY) => {
                 self.retry_at = Some(Instant::now() + BUSY_RETRY);
             }
             Some(status) if !status.success() => {
                 let _ = debug_log::log_debug(&format!("Reconcile failed: {status}"));
+                failure = Some(match crate::store::progress::read(&self.root) {
+                    Some(crate::store::progress::Status::Failed(message)) => message,
+                    _ => status.to_string(),
+                });
             }
             _ => {}
         }
         if std::mem::take(&mut self.again) {
             self.reconcile(tx);
         }
+        failure
+    }
+
+    /// Progress of the pass indexing the store, by this process or another,
+    /// while one may run.
+    fn progress(&self) -> Option<crate::store::progress::Indexing> {
+        if !self.pending() {
+            return None;
+        }
+        match crate::store::progress::read(&self.root)? {
+            crate::store::progress::Status::Indexing(progress) => Some(progress),
+            crate::store::progress::Status::Failed(_) => None,
+        }
+    }
+
+    /// Shows whether the store is being reconciled and how far indexing got.
+    fn show_progress(&self, app: &mut App) {
+        app.set_reconciling(self.pending());
+        app.set_index_progress(self.progress(), self.pending());
     }
 
     /// Whether a pass is running or due, so `CURRENT` may change.
@@ -400,7 +429,13 @@ pub fn reconcile() -> Result<()> {
     };
     crate::bench::mark("reconcile_start");
     let sources = crate::history::sources::Registry::from_env();
-    let outcome = crate::store::reconcile::reconcile(&root, &sources)?;
+    let outcome = match crate::store::reconcile::reconcile(&root, &sources) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            crate::store::progress::record_failure(&root, &err.to_string());
+            return Err(err.into());
+        }
+    };
     crate::bench::mark("reconcile_done");
     if outcome.publish == crate::store::generation::Publish::Busy {
         std::process::exit(RECONCILE_BUSY);
@@ -499,7 +534,7 @@ pub fn run_with_loader(
             }
             store.retry_due(&events_tx);
             store.show_current(&mut app);
-            app.set_reconciling(store.pending());
+            store.show_progress(&mut app);
         }
 
         // Search results arrive on the workers' own channels, so poll for
@@ -535,11 +570,22 @@ pub fn run_with_loader(
                 let Some(store) = &mut store else {
                     continue;
                 };
-                store.reconciled(status, &events_tx);
+                let failure = store.reconciled(status, &events_tx);
                 store.show_current(&mut app);
-                app.set_reconciling(store.pending());
+                if let Some(failure) = &failure {
+                    app.index_failed(failure);
+                }
+                store.show_progress(&mut app);
                 if store.pending() {
                     continue;
+                }
+                if let Some(failure) = failure {
+                    refreshing = None;
+                    if std::mem::take(&mut starting) && app.generation_is_empty() {
+                        return Err(AppError::Io(io::Error::other(format!(
+                            "indexing sessions failed: {failure}"
+                        ))));
+                    }
                 }
                 if let Some(old_count) = refreshing.take() {
                     let new_count = app.generation_len().unwrap_or(0);

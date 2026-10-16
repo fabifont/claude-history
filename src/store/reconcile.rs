@@ -17,6 +17,7 @@ use super::generation::{
     self, Doc, Generation, MergePolicy, Publish, PublishLock, Update, Written,
 };
 use super::legacy;
+use super::progress::{self, Reporter};
 use crate::history::Conversation;
 use crate::history::adapter::{Completeness, FileId, Located};
 use crate::history::index::Indexer;
@@ -26,6 +27,7 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Newest files parsed and published before any other.
@@ -68,6 +70,8 @@ pub fn reconcile_with(root: &Path, sources: &Registry, policy: MergePolicy) -> i
         return Ok(outcome);
     };
     outcome.publish = Publish::Unchanged;
+    // Left by an earlier process that stopped without removing it.
+    progress::clear(root);
     let scan = scan(sources);
     outcome.scanned = scan.files.len();
     crate::bench::mark("reconcile_scanned");
@@ -85,9 +89,12 @@ pub fn reconcile_with(root: &Path, sources: &Registry, policy: MergePolicy) -> i
             .cmp(&a.located.modified)
             .then_with(|| a.located.path.cmp(&b.located.path))
     });
+    let reporter = Reporter::start(root, pending.len());
+    let parsed = AtomicUsize::new(0);
+    let counter = reporter.as_ref().map_or(&parsed, Reporter::counter);
     let mut first = true;
     loop {
-        let batch = take_batch(&mut pending, first, sources);
+        let batch = take_batch(&mut pending, first, sources, counter);
         first = false;
         outcome.parsed += batch.len();
         let docs = apply_batch(base.as_ref(), &mut keep, &mut ignored, batch);
@@ -124,6 +131,7 @@ pub fn reconcile_with(root: &Path, sources: &Registry, policy: MergePolicy) -> i
     {
         outcome.removed = legacy::remove_old_caches(cache);
     }
+    drop(reporter);
     drop(lock);
     Ok(outcome)
 }
@@ -214,7 +222,7 @@ fn scan(sources: &Registry) -> Scan {
 
 /// Every conversation of every instance of `sources`, parsed in memory.
 pub fn parse_everything(sources: &Registry) -> Vec<Conversation> {
-    parse_all(scan(sources).files, sources)
+    parse_all(scan(sources).files, sources, &AtomicUsize::new(0))
         .into_iter()
         .filter_map(|(_, parsed)| match parsed {
             Parsed::Conversation(conversation) => Some(*conversation),
@@ -318,27 +326,33 @@ enum Parsed {
 
 /// Removes and parses the next batch from `pending`: the first
 /// `FIRST_BATCH` files on the first call, then as many as parse within
-/// `BATCH_TIME`.
-fn take_batch(pending: &mut Vec<Found>, first: bool, sources: &Registry) -> Vec<(Found, Parsed)> {
+/// `BATCH_TIME`. Each parsed file is counted in `parsed`.
+fn take_batch(
+    pending: &mut Vec<Found>,
+    first: bool,
+    sources: &Registry,
+    parsed: &AtomicUsize,
+) -> Vec<(Found, Parsed)> {
     if first {
         let files: Vec<Found> = pending.drain(..pending.len().min(FIRST_BATCH)).collect();
-        return parse_all(files, sources);
+        return parse_all(files, sources, parsed);
     }
     let started = Instant::now();
     let chunk = rayon::current_num_threads().max(1) * 8;
     let mut batch = Vec::new();
     while !pending.is_empty() && started.elapsed() < BATCH_TIME {
         let files: Vec<Found> = pending.drain(..pending.len().min(chunk)).collect();
-        batch.extend(parse_all(files, sources));
+        batch.extend(parse_all(files, sources, parsed));
     }
     batch
 }
 
-fn parse_all(files: Vec<Found>, sources: &Registry) -> Vec<(Found, Parsed)> {
+fn parse_all(files: Vec<Found>, sources: &Registry, count: &AtomicUsize) -> Vec<(Found, Parsed)> {
     files
         .into_par_iter()
         .map(|found| {
             let parsed = parse(&found, sources);
+            count.fetch_add(1, Ordering::Relaxed);
             (found, parsed)
         })
         .collect()
@@ -627,6 +641,15 @@ mod tests {
         fixture.run();
         let current = fs::read_to_string(fixture.root.join("CURRENT")).unwrap();
 
+        let listing = || {
+            let mut names: Vec<_> = fs::read_dir(&fixture.root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = listing();
         let outcome = fixture.run();
         assert_eq!(outcome.publish, Publish::Unchanged);
         assert_eq!(outcome.parsed, 0);
@@ -635,6 +658,19 @@ mod tests {
             fs::read_to_string(fixture.root.join("CURRENT")).unwrap(),
             current
         );
+        assert_eq!(listing(), before);
+        assert!(!fixture.root.join("PROGRESS").exists());
+    }
+
+    #[test]
+    fn progress_left_by_a_stopped_pass_is_removed() {
+        let fixture = Fixture::new();
+        fixture.claude("-tmp-work", "a.jsonl", "hello alpha");
+        fs::create_dir_all(&fixture.root).unwrap();
+        progress::record_failure(&fixture.root, "stopped");
+        fixture.run();
+        assert_eq!(progress::read(&fixture.root), None);
+        assert!(!fixture.root.join("PROGRESS").exists());
     }
 
     #[test]
@@ -833,6 +869,7 @@ mod tests {
         }
         let outcome = fixture.run();
         assert!(outcome.published >= 3, "{outcome:?}");
+        assert!(!fixture.root.join("PROGRESS").exists());
         let generation = fixture.current();
         assert_eq!(generation.rows().len(), count + 2);
         assert_eq!(generation.segs().len(), 1);

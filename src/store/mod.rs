@@ -10,6 +10,7 @@ pub mod card;
 pub mod generation;
 pub mod legacy;
 pub mod lexindex;
+pub mod progress;
 pub mod reconcile;
 pub mod search;
 pub mod segments;
