@@ -190,9 +190,7 @@ mod tests {
     }
 
     fn event(entry: LogEntry) -> Event {
-        let mut records = crate::history::sources::claude::Records::default();
-        records.push(entry, Origin::default());
-        records.events.pop().unwrap()
+        crate::history::sources::claude::Records::default().push(entry, Origin::default())
     }
 
     fn user(text: &str) -> LogEntry {

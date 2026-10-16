@@ -45,7 +45,12 @@ pub fn process_conversation_reader<R: std::io::BufRead>(
         },
         native_id: path.to_string_lossy().into_owned(),
     };
-    let transcript = super::sources::claude::decode_reader(key, &path, reader, modified)?;
+    let mut events = Vec::new();
+    let mut transcript =
+        super::sources::claude::decode_reader(key, &path, reader, modified, &mut |event| {
+            events.push(event)
+        })?;
+    transcript.events = events;
     Ok(index_transcript(&transcript, debug_level))
 }
 

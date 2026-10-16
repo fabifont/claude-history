@@ -6,8 +6,8 @@ use crate::history::ParseError;
 use crate::history::actions::{Capabilities, Resume, Target};
 use crate::history::adapter::{Adapter, Completeness, Discovery, Located};
 use crate::history::model::{
-    ConversationKey, EventKind, ExecutionMode, HeadStatus, Origin, Relationship, Revision, Role,
-    Segment, SessionMeta, SourceInstance, SourceKind, Transcript,
+    ConversationKey, Event, ExecutionMode, HeadStatus, Origin, Relationship, Revision, Segment,
+    SessionMeta, SourceInstance, SourceKind, Transcript,
 };
 use crate::history::omp_loader::{self, OmpSessionRoot};
 use crate::history::pi::PiProjection;
@@ -73,9 +73,13 @@ impl Adapter for PiAdapter {
         super::resolve_file(&self.instance, native_id, scan_started)
     }
 
-    fn decode(&self, located: &Located) -> Result<Option<Transcript>> {
+    fn decode_into(
+        &self,
+        located: &Located,
+        events: &mut dyn FnMut(Event),
+    ) -> Result<Option<Transcript>> {
         let omp_owned = self.instance.kind == SourceKind::Omp && omp_owned(&self.instance.root);
-        super::decode_file(located, omp_owned)
+        super::decode_file(located, omp_owned, events)
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -152,22 +156,16 @@ pub(super) fn transcript_of(
     projection: PiProjection,
     bytes: u64,
     modified: Option<SystemTime>,
+    events: &mut dyn FnMut(Event),
 ) -> Transcript {
     let source = projection.source;
     let mut records = super::claude::Records::default();
     for (position, (_, entry)) in projection.entries.into_iter().enumerate() {
         let line = u32::try_from(position + 1).unwrap_or(u32::MAX);
-        records.push(entry, Origin { segment: 0, line });
+        events(records.push(entry, Origin { segment: 0, line }));
     }
     let updated_at = records
-        .events
-        .iter()
-        .filter(|event| {
-            matches!(&event.kind, EventKind::Message(message)
-                if matches!(message.role, Role::User | Role::Assistant))
-        })
-        .filter_map(|event| event.timestamp)
-        .max()
+        .latest_activity
         .or_else(|| super::claude::parse_timestamp(&projection.header.timestamp))
         .or_else(|| modified.map(DateTime::<Utc>::from));
     let diagnostics = projection
@@ -207,7 +205,7 @@ pub(super) fn transcript_of(
         segments,
         // The session header is a record too.
         records: records.count + 1,
-        events: records.events,
+        events: Vec::new(),
         diagnostics,
     }
 }

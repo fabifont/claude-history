@@ -56,8 +56,12 @@ impl Adapter for ClaudeAdapter {
         super::resolve_file(&self.instance, native_id, scan_started)
     }
 
-    fn decode(&self, located: &Located) -> Result<Option<Transcript>> {
-        super::decode_file(located, false)
+    fn decode_into(
+        &self,
+        located: &Located,
+        events: &mut dyn FnMut(Event),
+    ) -> Result<Option<Transcript>> {
+        super::decode_file(located, false, events)
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -238,12 +242,14 @@ fn is_session_file(path: &Path) -> bool {
             .is_some_and(|name| name.starts_with("agent-"))
 }
 
-/// Decodes a Claude session from `reader`, the contents of `path`.
+/// Decodes a Claude session from `reader`, the contents of `path`, passing
+/// its events to `events`.
 pub(crate) fn decode_reader(
     key: ConversationKey,
     path: &Path,
     reader: impl BufRead,
     modified: Option<SystemTime>,
+    events: &mut dyn FnMut(Event),
 ) -> Result<Transcript> {
     let mut lines = Lines::new(reader);
     // The current line, plus up to 2 lines after it for parse error context.
@@ -264,7 +270,7 @@ pub(crate) fn decode_reader(
         }
         if !line.trim().is_empty() {
             match serde_json::from_str::<LogEntry>(&line) {
-                Ok(entry) => records.push(entry, line_number(line_index)),
+                Ok(entry) => events(records.push(entry, line_number(line_index))),
                 Err(error) => diagnostics.push(ParseError {
                     line_number: line_index + 1,
                     line_content: line.clone(),
@@ -316,7 +322,7 @@ pub(crate) fn decode_reader(
         meta,
         segments,
         records: records.count,
-        events: records.events,
+        events: Vec::new(),
         diagnostics,
     })
 }
@@ -332,7 +338,10 @@ pub(crate) fn decode_test_reader(path: &Path, reader: impl BufRead) -> Result<Tr
         instance,
         native_id: path.to_string_lossy().into_owned(),
     };
-    decode_reader(key, path, reader, None)
+    let mut decoded = Vec::new();
+    let mut transcript = decode_reader(key, path, reader, None, &mut |event| decoded.push(event))?;
+    transcript.events = decoded;
+    Ok(transcript)
 }
 
 fn line_number(index: usize) -> Origin {
@@ -377,14 +386,15 @@ impl<R: BufRead> Lines<R> {
     }
 }
 
-/// Claude-format records converted into events, in order, with the session
-/// metadata they define: the first user record's cwd, the first assistant
-/// model unless a `Model` note names one, the first summary unless a
-/// generated title replaces it, and the last custom title.
+/// Converts Claude-format records into events, in order, collecting the
+/// session metadata they define: the first user record's cwd, the first
+/// assistant model unless a `Model` note names one, the first summary
+/// unless a generated title replaces it, the last custom title, and the
+/// latest user or assistant message time.
 #[derive(Default)]
 pub(crate) struct Records {
-    pub events: Vec<Event>,
     pub count: usize,
+    pub latest_activity: Option<DateTime<Utc>>,
     pub cwd: Option<PathBuf>,
     pub model: Option<String>,
     pub summary: Option<String>,
@@ -392,7 +402,7 @@ pub(crate) struct Records {
 }
 
 impl Records {
-    pub fn push(&mut self, entry: LogEntry, origin: Origin) {
+    pub fn push(&mut self, entry: LogEntry, origin: Origin) -> Event {
         self.count += 1;
         let (timestamp, kind) = match entry {
             LogEntry::User {
@@ -490,12 +500,16 @@ impl Records {
             | LogEntry::PermissionMode { .. }
             | LogEntry::Unknown => (None, EventKind::Other),
         };
-        self.events.push(Event {
+        let timestamp = timestamp.as_deref().and_then(parse_timestamp);
+        if matches!(kind, EventKind::Message(_)) {
+            self.latest_activity = self.latest_activity.max(timestamp);
+        }
+        Event {
             origin,
-            timestamp: timestamp.as_deref().and_then(parse_timestamp),
+            timestamp,
             visibility: Visibility::Dialogue,
             kind,
-        });
+        }
     }
 }
 

@@ -5,7 +5,7 @@ pub mod claude;
 pub mod pi;
 
 use super::adapter::{Adapter, FileId, Located, Stamp};
-use super::model::{ConversationKey, SourceInstance, SourceKind, Transcript};
+use super::model::{ConversationKey, Event, SourceInstance, SourceKind, Transcript};
 use super::omp_loader::{self, OmpSessionRoot};
 use super::pi_loader::{self, PiSessionRoot};
 use crate::error::Result;
@@ -183,15 +183,23 @@ pub fn decode_path(path: &Path, modified: Option<SystemTime>, omp: bool) -> Resu
         file_id: None,
         stamp: Stamp::default(),
     };
-    decode_file(&located, omp).map(|transcript| {
-        transcript.expect("a file that is not a Pi session decodes as a Claude session")
+    let mut decoded = Vec::new();
+    let transcript = decode_file(&located, omp, &mut |event| decoded.push(event))?
+        .expect("a file that is not a Pi session decodes as a Claude session");
+    Ok(Transcript {
+        events: decoded,
+        ..transcript
     })
 }
 
 /// Decodes the session file `located` names: as a Pi or OMP session when it
 /// starts with a session header (always as OMP when `omp` is set), else as
 /// a Claude session. `None` when it holds neither.
-fn decode_file(located: &Located, omp: bool) -> Result<Option<Transcript>> {
+fn decode_file(
+    located: &Located,
+    omp: bool,
+    events: &mut dyn FnMut(Event),
+) -> Result<Option<Transcript>> {
     let path = &located.path;
     if super::pi::detect_source(path)?.is_some() {
         let mut reader = Counted::new(BufReader::new(File::open(path)?));
@@ -203,11 +211,12 @@ fn decode_file(located: &Located, omp: bool) -> Result<Option<Transcript>> {
                 projection,
                 reader.bytes,
                 located.modified,
+                events,
             )));
         }
     }
     let reader = BufReader::new(File::open(path)?);
-    claude::decode_reader(located.key.clone(), path, reader, located.modified).map(Some)
+    claude::decode_reader(located.key.clone(), path, reader, located.modified, events).map(Some)
 }
 
 /// A reader that counts the bytes consumed through it.

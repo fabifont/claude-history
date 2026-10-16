@@ -18,7 +18,7 @@ use super::generation::{
 };
 use super::legacy;
 use crate::history::adapter::{Completeness, FileId, Located};
-use crate::history::index::index;
+use crate::history::index::Indexer;
 use crate::history::sources::Registry;
 use crate::history::{Conversation, Source};
 use rayon::prelude::*;
@@ -334,7 +334,9 @@ fn parse(found: &Found, sources: &Registry) -> Parsed {
     let Some(adapter) = sources.get(&found.located.key.instance) else {
         return Parsed::Failed;
     };
-    let transcript = match adapter.decode(&found.located) {
+    // Events stream into the indexer, so no file's events are held at once.
+    let mut indexer = Indexer::default();
+    let transcript = match adapter.decode_into(&found.located, &mut |event| indexer.push(&event)) {
         Ok(Some(transcript)) => transcript,
         Ok(None) => return Parsed::Ignored,
         Err(crate::error::AppError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
@@ -349,7 +351,7 @@ fn parse(found: &Found, sources: &Registry) -> Parsed {
     {
         return Parsed::Ignored;
     }
-    match index(&transcript) {
+    match indexer.finish(&transcript) {
         Ok(conversation) => Parsed::Conversation(Box::new(conversation)),
         Err(_) => Parsed::Ignored,
     }
