@@ -114,10 +114,12 @@ mod tests {
     #[test]
     fn every_source_has_an_acting_adapter() {
         let registry = Registry::with_roots(None, None, None);
-        for source in [Source::Claude, Source::Pi, Source::Omp] {
+        for source in [Source::Claude, Source::Pi, Source::Omp, Source::Codex] {
             let adapter = registry.for_source(source);
             assert_eq!(adapter.instance().kind, source);
-            assert_eq!(adapter.capabilities(), Capabilities::ALL);
+            let capabilities = adapter.capabilities();
+            assert_eq!(capabilities.rename, source != Source::Codex);
+            assert!(capabilities.resume && capabilities.fork && capabilities.delete);
         }
     }
 }

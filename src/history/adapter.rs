@@ -12,8 +12,10 @@
 
 use super::actions::{Capabilities, Resume, Target};
 use super::model::{ConversationKey, Event, SourceInstance, Transcript};
+use std::any::Any;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Modification times this close to the start of a scan are not trusted:
@@ -67,6 +69,19 @@ pub struct Located {
     pub file_id: Option<FileId>,
     /// State of every artifact the history is decoded from.
     pub stamp: Stamp,
+    /// What the adapter resolved about the history beyond `path`, for its
+    /// own `decode_into`.
+    pub native: Option<Native>,
+}
+
+/// An adapter's own resolution of a conversation, opaque to everything else.
+#[derive(Clone)]
+pub struct Native(pub Arc<dyn Any + Send + Sync>);
+
+impl std::fmt::Debug for Native {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Native")
+    }
 }
 
 /// How much of an instance a discovery pass saw.
@@ -114,6 +129,17 @@ impl Discovery {
 
 pub trait Adapter: Send + Sync {
     fn instance(&self) -> &SourceInstance;
+
+    /// Native id of the conversation whose own artifact is `path`, which
+    /// lies under the instance root: by default the path relative to it.
+    fn native_id_of(&self, path: &Path) -> Option<String> {
+        Some(
+            path.strip_prefix(&self.instance().root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
 
     /// Lists every conversation of the instance, with one `stat` per
     /// artifact. `scan_started` dates the pass for `Stamp::of`.

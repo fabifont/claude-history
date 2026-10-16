@@ -278,7 +278,7 @@ fn diff(base: Option<&Generation>, scan: &Scan) -> Plan {
     }
     for (path, fingerprint) in &ignored {
         if !seen_ignored.contains(path.as_str())
-            && [Source::Claude, Source::Pi, Source::Omp]
+            && [Source::Claude, Source::Pi, Source::Omp, Source::Codex]
                 .into_iter()
                 .any(|source| scan.misses(Path::new(path), source))
         {

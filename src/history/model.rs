@@ -17,6 +17,7 @@ pub enum SourceKind {
     Claude,
     Pi,
     Omp,
+    Codex,
 }
 
 impl SourceKind {
@@ -25,6 +26,7 @@ impl SourceKind {
             Self::Claude => "claude",
             Self::Pi => "pi",
             Self::Omp => "omp",
+            Self::Codex => "codex",
         }
     }
 
@@ -33,6 +35,7 @@ impl SourceKind {
             Self::Claude => "CC",
             Self::Pi => "Pi",
             Self::Omp => "OMP",
+            Self::Codex => "CX",
         }
     }
 }

@@ -5,10 +5,14 @@ fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_claude-history"))
 }
 
-/// The binary with `HOME` at `home`, so its caches stay out of the user's.
+/// The binary with `HOME` at `home`, so its caches and the Codex home it
+/// reads stay out of the user's.
 fn command(home: &Path) -> Command {
     let mut command = Command::new(binary());
-    command.env("HOME", home);
+    command
+        .env("HOME", home)
+        .env_remove("CODEX_HOME")
+        .env_remove("CODEX_SQLITE_HOME");
     command
 }
 

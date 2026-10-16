@@ -166,6 +166,16 @@ impl AgentConversationKey {
                     emitted_digest_hex_len: MIN_EMITTED_DIGEST_HEX_LEN,
                 }
             }
+            // A thread keeps its id when a revert moves it to a new rollout.
+            Source::Codex => {
+                let digest =
+                    digest_parts(["agent-codex-v1", self.source.label(), &self.session_id]);
+                AgentConversationRef {
+                    uuid: self.session_id.clone(),
+                    digest_hex: format!("{digest:032x}"),
+                    emitted_digest_hex_len: MIN_EMITTED_DIGEST_HEX_LEN,
+                }
+            }
         }
     }
 
@@ -174,6 +184,7 @@ impl AgentConversationKey {
             Source::Claude => format!("{PROJECT_NAMESPACE}\0{}", self.project_dir_name),
             Source::Pi => format!("agent-pi-project-v1\0{}", self.project_dir_name),
             Source::Omp => format!("agent-omp-project-v1\0{}", self.project_dir_name),
+            Source::Codex => format!("agent-codex-project-v1\0{}", self.project_dir_name),
         };
         format!(
             "pr_{}",
