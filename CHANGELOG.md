@@ -1,6 +1,6 @@
 ## Unreleased
 
-## v0.1.77 (2026-09-20)
+## v0.1.77 (2026-10-17)
 
 - Much faster startup and search: the list appears almost instantly, searches
   finish in tens of milliseconds instead of seconds, and memory use drops from
