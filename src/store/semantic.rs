@@ -1,22 +1,24 @@
 //! What semantic search reads about a conversation, stored per card in a
-//! generation's `sem-NNNN.zst` segments.
+//! generation's `sem-NNNN.zst` segments, with the parse errors the agent
+//! commands report.
 //!
-//! The data is only read by semantic search and the commands that rank or
-//! route conversations by meaning, so list and lexical search never map
-//! these segments.
+//! The data is only read by semantic search and the commands that load
+//! whole conversations, so list and lexical search never map these
+//! segments.
 
 use crate::agent::refs::MessageRange;
-use crate::history::Conversation;
+use crate::history::{Conversation, ParseError};
 use serde::{Deserialize, Serialize};
 
 /// `Conversation::semantic_turns` with their message ranges, plus the
-/// route text and agent search text.
+/// route text, agent search text and parse errors.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SemanticDoc {
     pub turns: Vec<String>,
     pub ranges: Vec<MessageRange>,
     pub route_text: String,
     pub agent_text: String,
+    pub parse_errors: Vec<ParseError>,
 }
 
 impl SemanticDoc {
@@ -26,6 +28,7 @@ impl SemanticDoc {
             ranges: conversation.semantic_turn_ranges.clone(),
             route_text: conversation.semantic_route_text.to_string(),
             agent_text: conversation.agent_search_text.to_string(),
+            parse_errors: conversation.parse_errors.clone(),
         }
     }
 
@@ -35,6 +38,7 @@ impl SemanticDoc {
             && self.ranges.is_empty()
             && self.route_text.is_empty()
             && self.agent_text.is_empty()
+            && self.parse_errors.is_empty()
     }
 
     /// Encoded form stored in a frame; empty data encodes to no bytes.
@@ -51,6 +55,7 @@ impl SemanticDoc {
         conversation.semantic_turn_ranges = self.ranges;
         conversation.semantic_route_text = self.route_text.into();
         conversation.agent_search_text = self.agent_text.into();
+        conversation.parse_errors = self.parse_errors;
     }
 
     /// Reads `encode` output. No bytes decode to empty data.
@@ -84,6 +89,13 @@ mod tests {
             ranges: vec![MessageRange::single(1), MessageRange::single(3)],
             route_text: "route".into(),
             agent_text: String::new(),
+            parse_errors: vec![ParseError {
+                line_number: 2,
+                line_content: "{".into(),
+                error_message: "EOF".into(),
+                context_before: vec!["{}".into()],
+                context_after: Vec::new(),
+            }],
         };
         let bytes = doc.encode();
         assert_ne!(hash(&bytes), 0);

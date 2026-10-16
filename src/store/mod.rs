@@ -65,6 +65,75 @@ fn source_roots_namespace(pi: Option<&Path>, omp: Option<&Path>) -> String {
     format!("roots-{}", &hasher.finalize().to_hex()[..16])
 }
 
+/// What `load_conversations` reads besides the cards.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Contents {
+    /// Only what the cards hold, as the list shows them.
+    Cards,
+    /// The cards with their full text and semantic data, as the parser
+    /// produces them.
+    Full,
+}
+
+/// Every conversation, newest first, from the store: a reconcile pass first
+/// brings the current generation up to date with the session files (or
+/// waits for the process doing so), then its cards are read with
+/// `contents`. Without a cache dir, or when the store cannot be read, the
+/// session files are parsed instead.
+pub fn load_conversations(
+    show_last: bool,
+    debug_level: Option<crate::cli::DebugLevel>,
+    contents: Contents,
+) -> crate::error::Result<Vec<Conversation>> {
+    if let Some(conversations) =
+        default_root().and_then(|root| load_from_store(&root, show_last, contents))
+    {
+        return Ok(conversations);
+    }
+    crate::history::load_all_conversations(show_last, debug_level)
+}
+
+fn load_from_store(root: &Path, show_last: bool, contents: Contents) -> Option<Vec<Conversation>> {
+    let sources = reconcile::Sources::from_env();
+    for _ in 0..2 {
+        let outcome = reconcile::reconcile(root, &sources).ok()?;
+        if outcome.publish != generation::Publish::Busy {
+            break;
+        }
+        generation::PublishLock::wait(root).ok()?;
+    }
+    let cards = Snapshot::open(root, show_last, TimeFilter::default())?;
+    read_conversations(&cards, contents)
+}
+
+/// Every card of `cards` with `contents`, in doc order.
+fn read_conversations(cards: &Snapshot, contents: Contents) -> Option<Vec<Conversation>> {
+    let generation = &cards.generation;
+    let files = match contents {
+        Contents::Cards => None,
+        Contents::Full => Some((
+            generation.open_text_files()?,
+            generation.open_semantic_files()?,
+        )),
+    };
+    (0..generation.rows().len() as u32)
+        .into_par_iter()
+        .map(|doc| {
+            let mut conversation = cards.card(doc);
+            if let Some((text, semantic)) = &files {
+                let row = &generation.rows()[doc as usize];
+                conversation.full_text = text.read(row.text)?.into();
+                let sem = &generation.sems()[doc as usize];
+                if sem.hash != 0 {
+                    semantic::SemanticDoc::decode(&semantic.read_bytes(sem.blob)?)?
+                        .apply(&mut conversation);
+                }
+            }
+            Some(conversation)
+        })
+        .collect()
+}
+
 /// Cards of one generation.
 #[derive(Clone)]
 pub struct Snapshot {

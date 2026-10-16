@@ -234,6 +234,12 @@ impl Generation {
         Some((index, text))
     }
 
+    /// Opens this generation's text segments. `None` when one is missing
+    /// or invalid.
+    pub fn open_text_files(&self) -> Option<TextSegments> {
+        TextSegments::open(&self.dir, text::TEXT, self.rows().iter().map(|r| r.text))
+    }
+
     /// Opens this generation's semantic segments. `None` when one is
     /// missing or invalid.
     pub fn open_semantic_files(&self) -> Option<TextSegments> {
@@ -753,6 +759,17 @@ pub struct PublishLock {
 impl PublishLock {
     /// Takes `LOCK` under `root` without waiting; `None` when another
     /// process or thread holds it.
+    /// Waits until no process holds `LOCK` under `root`.
+    pub fn wait(root: &Path) -> io::Result<()> {
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join(LOCK))?;
+        file.lock()?;
+        file.unlock()
+    }
+
     pub fn try_acquire(root: &Path) -> io::Result<Option<Self>> {
         fs::create_dir_all(root)?;
         let file = File::options()

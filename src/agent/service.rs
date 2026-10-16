@@ -159,7 +159,8 @@ impl AgentService {
         // Resolved before loading so an inverted range fails without paying for
         // a full corpus parse.
         let time = args.time.resolve()?;
-        let mut conversations = history::load_all_conversations(false, None)?;
+        let mut conversations =
+            crate::store::load_conversations(false, None, crate::store::Contents::Full)?;
         conversations.retain(|conversation| {
             !project_is_excluded(&conversation.path, &agent_config.exclude_projects)
                 && time.matches(conversation.timestamp)
@@ -1492,7 +1493,8 @@ pub(crate) fn resolve_agent_read_args(
     let keys = if let Some(keys) = keys {
         keys
     } else {
-        let conversations = history::load_all_conversations(false, None)?;
+        let conversations =
+            crate::store::load_conversations(false, None, crate::store::Contents::Cards)?;
         loaded_keys = agent::refs::conversation_keys_from_conversations(&conversations)?;
         &loaded_keys
     };
@@ -1566,7 +1568,8 @@ pub(crate) fn resolve_agent_conversation_arg(
     let keys = if let Some(keys) = keys {
         keys
     } else {
-        let conversations = history::load_all_conversations(false, None)?;
+        let conversations =
+            crate::store::load_conversations(false, None, crate::store::Contents::Cards)?;
         loaded_keys = agent::refs::conversation_keys_from_conversations(&conversations)?;
         &loaded_keys
     };

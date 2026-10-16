@@ -90,7 +90,7 @@ pub fn normalized_log_entries(
 }
 
 /// Represents a JSONL parsing error with context for debugging
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ParseError {
     pub line_number: usize,
     pub line_content: String,

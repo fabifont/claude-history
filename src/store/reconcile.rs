@@ -162,6 +162,8 @@ fn open_base(root: &Path) -> Option<Generation> {
 struct Found {
     path: PathBuf,
     source: Source,
+    /// Other sources whose root holds this same file.
+    also: Vec<Source>,
     size: u64,
     modified: Option<SystemTime>,
     fingerprint: Fingerprint,
@@ -224,6 +226,7 @@ fn scan(sources: &Sources) -> Scan {
                     fingerprint: generation::fingerprint_from(size, modified, started),
                     path,
                     source,
+                    also: Vec::new(),
                     size,
                     modified,
                 },
@@ -231,15 +234,23 @@ fn scan(sources: &Sources) -> Scan {
             ))
         })
         .collect();
-    let mut ids = HashSet::new();
-    let mut paths = HashSet::new();
+    // A file listed by several sources, as when the Pi and OMP roots are
+    // one directory, is parsed once and kept for whichever source it holds.
+    let mut ids: HashMap<FileId, usize> = HashMap::new();
+    let mut paths: HashMap<PathBuf, usize> = HashMap::new();
     for (found, id) in stats.into_iter().flatten() {
-        let unique = match id {
-            Some(id) => ids.insert(id),
-            None => paths.insert(found.path.clone()),
+        let next = scan.files.len();
+        let kept = match id {
+            Some(id) => *ids.entry(id).or_insert(next),
+            None => *paths.entry(found.path.clone()).or_insert(next),
         };
-        if unique {
+        if kept == next {
             scan.files.push(found);
+        } else {
+            let kept = &mut scan.files[kept];
+            if kept.source != found.source && !kept.also.contains(&found.source) {
+                kept.also.push(found.source);
+            }
         }
     }
     scan
@@ -456,7 +467,7 @@ fn parse(found: &Found, omp_owned: bool) -> Parsed {
                 .unwrap_or_default()
         }),
         source => {
-            if conversation.source != source {
+            if conversation.source != source && !found.also.contains(&conversation.source) {
                 return Parsed::Ignored;
             }
             conversation
@@ -681,6 +692,37 @@ mod tests {
         assert_eq!(card.project_path, Some(PathBuf::from("/tmp/work")));
         assert_eq!(card.project_name.as_deref(), Some("work"));
         assert!(fixture.text_of(&a).contains("hello alpha"));
+    }
+
+    #[test]
+    fn sessions_of_a_root_pi_and_omp_share_are_kept_for_their_source() {
+        let mut fixture = Fixture::new();
+        let shared = fixture.sources.pi.as_ref().unwrap().path.clone();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let omp = shared.join("--tmp-pi--").join("omp.jsonl");
+        fs::copy(fixtures.join("omp/v3.jsonl"), &omp).unwrap();
+        settle_all(&shared);
+        fixture.sources.omp = Some(OmpSessionRoot {
+            path: shared,
+            flat: false,
+        });
+        fixture.run();
+
+        let generation = fixture.current();
+        let source_of = |path: &Path| {
+            generation
+                .rows()
+                .iter()
+                .find(|row| generation.str(row.path) == path.to_string_lossy())
+                .map(|row| row.source)
+        };
+        assert_eq!(
+            source_of(&omp),
+            Some(crate::store::card::source_to_u8(Source::Omp))
+        );
+        assert_eq!(generation.rows().len(), 2, "{:?}", fixture.paths());
+        let unchanged = fixture.run();
+        assert_eq!(unchanged.publish, Publish::Unchanged);
     }
 
     #[test]
