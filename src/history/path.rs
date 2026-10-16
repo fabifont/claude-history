@@ -6,13 +6,66 @@
 
 use std::path::{Path, PathBuf};
 
-/// Match literal prefixes of the recorded working directory without resolving paths.
+/// Whether paths that differ only in letter case name the same file. True on
+/// Windows, whose filesystems are case-insensitive and case-preserving, so a
+/// shell can reach one directory as both `MyProject` and `myproject`. False
+/// elsewhere, where those can be distinct directories.
+const PATHS_IGNORE_CASE: bool = cfg!(windows);
+
+fn fold_case(text: &str) -> impl Iterator<Item = char> + '_ {
+    text.chars().flat_map(char::to_lowercase)
+}
+
+fn path_str_eq(a: &str, b: &str, ignore_case: bool) -> bool {
+    if ignore_case {
+        fold_case(a).eq(fold_case(b))
+    } else {
+        a == b
+    }
+}
+
+fn path_str_starts_with(text: &str, prefix: &str, ignore_case: bool) -> bool {
+    if !ignore_case {
+        return text.starts_with(prefix);
+    }
+    let mut text = fold_case(text);
+    fold_case(prefix).all(|c| text.next() == Some(c))
+}
+
+fn paths_eq(a: &Path, b: &Path, ignore_case: bool) -> bool {
+    if !ignore_case {
+        return a == b;
+    }
+    let fold = |component: std::path::Component<'_>| {
+        fold_case(&component.as_os_str().to_string_lossy()).collect::<String>()
+    };
+    a.components().map(fold).eq(b.components().map(fold))
+}
+
+/// Whether two path strings name the same location, ignoring letter case
+/// where the platform's filesystems do.
+pub(crate) fn same_path_str(a: &str, b: &str) -> bool {
+    path_str_eq(a, b, PATHS_IGNORE_CASE)
+}
+
+/// Whether two paths name the same location, ignoring letter case where the
+/// platform's filesystems do. Neither path is resolved.
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
+    paths_eq(a, b, PATHS_IGNORE_CASE)
+}
+
+/// Match literal prefixes of the recorded working directory without resolving
+/// paths, ignoring letter case where the platform's filesystems do.
 pub(crate) fn cwd_is_excluded(cwd: Option<&Path>, prefixes: &[String]) -> bool {
+    cwd_has_prefix(cwd, prefixes, PATHS_IGNORE_CASE)
+}
+
+fn cwd_has_prefix(cwd: Option<&Path>, prefixes: &[String], ignore_case: bool) -> bool {
     cwd.is_some_and(|cwd| {
         let cwd = cwd.to_string_lossy();
         prefixes
             .iter()
-            .any(|prefix| !prefix.is_empty() && cwd.starts_with(prefix))
+            .any(|prefix| !prefix.is_empty() && path_str_starts_with(&cwd, prefix, ignore_case))
     })
 }
 
@@ -122,9 +175,19 @@ pub fn encoded_project_root(encoded: &str) -> &str {
 ///
 /// Two names are considered part of the same project if they share the same
 /// encoded project root (i.e., stripping any workmux `--worktrees-<branch>`
-/// suffix yields the same string).
+/// suffix yields the same string). Letter case is ignored where the platform's
+/// filesystems do, since the encoding keeps the casing the path was reached
+/// with (`C--Users-Foo-MyProject` vs `C--Users-Foo-myproject`).
 pub fn is_same_project(a: &str, b: &str) -> bool {
-    encoded_project_root(a) == encoded_project_root(b)
+    project_roots_match(a, b, PATHS_IGNORE_CASE)
+}
+
+fn project_roots_match(a: &str, b: &str, ignore_case: bool) -> bool {
+    path_str_eq(
+        encoded_project_root(a),
+        encoded_project_root(b),
+        ignore_case,
+    )
 }
 
 /// Decode a project directory name back to a path (simple heuristic fallback).
@@ -499,5 +562,59 @@ mod tests {
             "/Users/raine/code/myproject__worktrees/feature",
         ));
         assert!(is_same_project(&main, &worktree));
+    }
+
+    #[test]
+    fn project_roots_ignore_case_only_when_asked() {
+        let main = "C--Users-Foo-MyProject";
+        let lower = "C--Users-Foo-myproject";
+        let drive = "c--users-foo-myproject";
+        let worktree = "c--Users-Foo-myproject--worktrees-feature";
+        for other in [lower, drive, worktree] {
+            assert!(project_roots_match(main, other, true), "{other}");
+            assert!(project_roots_match(other, main, true), "{other}");
+            assert!(!project_roots_match(main, other, false), "{other}");
+        }
+        assert!(!project_roots_match(main, "C--Users-Foo-MyProject2", true));
+        assert!(project_roots_match(main, main, false));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn is_same_project_keeps_case_off_windows() {
+        assert!(!is_same_project(
+            "-home-user-myproject",
+            "-home-user-MyProject"
+        ));
+    }
+
+    #[test]
+    fn paths_ignore_case_only_when_asked() {
+        let recorded = Path::new("/Users/Foo/MyProject");
+        let reached = Path::new("/users/foo/myproject/");
+        assert!(paths_eq(recorded, reached, true));
+        assert!(!paths_eq(recorded, reached, false));
+        assert!(!paths_eq(
+            recorded,
+            Path::new("/Users/Foo/MyProject2"),
+            true
+        ));
+        assert!(!paths_eq(recorded, Path::new("/Users/Foo"), true));
+        assert!(path_str_eq("C:\\Users\\Ä", "c:\\users\\ä", true));
+        assert!(!path_str_eq("C:\\Users\\Ä", "c:\\users\\ä", false));
+    }
+
+    #[test]
+    fn cwd_prefixes_ignore_case_only_when_asked() {
+        let prefixes = vec!["C:\\Temp\\".to_string()];
+        let cwd = Some(Path::new("c:\\temp\\eval-1"));
+        assert!(cwd_has_prefix(cwd, &prefixes, true));
+        assert!(!cwd_has_prefix(cwd, &prefixes, false));
+        assert!(!cwd_has_prefix(Some(Path::new("c:\\tem")), &prefixes, true));
+        assert!(!cwd_has_prefix(
+            Some(Path::new("c:\\other")),
+            &prefixes,
+            true
+        ));
     }
 }

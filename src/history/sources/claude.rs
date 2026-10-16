@@ -113,11 +113,12 @@ fn resolve_resume_action(
     let cwd_projects_dir = crate::history::get_claude_projects_dir(cwd)?;
     let project_dir = project_path.filter(|p| p.exists() && p.is_dir());
 
-    if project_dir.is_none() || (fork_session && cwd_projects_dir != conv_projects_dir) {
+    let same_dir = |dir: &Path| crate::history::path::same_path(dir, conv_projects_dir);
+    if project_dir.is_none() || (fork_session && !same_dir(&cwd_projects_dir)) {
         return Ok(ResumeAction::CopyToCurrent { cwd_projects_dir });
     }
 
-    if cwd_projects_dir == conv_projects_dir {
+    if same_dir(&cwd_projects_dir) {
         return Ok(ResumeAction::Run {
             current_dir: cwd.to_path_buf(),
         });
@@ -125,7 +126,7 @@ fn resolve_resume_action(
 
     let project_dir = project_dir.unwrap();
     let project_projects_dir = crate::history::get_claude_projects_dir(project_dir)?;
-    if project_projects_dir == conv_projects_dir {
+    if same_dir(&project_projects_dir) {
         Ok(ResumeAction::Run {
             current_dir: project_dir.to_path_buf(),
         })

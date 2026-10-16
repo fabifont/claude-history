@@ -598,7 +598,11 @@ fn discover_agent_keys(
                         filter,
                     )
                 });
-                if !current_matches_filter || current.as_ref() != Some(&cwd) {
+                if !current_matches_filter
+                    || !current
+                        .as_ref()
+                        .is_some_and(|current| history::path::same_path(current, &cwd))
+                {
                     continue;
                 }
             }
@@ -643,7 +647,11 @@ fn discover_agent_keys(
                         filter,
                     )
                 });
-                if !current_matches_filter || current.as_ref() != Some(&cwd) {
+                if !current_matches_filter
+                    || !current
+                        .as_ref()
+                        .is_some_and(|current| history::path::same_path(current, &cwd))
+                {
                     continue;
                 }
             }

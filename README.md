@@ -638,7 +638,8 @@ For [workmux](https://github.com/raine/workmux) users, worktree paths are
 displayed in a compact format: `[project/worktree]` instead of just the worktree
 folder name. The project filter (toggled with `Tab`) is worktree-aware: it
 includes conversations from the main repo and all its worktrees, regardless of
-which one you're currently in.
+which one you're currently in. On Windows the match ignores letter case, so
+`C:\Users\Foo\myproject` finds sessions recorded in `C:\Users\Foo\MyProject`.
 
 The `--resume` flag works across projects. It will automatically run Claude in
 the correct project directory for the selected conversation.
@@ -803,15 +804,16 @@ Customize the keybindings for list actions. Values are key combinations like
   directly.
 - `exclude_paths` (array of strings): Hide sessions whose recorded working
   directory starts with any listed prefix, in both TUI browse/search lists and
-  `agent search`. Defaults to empty. Matching is literal and case-sensitive:
-  `"/tmp/"` matches `"/tmp/eval-123"`, but not `"/tmp"` or `"/tmp-other"`;
-  `"/tmp"` matches all three. Paths are not resolved, so deleted directories
-  still match; list both `"/tmp/"` and `"/private/tmp/"` to cover both spellings.
-  No `~`, environment-variable, or glob expansion is performed. Empty entries
-  are ignored, and sessions without a recorded working directory stay visible.
-  Exclusions apply in local and global scope. Transcripts remain on disk and
-  can still be opened by full UUID or file path, or with `agent read`,
-  `agent outline`, and `agent within`.
+  `agent search`. Defaults to empty. Matching is literal and case-sensitive
+  (case-insensitive on Windows, where paths differing only in case are the same
+  directory): `"/tmp/"` matches `"/tmp/eval-123"`, but not `"/tmp"` or
+  `"/tmp-other"`; `"/tmp"` matches all three. Paths are not resolved, so
+  deleted directories still match; list both `"/tmp/"` and `"/private/tmp/"` to
+  cover both spellings. No `~`, environment-variable, or glob expansion is
+  performed. Empty entries are ignored, and sessions without a recorded working
+  directory stay visible. Exclusions apply in local and global scope.
+  Transcripts remain on disk and can still be opened by full UUID or file path,
+  or with `agent read`, `agent outline`, and `agent within`.
 - `semantic_search` (boolean): Deprecated compatibility alias. When
   `[search].mode` is unset, `true` starts list search in semantic mode and
   `false` starts lexical mode. Press `Ctrl+T` in the TUI to switch modes.

@@ -279,7 +279,10 @@ fn run() -> Result<()> {
                         .as_ref()
                         .or(conv.cwd.as_ref())
                         .is_some_and(|path| {
-                            path.canonicalize().unwrap_or_else(|_| path.clone()) == current
+                            history::path::same_path(
+                                &path.canonicalize().unwrap_or_else(|_| path.clone()),
+                                &current,
+                            )
                         });
                 }
                 return conv

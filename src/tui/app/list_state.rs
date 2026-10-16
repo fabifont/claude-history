@@ -252,7 +252,10 @@ where
                     .as_ref()
                     .or(conversations[idx].borrow().cwd.as_ref())
                     .is_some_and(|path| {
-                        path.canonicalize().unwrap_or_else(|_| path.clone()) == current
+                        crate::history::path::same_path(
+                            &path.canonicalize().unwrap_or_else(|_| path.clone()),
+                            &current,
+                        )
                     });
             }
             conversations[idx]
@@ -304,7 +307,9 @@ pub(super) fn card_project_visible(
         return true;
     };
     if project.key_is_path {
-        workspace.current_dir.as_deref() == Some(project.workspace_key)
+        workspace.current_dir.as_deref().is_some_and(|current| {
+            crate::history::path::same_path_str(current, project.workspace_key)
+        })
     } else {
         crate::history::path::is_same_project(project.workspace_key, project_dir_name)
     }
