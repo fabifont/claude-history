@@ -224,7 +224,7 @@ pub struct Header {
 }
 
 pub const MAGIC: [u8; 8] = *b"CHGEN\0\0\0";
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 
 pub fn source_to_u8(source: crate::history::model::SourceKind) -> u8 {
     match source {

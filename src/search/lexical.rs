@@ -385,18 +385,22 @@ fn search_debug_with_query(
 /// suffix index can count adjacent pairs from its terms.
 pub(crate) const PAIR_PREFIX: usize = 3;
 
+/// The part of a pair's second word that adjacency compares: its first
+/// `PAIR_PREFIX` bytes cut on a char boundary, or its first char when that
+/// char alone is longer, so a pair always holds at least one char of it.
+pub(crate) fn pair_prefix(word: &str) -> &str {
+    match truncate_on_char_boundary(word, PAIR_PREFIX) {
+        "" => word.chars().next().map_or("", |c| &word[..c.len_utf8()]),
+        prefix => prefix,
+    }
+}
+
 /// Strings whose word-start occurrences count as adjacent query words: each
-/// word, a space, and the first `PAIR_PREFIX` bytes of the next word.
+/// word, a space, and the `pair_prefix` of the next word.
 pub(crate) fn adjacent_pairs<S: AsRef<str>>(query_words: &[S]) -> Vec<String> {
     query_words
         .windows(2)
-        .map(|w| {
-            format!(
-                "{} {}",
-                w[0].as_ref(),
-                truncate_on_char_boundary(w[1].as_ref(), PAIR_PREFIX)
-            )
-        })
+        .map(|w| format!("{} {}", w[0].as_ref(), pair_prefix(w[1].as_ref())))
         .collect()
 }
 
@@ -1095,6 +1099,18 @@ mod tests {
         let searchable = precompute_search_text(&convs);
         let results = search(&convs, &searchable, "agents config", now);
         assert_eq!(results[0], 0, "adjacent terms should score higher");
+    }
+
+    #[test]
+    fn adjacency_compares_a_four_byte_next_word() {
+        let now = Local::now();
+        let adjacent = make_conv("fiesta 🎉 time", now - Duration::days(5));
+        let separated = make_conv("fiesta then later 🎉", now - Duration::days(3));
+        let convs = vec![adjacent, separated];
+        let searchable = precompute_search_text(&convs);
+        assert_eq!(adjacent_pairs(&["fiesta", "🎉"]), ["fiesta 🎉"]);
+        assert_eq!(adjacent_pairs(&["a", "𠀀x"]), ["a 𠀀"]);
+        assert_eq!(search(&convs, &searchable, "fiesta 🎉", now), [0, 1]);
     }
 
     #[test]

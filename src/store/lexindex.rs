@@ -15,7 +15,8 @@
 //! of that space-delimited chunk, cut to `TERM_CAP` bytes on a char
 //! boundary. When the chunk rest fits uncut and the chunk is followed by a
 //! single space and another chunk, the term continues with that space and
-//! the first `PAIR_PREFIX` bytes of the next chunk.
+//! the next chunk's `pair_prefix`: its first `PAIR_PREFIX` bytes, or its
+//! first char when that char is longer.
 //!
 //! Normalized query words contain no spaces and every prefix match starts at
 //! a word start inside one chunk, so the summed term frequencies of all terms
@@ -43,7 +44,7 @@
 //! `[u8; n_docs]` column or a sparse posting list, whichever is smaller.
 
 use super::generation::write_synced;
-use crate::search::lexical::PAIR_PREFIX;
+use crate::search::lexical::pair_prefix;
 use crate::text_match::truncate_on_char_boundary;
 use bytemuck::{Pod, Zeroable};
 use fst::{IntoStreamer, Streamer};
@@ -171,7 +172,7 @@ impl ShortRow {
 /// Calls `emit` with the term of every word start in `lowered` (normalized
 /// text): the rest of its chunk cut to `TERM_CAP` bytes, and when the chunk
 /// fits uncut and is followed by one space and another chunk, that space and
-/// the next chunk's first `PAIR_PREFIX` bytes.
+/// the next chunk's `pair_prefix`.
 pub fn for_each_term<'t>(lowered: &'t str, mut emit: impl FnMut(&'t str)) {
     let mut chunk_start = 0;
     while chunk_start < lowered.len() {
@@ -179,8 +180,7 @@ pub fn for_each_term<'t>(lowered: &'t str, mut emit: impl FnMut(&'t str)) {
             .find(' ')
             .map_or(lowered.len(), |i| chunk_start + i);
         let next = &lowered[(chunk_end + 1).min(lowered.len())..];
-        let next =
-            truncate_on_char_boundary(&next[..next.find(' ').unwrap_or(next.len())], PAIR_PREFIX);
+        let next = pair_prefix(&next[..next.find(' ').unwrap_or(next.len())]);
         let mut prev_alnum = false;
         for (i, ch) in lowered[chunk_start..chunk_end].char_indices() {
             if !prev_alnum {
@@ -1085,6 +1085,10 @@ mod tests {
         let mut terms = Vec::new();
         for_each_term("a 测试", |term| terms.push(term.to_string()));
         assert_eq!(terms, ["a 测", "测试"]);
+        // A next chunk starting with a four-byte char contributes that char.
+        let mut terms = Vec::new();
+        for_each_term("fiesta 🎉 now", |term| terms.push(term.to_string()));
+        assert_eq!(terms, ["fiesta 🎉", "🎉 now", "now"]);
         let mut inner = Vec::new();
         for_each_inner_term("这是测试 x会话 测 a测", |rest| {
             inner.push(rest.to_string())

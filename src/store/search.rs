@@ -1654,11 +1654,8 @@ mod tests {
 
     /// Generated corpora built from `ADVERSARIAL_VOCAB`, searched through the
     /// index and in memory, in both modes. Reports every query that differs.
-    /// Run with
-    /// `cargo test --bin claude-history search_qa_adversarial -- --ignored --nocapture`.
     #[test]
-    #[ignore = "slow; run with --ignored"]
-    fn search_qa_adversarial_corpora_match_in_memory_search() {
+    fn adversarial_corpora_match_in_memory_search() {
         let mut failures = Vec::new();
         for seed in [11, 12, 13, 14, 0x51ed_270b_2717_4c2f] {
             let (conversations, now) = adversarial_corpus(seed, 400);
