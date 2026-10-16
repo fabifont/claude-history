@@ -1916,8 +1916,15 @@ mod tests {
         let lock = crate::store::generation::PublishLock::try_acquire(root.path())
             .unwrap()
             .unwrap();
-        publish_live(&lock, &conversations[300..]);
-        for conversation in conversations.iter_mut().skip(300).step_by(97) {
+        // The newest 300 sessions, or half of a smaller history, arrive in
+        // the delta.
+        assert!(
+            conversations.len() >= 2,
+            "a base and a delta need at least two conversations"
+        );
+        let delta = 300.min(conversations.len() / 2);
+        publish_live(&lock, &conversations[delta..]);
+        for conversation in conversations.iter_mut().skip(delta).step_by(97) {
             conversation.full_text =
                 format!("{} zstd generation snapshot", conversation.full_text).into();
         }
