@@ -19,7 +19,7 @@ use super::generation::{
 use super::legacy;
 use super::progress::{self, Reporter};
 use crate::history::Conversation;
-use crate::history::adapter::{Completeness, FileId, Located};
+use crate::history::adapter::{Completeness, Discovery, FileId, Located};
 use crate::history::index::Indexer;
 use crate::history::model::SourceKind;
 use crate::history::sources::Registry;
@@ -50,6 +50,26 @@ pub struct Outcome {
     pub parsed: usize,
     /// Old caches removed after publishing.
     pub removed: legacy::Removed,
+    /// Session files parsed into a conversation, which may have new text.
+    pub changed: Vec<PathBuf>,
+}
+
+/// What a targeted pass looks at: the files it was told may have changed,
+/// and instances it lists whole as a full pass would. Everything else the
+/// store holds is kept as it is, so a file removed outside the targets
+/// stays listed until a full pass.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Targets {
+    /// Session files of any instance, by their own artifact.
+    pub paths: Vec<PathBuf>,
+    /// Instances to list whole.
+    pub instances: Vec<SourceKind>,
+}
+
+impl Targets {
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.instances.is_empty()
+    }
 }
 
 /// Runs one pass over the instances of `sources` into the store at `root`.
@@ -58,6 +78,26 @@ pub fn reconcile(root: &Path, sources: &Registry) -> io::Result<Outcome> {
 }
 
 pub fn reconcile_with(root: &Path, sources: &Registry, policy: MergePolicy) -> io::Result<Outcome> {
+    run(root, sources, policy, || scan(sources))
+}
+
+/// Runs one pass over `targets` only (see `Targets`).
+pub fn reconcile_targets(
+    root: &Path,
+    sources: &Registry,
+    targets: &Targets,
+) -> io::Result<Outcome> {
+    run(root, sources, MergePolicy::DEFAULT, || {
+        scan_targets(sources, targets)
+    })
+}
+
+fn run(
+    root: &Path,
+    sources: &Registry,
+    policy: MergePolicy,
+    scan: impl FnOnce() -> Scan,
+) -> io::Result<Outcome> {
     let mut outcome = Outcome {
         publish: Publish::Busy,
         published: 0,
@@ -65,6 +105,7 @@ pub fn reconcile_with(root: &Path, sources: &Registry, policy: MergePolicy) -> i
         scanned: 0,
         parsed: 0,
         removed: legacy::Removed::default(),
+        changed: Vec::new(),
     };
     let Some(lock) = PublishLock::try_acquire(root)? else {
         return Ok(outcome);
@@ -72,7 +113,7 @@ pub fn reconcile_with(root: &Path, sources: &Registry, policy: MergePolicy) -> i
     outcome.publish = Publish::Unchanged;
     // Left by an earlier process that stopped without removing it.
     progress::clear(root);
-    let scan = scan(sources);
+    let scan = scan();
     outcome.scanned = scan.files.len();
     crate::bench::mark("reconcile_scanned");
 
@@ -97,6 +138,12 @@ pub fn reconcile_with(root: &Path, sources: &Registry, policy: MergePolicy) -> i
         let batch = take_batch(&mut pending, first, sources, counter);
         first = false;
         outcome.parsed += batch.len();
+        outcome.changed.extend(
+            batch
+                .iter()
+                .filter(|(_, parsed)| matches!(parsed, Parsed::Conversation(_)))
+                .map(|(found, _)| found.located.path.clone()),
+        );
         let docs = apply_batch(base.as_ref(), &mut keep, &mut ignored, batch);
         let (publish, written) = generation::publish_update(
             &lock,
@@ -198,12 +245,48 @@ fn scan(sources: &Registry) -> Scan {
 
 fn scan_on_current_pool(sources: &Registry) -> Scan {
     let started = SystemTime::now();
-    let mut scan = Scan::default();
     let discoveries: Vec<_> = sources
         .adapters()
         .par_iter()
         .map(|adapter| (adapter.instance().kind, adapter.discover(started)))
         .collect();
+    collect(discoveries)
+}
+
+/// The conversations of `targets`: each target file located through the
+/// first instance whose root holds it, and the instances to list whole
+/// listed. Every other instance counts as unlisted, so its cards are kept.
+fn scan_targets(sources: &Registry, targets: &Targets) -> Scan {
+    let started = SystemTime::now();
+    let discoveries = sources
+        .adapters()
+        .iter()
+        .map(|adapter| {
+            let instance = adapter.instance();
+            if targets.instances.contains(&instance.kind) {
+                return (instance.kind, adapter.discover(started));
+            }
+            let found = targets
+                .paths
+                .iter()
+                .filter(|path| path.starts_with(&instance.root))
+                .filter_map(|path| adapter.native_id_of(path))
+                .filter_map(|native_id| adapter.resolve(&native_id, started).ok())
+                .collect();
+            (
+                instance.kind,
+                Discovery {
+                    found,
+                    completeness: Completeness::Degraded,
+                },
+            )
+        })
+        .collect();
+    collect(discoveries)
+}
+
+fn collect(discoveries: Vec<(SourceKind, Discovery)>) -> Scan {
+    let mut scan = Scan::default();
     // A file listed by several sources, as when the Pi and OMP roots are
     // one directory, is parsed once and kept for whichever source it holds.
     let mut ids: HashMap<FileId, usize> = HashMap::new();
@@ -996,6 +1079,68 @@ mod tests {
         assert_eq!(locked.publish, Publish::Unchanged);
         assert_eq!(fixture.current().rows().len(), generation.rows().len());
         db.execute_batch("COMMIT;").unwrap();
+    }
+
+    #[test]
+    fn a_targeted_pass_parses_only_its_targets_and_keeps_the_rest() {
+        let fixture = Fixture::new();
+        let a = fixture.claude("-tmp-work", "a.jsonl", "hello alpha");
+        let b = fixture.claude("-tmp-work", "b.jsonl", "hello beta");
+        settle_all(fixture._dir.path());
+        fixture.run();
+        let sources = Registry::with_roots(
+            Some(fixture.projects.clone()),
+            Some(fixture.pi.clone()),
+            Some(fixture.omp.clone()),
+        );
+
+        let append = |path: &Path, text: &str| {
+            let line = serde_json::json!({
+                "type": "user",
+                "timestamp": "2024-01-02T00:00:00Z",
+                "message": {"role": "user", "content": text}
+            });
+            let mut file = fs::File::options().append(true).open(path).unwrap();
+            std::io::Write::write_all(&mut file, format!("{line}\n").as_bytes()).unwrap();
+            drop(file);
+            settle(path);
+        };
+        append(&a, "appended zebra");
+        append(&b, "appended yak");
+        fs::remove_file(fixture.pi.path.join("--tmp-pi--").join("one.jsonl")).unwrap();
+        let c = fixture.claude("-tmp-new", "c.jsonl", "hello gamma");
+        let targets = Targets {
+            paths: vec![
+                a.clone(),
+                c.clone(),
+                fixture.projects.join("-tmp-x/gone.jsonl"),
+            ],
+            instances: Vec::new(),
+        };
+        let outcome = reconcile_targets(&fixture.root, &sources, &targets).unwrap();
+        assert_eq!(outcome.parsed, 2);
+        let mut changed = outcome.changed.clone();
+        changed.sort();
+        assert_eq!(changed, vec![c.clone(), a.clone()]);
+        assert!(fixture.text_of(&a).contains("appended zebra"));
+        assert!(fixture.text_of(&c).contains("hello gamma"));
+        // Neither the untargeted change nor the removal is seen yet.
+        assert!(!fixture.text_of(&b).contains("appended yak"));
+        assert_eq!(fixture.paths().len(), 5);
+
+        // Listing Pi whole drops its removed session.
+        let targets = Targets {
+            paths: Vec::new(),
+            instances: vec![SourceKind::Pi],
+        };
+        let outcome = reconcile_targets(&fixture.root, &sources, &targets).unwrap();
+        assert!(matches!(outcome.publish, Publish::Published(_)));
+        assert!(outcome.changed.is_empty());
+        assert_eq!(fixture.paths().len(), 4);
+
+        let outcome = fixture.run();
+        assert_eq!(outcome.changed, vec![b.clone()]);
+        assert!(fixture.text_of(&b).contains("appended yak"));
     }
 
     #[test]
