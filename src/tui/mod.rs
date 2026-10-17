@@ -1,6 +1,7 @@
 mod app;
 mod command_tags;
 mod export;
+mod preview_worker;
 mod runtime;
 pub mod search;
 mod semantic_worker;

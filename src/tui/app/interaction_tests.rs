@@ -784,17 +784,61 @@ fn list_preview_anchors_on_the_first_match() {
     );
     let mut app = app_searching(path, "token");
 
-    app.fill_list_preview(60);
+    app.fill_list_preview(60, std::time::Duration::from_secs(30));
 
-    let preview = app.list_preview().unwrap();
-    let anchor = preview.anchor.unwrap();
-    let text: String = preview.lines[anchor]
-        .spans
-        .iter()
-        .map(|(text, _)| text.as_str())
-        .collect();
-    assert!(text.contains("now rotate the token"), "{text}");
-    assert!(preview.scroll_offset(20) <= anchor);
+    let Some(PreviewView::Ready { doc, anchor }) = app.list_preview() else {
+        panic!("preview not ready");
+    };
+    let anchor = anchor.unwrap();
+    assert!(
+        doc.texts[anchor].contains("now rotate the token"),
+        "{}",
+        doc.texts[anchor]
+    );
+    assert!(doc.scroll_offset(Some(anchor), 20) <= anchor);
+}
+
+#[test]
+fn list_preview_keeps_showing_the_conversation_while_the_query_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dialogue.jsonl");
+    write_dialogue(
+        &path,
+        &[("user", "set up the tunnel"), ("user", "rotate the token")],
+    );
+    let mut app = app_searching(path, "tunnel");
+    app.fill_list_preview(60, std::time::Duration::from_secs(30));
+
+    app.query = "token".to_string();
+    // Requested without waiting: the previous reply stays on screen.
+    app.fill_list_preview(60, std::time::Duration::ZERO);
+    assert!(matches!(
+        app.list_preview(),
+        Some(PreviewView::Ready { .. })
+    ));
+
+    app.fill_list_preview(60, std::time::Duration::from_secs(30));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let Some(PreviewView::Ready { doc, anchor }) = app.list_preview() else {
+            panic!("preview not ready");
+        };
+        if anchor.is_some_and(|line| doc.texts[line].contains("token")) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "anchor never moved");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app.fill_list_preview(60, std::time::Duration::ZERO);
+    }
+}
+
+#[test]
+fn list_preview_of_a_missing_file_says_why() {
+    let mut app = app_searching(PathBuf::from("/nonexistent/gone.jsonl"), "hello");
+
+    app.fill_list_preview(60, std::time::Duration::from_secs(30));
+
+    assert!(matches!(app.list_preview(), Some(PreviewView::Failed(_))));
 }
 
 #[test]

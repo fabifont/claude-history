@@ -30,7 +30,7 @@ mod search_state;
 mod types;
 mod view_state;
 #[allow(unused_imports)]
-pub use list_preview::ListPreview;
+pub use list_preview::PreviewView;
 #[allow(unused_imports)]
 use search_state::{
     IndexScope, SearchCommand, SearchResponse, SemanticCorpus, SemanticSearchState,
@@ -42,7 +42,6 @@ pub use types::{
     SemanticProgress, SemanticResultMetadata, TuiSearchOptions, ViewFamily, ViewSearchMode,
     ViewState, list_lines_per_item,
 };
-pub use view_state::line_matches_query;
 
 /// Cards materialized for the first frame. Bounded so the first frame costs
 /// the same whatever the corpus size; the full list follows once the index
@@ -111,7 +110,7 @@ pub struct App {
     /// Conversations related to the one in the viewer
     view_family: ViewFamily,
     /// Selected search result as rendered in the list's preview pane
-    list_preview: Option<list_preview::ListPreview>,
+    list_preview: list_preview::ListPreviewState,
     /// Status message with timestamp for auto-clear
     status_message: Option<(String, std::time::Instant)>,
     /// Progress of the reconcile pass shown as indexing
@@ -207,7 +206,7 @@ impl App {
             app_mode: parts.app_mode,
             view_stack: Vec::new(),
             view_family: ViewFamily::default(),
-            list_preview: None,
+            list_preview: Default::default(),
             status_message: None,
             indexing: None,
             tool_display: parts.tool_display,

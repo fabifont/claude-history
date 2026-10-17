@@ -5,8 +5,8 @@ use crate::search::normalize_for_search;
 use crate::search::query::ParsedQuery;
 use crate::text_match::{NormalizedText, is_word_separator};
 use crate::tui::app::{
-    App, AppMode, DialogMode, ListSearchMode, SemanticResultMetadata, ViewSearchMode, ViewState,
-    line_matches_query, list_lines_per_item,
+    App, AppMode, DialogMode, ListSearchMode, PreviewView, SemanticResultMetadata, ViewSearchMode,
+    ViewState, list_lines_per_item,
 };
 use crate::tui::theme::{self, Theme};
 use crate::tui::viewer::{LineStyle, RenderedLine};
@@ -1181,12 +1181,25 @@ fn highlight_line_matches(
         .map(|(text, _)| text.as_str())
         .collect();
     let match_byte_ranges = query.0.match_ranges(&full_text);
+    highlight_ranges_in_line(rendered, &full_text, &match_byte_ranges, is_current_match)
+        .into_iter()
+        .map(|span| Span::styled(span.content.into_owned(), span.style))
+        .collect()
+}
 
+/// `rendered` with `match_byte_ranges` of `full_text`, its spans joined,
+/// highlighted. Matches may span several styled spans.
+fn highlight_ranges_in_line<'a>(
+    rendered: &'a RenderedLine,
+    full_text: &'a str,
+    match_byte_ranges: &[(usize, usize)],
+    is_current_match: bool,
+) -> Vec<Span<'a>> {
     if match_byte_ranges.is_empty() {
         return rendered
             .spans
             .iter()
-            .map(|(t, s)| styled_span(t, s))
+            .map(|(text, style)| Span::styled(text.as_str(), build_style(style)))
             .collect();
     }
 
@@ -1199,7 +1212,7 @@ fn highlight_line_matches(
     };
 
     // Build output spans by walking through original spans and splitting at match boundaries
-    let mut result: Vec<Span<'static>> = Vec::new();
+    let mut result: Vec<Span<'a>> = Vec::new();
     let mut match_idx = 0;
     let mut global_offset: usize = 0;
 
@@ -1220,29 +1233,23 @@ fn highlight_line_matches(
                 if pos >= ms && pos < me {
                     // Inside a match
                     let end = me.min(span_end);
-                    result.push(Span::styled(full_text[pos..end].to_string(), match_style));
+                    result.push(Span::styled(&full_text[pos..end], match_style));
                     pos = end;
                 } else if ms < span_end {
                     // There's a match starting within this span, emit text before it
                     let end = ms.min(span_end);
                     if end > pos {
-                        result.push(Span::styled(full_text[pos..end].to_string(), base_style));
+                        result.push(Span::styled(&full_text[pos..end], base_style));
                     }
                     pos = end;
                 } else {
                     // No more matches in this span
-                    result.push(Span::styled(
-                        full_text[pos..span_end].to_string(),
-                        base_style,
-                    ));
+                    result.push(Span::styled(&full_text[pos..span_end], base_style));
                     pos = span_end;
                 }
             } else {
                 // No more matches at all
-                result.push(Span::styled(
-                    full_text[pos..span_end].to_string(),
-                    base_style,
-                ));
+                result.push(Span::styled(&full_text[pos..span_end], base_style));
                 pos = span_end;
             }
         }
@@ -1707,38 +1714,46 @@ fn render_list_preview(frame: &mut Frame, app: &App, area: Rect, beside: bool) {
         width: inner.width.saturating_sub(1),
         ..inner
     };
-    let Some(preview) = app.list_preview() else {
-        return;
+    let notice = |text: &str| {
+        Paragraph::new(Line::styled(
+            format!("  {text}"),
+            Style::default().fg(rgb(th().text_muted)),
+        ))
+    };
+    let (doc, anchor) = match app.list_preview() {
+        None | Some(PreviewView::Loading { notice: false }) => return,
+        Some(PreviewView::Loading { notice: true }) => {
+            frame.render_widget(notice("Loading…"), inner);
+            return;
+        }
+        Some(PreviewView::Failed(error)) => {
+            frame.render_widget(notice(&format!("Cannot preview: {error}")), inner);
+            return;
+        }
+        Some(PreviewView::Ready { doc, anchor }) => (doc, anchor),
     };
 
     let height = inner.height as usize;
     let query = ViewSearchQuery::parse(app.query());
-    let lines: Vec<Line> = preview
-        .lines
+    let offset = doc.scroll_offset(anchor, height);
+    let lines: Vec<Line> = doc.lines[offset..]
         .iter()
-        .enumerate()
-        .skip(preview.scroll_offset(height))
+        .zip(&doc.texts[offset..])
+        .zip(offset..)
         .take(height)
-        .map(|(idx, rendered)| {
-            let mut spans = vec![if preview.anchor == Some(idx) {
+        .map(|((rendered, text), idx)| {
+            let is_anchor = anchor == Some(idx);
+            let mut spans = vec![if is_anchor {
                 Span::styled("▌ ", Style::default().fg(rgb(th().accent)))
             } else {
                 Span::raw("  ")
             }];
-            if line_matches_query(rendered, &query) {
-                spans.extend(highlight_line_matches(
-                    rendered,
-                    &query,
-                    preview.anchor == Some(idx),
-                ));
+            let ranges = if query.is_empty() {
+                Vec::new()
             } else {
-                spans.extend(
-                    rendered
-                        .spans
-                        .iter()
-                        .map(|(text, style)| styled_span(text, style)),
-                );
-            }
+                query.0.match_ranges(text)
+            };
+            spans.extend(highlight_ranges_in_line(rendered, text, &ranges, is_anchor));
             Line::from(spans)
         })
         .collect();

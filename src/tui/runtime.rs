@@ -9,7 +9,7 @@ use crate::time_filter::TimeFilter;
 use crate::tui::viewer::ToolDisplayMode;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
-    MouseEventKind,
+    MouseEvent, MouseEventKind,
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
@@ -96,6 +96,25 @@ enum RuntimeEvent {
     /// A reconcile process exited, with this status if it could be waited
     /// on.
     Reconciled(Option<std::process::ExitStatus>),
+    /// The list's preview worker has a reply to draw.
+    PreviewReady,
+}
+
+/// Most queued events handled before drawing again, so a long backlog still
+/// shows progress.
+const MAX_EVENTS_PER_FRAME: usize = 64;
+
+/// Whether handling events queued after `event` needs the frame it changes
+/// drawn first: its handler reads the layout of the frame that was drawn.
+fn needs_fresh_frame(event: &RuntimeEvent) -> bool {
+    matches!(
+        event,
+        RuntimeEvent::Input(Event::Resize(..))
+            | RuntimeEvent::Input(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(_),
+                ..
+            }))
+    )
 }
 
 /// How long the input thread waits for terminal input before checking
@@ -163,11 +182,15 @@ fn prepare_frame(
 
     app.check_view_resize(content_width, viewport_height);
     if matches!(app.app_mode(), AppMode::List) {
-        if let Some(preview) = ui::list_layout_rects(frame_area, app).preview {
-            app.fill_list_preview(ui::list_preview_content_width(preview, app.show_timing()));
+        let layout = ui::list_layout_rects(frame_area, app);
+        if let Some(preview) = layout.preview {
+            app.fill_list_preview(
+                ui::list_preview_content_width(preview, app.show_timing()),
+                super::preview_worker::SAME_FRAME_BUDGET,
+            );
         }
         let lines_per_item = super::app::list_lines_per_item(app.list_search_mode(), app.query());
-        app.fill_visible_evidence(viewport_height / lines_per_item.max(1));
+        app.fill_visible_evidence(layout.list.height as usize / lines_per_item.max(1));
     }
     let viewport_height = match app.app_mode() {
         AppMode::View(state) => {
@@ -523,6 +546,11 @@ pub fn run_with_loader(
     }
     prepare_frame(&mut app, &mut guard.terminal);
     draw_frame(&app, &mut guard.terminal)?;
+    // After the first draw, which detected the theme the worker renders with.
+    let preview_tx = events_tx.clone();
+    app.start_list_preview_worker(Box::new(move || {
+        let _ = preview_tx.send(RuntimeEvent::PreviewReady);
+    }));
     let mut reported_first_rows = report_first_rows(&app);
     if app.open_search_index() {
         crate::bench::mark("index_open");
@@ -536,14 +564,22 @@ pub fn run_with_loader(
     // The first pass has not finished; an empty list may still fill.
     let mut starting = true;
 
+    let mut frame_state = prepare_frame(&mut app, &mut guard.terminal);
+    // Event taken from the queue to handle before drawing again
+    let mut queued: Option<RuntimeEvent> = None;
+    let mut handled_since_draw = 0;
     loop {
-        let frame_state = prepare_frame(&mut app, &mut guard.terminal);
-        draw_frame(&app, &mut guard.terminal)?;
-        if !reported_first_rows {
-            reported_first_rows = report_first_rows(&app);
-        }
-        if app.receive_search_results() {
+        if queued.is_none() {
+            frame_state = prepare_frame(&mut app, &mut guard.terminal);
             draw_frame(&app, &mut guard.terminal)?;
+            handled_since_draw = 0;
+            if !reported_first_rows {
+                reported_first_rows = report_first_rows(&app);
+            }
+            if app.receive_search_results() {
+                frame_state = prepare_frame(&mut app, &mut guard.terminal);
+                draw_frame(&app, &mut guard.terminal)?;
+            }
         }
         if let Some(store) = &mut store {
             if app.take_reconcile_request() {
@@ -568,23 +604,32 @@ pub fn run_with_loader(
                 .is_some_and(Store::pending)
                 .then_some(GENERATION_POLL),
             app.status_message_remaining(),
+            app.list_preview_notice_in(),
         ]
         .into_iter()
         .flatten()
         .min();
-        let received = match wait {
-            Some(wait) => events_rx.recv_timeout(wait),
-            None => events_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        let received = match (queued.take(), wait) {
+            (Some(event), _) => Ok(event),
+            (None, Some(wait)) => events_rx.recv_timeout(wait),
+            (None, None) => events_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
         let event = match received {
             Ok(event) => event,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => unreachable!("events_tx is held by the loop"),
         };
+        // Handle what queued up behind this event before drawing, so a held
+        // key or a mouse sweep costs a frame per batch, not per event.
+        handled_since_draw += 1;
+        if handled_since_draw < MAX_EVENTS_PER_FRAME && !needs_fresh_frame(&event) {
+            queued = events_rx.try_recv().ok();
+        }
 
         let ev = match event {
             RuntimeEvent::Input(ev) => ev,
             RuntimeEvent::InputError(err) => return Err(AppError::Io(err)),
+            RuntimeEvent::PreviewReady => continue,
             RuntimeEvent::Reconciled(status) => {
                 let Some(store) = &mut store else {
                     continue;

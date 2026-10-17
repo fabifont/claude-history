@@ -168,11 +168,29 @@ pub fn render_parsed_conversation(
     entries: &[RenderableEntry],
     options: &RenderOptions,
 ) -> RenderedConversation {
+    render_parsed_conversation_until(entries, options, &|| false)
+        .expect("rendering that never stops finishes")
+}
+
+/// Entries rendered between checks of `stop` in
+/// [`render_parsed_conversation_until`].
+const STOP_CHECK_INTERVAL: usize = 32;
+
+/// [`render_parsed_conversation`], giving up with `None` once `stop` returns
+/// true. `stop` is checked between entries.
+pub fn render_parsed_conversation_until(
+    entries: &[RenderableEntry],
+    options: &RenderOptions,
+    stop: &dyn Fn() -> bool,
+) -> Option<RenderedConversation> {
     let mut lines = Vec::new();
     let mut messages = Vec::new();
     let mut pending_tool_summary: Option<PendingToolSummary> = None;
 
     for (parsed_idx, parsed) in entries.iter().enumerate() {
+        if parsed_idx % STOP_CHECK_INTERVAL == 0 && stop() {
+            return None;
+        }
         if options.tool_display.groups_tools()
             && try_extend_or_start_pending_summary(
                 &mut lines,
@@ -207,7 +225,7 @@ pub fn render_parsed_conversation(
 
     postprocess_blank_lines(&mut lines, &mut messages);
 
-    RenderedConversation { lines, messages }
+    Some(RenderedConversation { lines, messages })
 }
 
 /// Handle a parsed entry while in summary tool-display mode.

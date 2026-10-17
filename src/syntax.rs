@@ -18,6 +18,23 @@ fn get_theme_set() -> &'static ThemeSet {
     THEME_SET.get_or_init(ThemeSet::load_defaults)
 }
 
+/// Loads the syntax and theme definitions and compiles the grammars of
+/// languages common in conversations, so the first highlight does not pay
+/// for them. Needs the TUI theme to be detected already.
+pub fn warm() {
+    for (code, lang) in [
+        ("fn main() {}", "rust"),
+        ("const a = 1;", "typescript"),
+        ("def f(): pass", "python"),
+        ("echo hi", "bash"),
+        ("{\"a\": 1}", "json"),
+        ("a: 1", "yaml"),
+        ("# a", "markdown"),
+    ] {
+        let _ = highlight_code_tui(code, lang);
+    }
+}
+
 /// Normalize common language aliases to their canonical names
 fn normalize_language(lang: &str) -> &str {
     // Take only the first token (handle "rust,ignore" or "rust title=x")
