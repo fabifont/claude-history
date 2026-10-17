@@ -555,8 +555,7 @@ pub fn run_with_loader(
         let wait = [
             app.has_search_work_in_flight()
                 .then_some(Duration::from_millis(8)),
-            app.semantic_indexing()
-                .is_some()
+            app.semantic_worker_busy()
                 .then_some(Duration::from_millis(250)),
             store
                 .as_ref()

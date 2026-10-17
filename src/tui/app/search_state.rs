@@ -24,6 +24,10 @@ pub(super) struct SemanticSearchState {
     /// Progress of embedding the conversations the worker has no
     /// embeddings for, while it does.
     pub(super) indexing: Option<SemanticIndexing>,
+    /// Generation of the newest search sent to the worker until the worker
+    /// reports it has nothing left to do for it. Its messages arrive on
+    /// their own channel, so they are polled for meanwhile.
+    pub(super) busy_generation: Option<u64>,
     pub(super) last_status: SemanticProgress,
     pub(super) error: Option<String>,
     pub(super) results: HashMap<usize, SemanticResultMetadata>,
@@ -763,6 +767,7 @@ impl App {
                 user_only: false,
             });
         }
+        self.semantic_search.busy_generation = Some(generation);
         if !self.send_semantic_command(SemanticWorkerCommand::Search {
             generation,
             query: ParsedQuery::parse(&query),
@@ -774,6 +779,7 @@ impl App {
             let Some((corpus_version, scope_version)) = self.send_semantic_state() else {
                 self.semantic_search.error = Some("semantic worker unavailable".to_string());
                 self.semantic_search.pending_status = Some(SemanticProgress::Failed);
+                self.semantic_search.busy_generation = None;
                 return;
             };
             if !self.send_semantic_command(SemanticWorkerCommand::Search {
@@ -785,6 +791,7 @@ impl App {
             }) {
                 self.semantic_search.error = Some("semantic worker unavailable".to_string());
                 self.semantic_search.pending_status = Some(SemanticProgress::Failed);
+                self.semantic_search.busy_generation = None;
             }
         }
     }
@@ -872,10 +879,21 @@ impl App {
                             }
                         }
                     }
+                    SemanticSearchMessage::Idle { generation } => {
+                        self.semantic_search.indexing = None;
+                        if self
+                            .semantic_search
+                            .busy_generation
+                            .is_some_and(|busy| busy <= generation)
+                        {
+                            self.semantic_search.busy_generation = None;
+                        }
+                        applied = true;
+                    }
                     SemanticSearchMessage::Indexing(indexing) => {
                         // A search waiting for indexing shows its progress.
-                        if let (Some(SemanticProgress::Embedding { .. }), Some(indexing)) =
-                            (&self.semantic_search.pending_status, indexing)
+                        if let Some(SemanticProgress::Embedding { .. }) =
+                            &self.semantic_search.pending_status
                         {
                             self.semantic_search.pending_status =
                                 Some(SemanticProgress::Embedding {
@@ -883,7 +901,7 @@ impl App {
                                     total: indexing.total,
                                 });
                         }
-                        self.semantic_search.indexing = indexing;
+                        self.semantic_search.indexing = Some(indexing);
                         applied = true;
                     }
                     SemanticSearchMessage::Complete(response) => {
@@ -942,6 +960,12 @@ impl App {
     /// Progress of the semantic worker's background indexing, while it runs.
     pub fn semantic_indexing(&self) -> Option<SemanticIndexing> {
         self.semantic_search.indexing
+    }
+
+    /// Whether the semantic worker may still send messages for the searches
+    /// sent to it.
+    pub fn semantic_worker_busy(&self) -> bool {
+        self.semantic_search.busy_generation.is_some() || self.semantic_search.indexing.is_some()
     }
 
     pub fn has_search_work_in_flight(&self) -> bool {
@@ -1051,15 +1075,7 @@ impl App {
             .prewarm_status
             .as_ref()
             .or(self.semantic_search.pending_status.as_ref());
-        let Some(status) = status else {
-            let SemanticIndexing { completed, total } = self.semantic_search.indexing?;
-            let percent = completed.min(total).saturating_mul(100) / total.max(1);
-            return Some(format!(
-                "sem indexing {percent}%  {}/{total} chunks",
-                completed.min(total)
-            ));
-        };
-        match status {
+        let search = status.and_then(|status| match status {
             SemanticProgress::InitializingModel => Some("sem preparing embeddings".to_string()),
             SemanticProgress::Embedding { completed, total } => {
                 let percent = if *total == 0 {
@@ -1073,7 +1089,15 @@ impl App {
                 ))
             }
             _ => None,
-        }
+        });
+        search.or_else(|| {
+            let SemanticIndexing { completed, total } = self.semantic_search.indexing?;
+            let percent = completed.min(total).saturating_mul(100) / total.max(1);
+            Some(format!(
+                "sem indexing {percent}%  {}/{total} chunks",
+                completed.min(total)
+            ))
+        })
     }
 
     pub(super) fn toggle_workspace_filter(&mut self) {

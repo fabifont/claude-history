@@ -1227,6 +1227,48 @@ fn semantic_progress_messages_update_activity_status_text() {
 }
 
 #[test]
+fn background_indexing_shows_its_progress_until_it_finishes() {
+    let mut app = app_with_semantic_mode(vec![conversation(
+        Some("Visible"),
+        "-tmp-visible",
+        "22222222-2222-4222-8222-222222222222",
+        "needle",
+    )]);
+    let (_request_tx, _request_rx, response_tx) = connect_semantic_search_channels(&mut app);
+    app.list_search_mode = ListSearchMode::Semantic;
+    app.semantic_search.pending_status = Some(SemanticProgress::CacheReady);
+
+    app.semantic_search.busy_generation = Some(3);
+
+    response_tx
+        .send(SemanticSearchMessage::Indexing(
+            crate::tui::semantic_worker::SemanticIndexing {
+                completed: 1,
+                total: 4,
+            },
+        ))
+        .unwrap();
+    assert!(app.receive_search_results());
+    assert_eq!(
+        app.semantic_activity_status_text().as_deref(),
+        Some("sem indexing 25%  1/4 chunks")
+    );
+
+    response_tx
+        .send(SemanticSearchMessage::Idle { generation: 2 })
+        .unwrap();
+    assert!(app.receive_search_results());
+    assert_eq!(app.semantic_activity_status_text(), None);
+    assert!(app.semantic_worker_busy(), "a newer search is outstanding");
+
+    response_tx
+        .send(SemanticSearchMessage::Idle { generation: 3 })
+        .unwrap();
+    assert!(app.receive_search_results());
+    assert!(!app.semantic_worker_busy());
+}
+
+#[test]
 fn clearing_query_preserves_in_flight_prewarm_preparing_status() {
     let mut app = app_with_options(
         vec![conversation(
