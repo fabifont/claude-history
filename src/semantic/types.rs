@@ -9,7 +9,11 @@ use std::sync::{
 pub const DEFAULT_CHUNK_TARGET_CHARS: usize = 2_400;
 pub const DEFAULT_CHUNK_OVERLAP_CHARS: usize = 300;
 pub const DEFAULT_CHUNK_CONTEXT_TURNS: usize = 1;
-pub const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 32;
+/// Passages handed to the embedder per call, between progress reports and
+/// cancellation checks.
+pub const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 64;
+/// Passages per model inference batch.
+pub const MODEL_BATCH_SIZE: usize = 8;
 pub const MAX_GLOBAL_INTERACTIVE_PASSAGE_EMBEDDINGS: usize = 0;
 pub const MAX_WITHIN_INTERACTIVE_PASSAGE_EMBEDDINGS: usize = 32;
 pub const CACHE_SCHEMA_VERSION: u32 = 7;

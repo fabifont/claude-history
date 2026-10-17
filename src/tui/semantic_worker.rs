@@ -4,7 +4,7 @@ use crate::search::literal::{build_literal_corpus, exact_fallback};
 use crate::search::query::ParsedQuery;
 use crate::semantic::cache::write_embedding_cache;
 use crate::semantic::embed::SemanticEmbedder;
-use crate::semantic::fastembed::FastembedEmbedder;
+use crate::semantic::fastembed::{EmbedPriority, FastembedEmbedder};
 use crate::semantic::index::{
     SemanticIndexCandidate, SemanticIndexProgress, SemanticIndexRequest, SemanticIndexResponse,
     SemanticIndexState,
@@ -87,7 +87,7 @@ pub fn spawn_semantic_worker() -> (
     SemanticCancellationToken,
 ) {
     spawn_semantic_worker_with(Box::new(|| {
-        let embedder = FastembedEmbedder::new_quiet()?;
+        let embedder = FastembedEmbedder::new_quiet(EmbedPriority::Background)?;
         Ok(Box::new(embedder) as Box<dyn SemanticEmbedder>)
     }))
 }

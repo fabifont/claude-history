@@ -1,6 +1,6 @@
 use crate::error::{AppError, Result};
 use crate::semantic::embed::SemanticEmbedder;
-use crate::semantic::types::DEFAULT_EMBEDDING_BATCH_SIZE;
+use crate::semantic::types::MODEL_BATCH_SIZE;
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use std::path::PathBuf;
 
@@ -11,13 +11,44 @@ pub struct FastembedEmbedder {
     model: TextEmbedding,
 }
 
+/// How much of the machine embedding may use.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmbedPriority {
+    /// A command the person is waiting on: every core.
+    Foreground,
+    /// Indexing behind the TUI: half the cores at a lower scheduling
+    /// priority, so the list and lexical search stay responsive.
+    Background,
+}
+
+impl EmbedPriority {
+    fn threads(self) -> usize {
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        match self {
+            Self::Foreground => cores,
+            Self::Background => (cores / 2).max(1),
+        }
+    }
+}
+
 impl FastembedEmbedder {
     pub fn new() -> Result<Self> {
-        Self::new_with_download_progress(crate::semantic::cache::model_cache_dir(), true)
+        Self::new_with_download_progress(
+            crate::semantic::cache::model_cache_dir(),
+            true,
+            EmbedPriority::Foreground,
+        )
     }
 
-    pub fn new_quiet() -> Result<Self> {
-        Self::new_with_download_progress(crate::semantic::cache::model_cache_dir(), false)
+    /// An embedder for the calling thread that shows no download progress.
+    /// With `EmbedPriority::Background` it also lowers the scheduling
+    /// priority of the calling thread, which the inference threads it
+    /// creates inherit.
+    pub fn new_quiet(priority: EmbedPriority) -> Result<Self> {
+        if priority == EmbedPriority::Background {
+            lower_current_thread_priority();
+        }
+        Self::new_with_download_progress(crate::semantic::cache::model_cache_dir(), false, priority)
     }
 
     pub fn cache_dir() -> PathBuf {
@@ -27,6 +58,7 @@ impl FastembedEmbedder {
     fn new_with_download_progress(
         cache_dir: PathBuf,
         show_download_progress: bool,
+        priority: EmbedPriority,
     ) -> Result<Self> {
         // Tests use fake embedders; the model lives in the user's cache.
         if cfg!(test) {
@@ -39,7 +71,7 @@ impl FastembedEmbedder {
             TextInitOptions::new(EmbeddingModel::BGESmallENV15)
                 .with_cache_dir(cache_dir)
                 .with_show_download_progress(show_download_progress)
-                .with_intra_threads(1),
+                .with_intra_threads(priority.threads()),
         )
         .map_err(to_config_error)?;
         Ok(Self { model })
@@ -47,24 +79,62 @@ impl FastembedEmbedder {
 }
 
 impl SemanticEmbedder for FastembedEmbedder {
+    /// Embeds `passages` in small batches of similar length: a batch is
+    /// padded to its longest passage, so mixing lengths wastes inference on
+    /// padding, and small batches keep the activation memory small.
     fn embed_passages(&mut self, passages: &[String]) -> Result<Vec<Vec<f32>>> {
-        self.model
-            .embed(
-                prefixed_passages(passages),
-                Some(DEFAULT_EMBEDDING_BATCH_SIZE),
-            )
-            .map_err(to_config_error)
+        let order = length_order(passages);
+        let sorted = order
+            .iter()
+            .map(|&index| passages[index].as_str())
+            .collect::<Vec<_>>();
+        let embeddings = self
+            .model
+            .embed(prefixed_passages(&sorted), Some(MODEL_BATCH_SIZE))
+            .map_err(to_config_error)?;
+        Ok(unsort(&order, embeddings))
     }
 
     fn embed_query(&mut self, query: &str) -> Result<Option<Vec<f32>>> {
         let embeddings = self
             .model
-            .embed(
-                vec![prefixed_query(query)],
-                Some(DEFAULT_EMBEDDING_BATCH_SIZE),
-            )
+            .embed(vec![prefixed_query(query)], Some(MODEL_BATCH_SIZE))
             .map_err(to_config_error)?;
         Ok(embeddings.first().cloned())
+    }
+}
+
+/// Indices of `passages` from shortest to longest.
+fn length_order(passages: &[String]) -> Vec<usize> {
+    let mut order = (0..passages.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&index| passages[index].len());
+    order
+}
+
+/// Puts `values`, computed for the passages in `order`, back in passage
+/// order.
+fn unsort<T: Default>(order: &[usize], values: Vec<T>) -> Vec<T> {
+    let mut out = (0..values.len()).map(|_| T::default()).collect::<Vec<_>>();
+    for (&index, value) in order.iter().zip(values) {
+        out[index] = value;
+    }
+    out
+}
+
+/// Lowers the scheduling priority of the calling thread: the utility QoS
+/// class on macOS, nice 10 on Linux.
+fn lower_current_thread_priority() {
+    #[cfg(target_os = "macos")]
+    // SAFETY: changes only the calling thread's QoS class.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+    }
+    #[cfg(target_os = "linux")]
+    // SAFETY: changes only the calling thread's nice value; Linux applies
+    // PRIO_PROCESS with a thread id to that thread alone.
+    unsafe {
+        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        libc::setpriority(libc::PRIO_PROCESS, tid, 10);
     }
 }
 
@@ -72,8 +142,11 @@ pub fn prefixed_query(query: &str) -> String {
     format!("Represent this sentence for searching relevant passages: {query}")
 }
 
-pub fn prefixed_passages(passages: &[String]) -> Vec<String> {
-    passages.to_vec()
+pub fn prefixed_passages(passages: &[&str]) -> Vec<String> {
+    passages
+        .iter()
+        .map(|passage| (*passage).to_owned())
+        .collect()
 }
 
 #[cfg(feature = "release-dynamic-ort")]
@@ -190,9 +263,18 @@ mod tests {
     #[test]
     fn leaves_passages_unprefixed_for_fastembed() {
         assert_eq!(
-            prefixed_passages(&["one".to_string(), "two".to_string()]),
+            prefixed_passages(&["one", "two"]),
             vec!["one".to_string(), "two".to_string()]
         );
+    }
+
+    #[test]
+    fn length_order_round_trips() {
+        let passages = vec!["ccc".to_string(), "a".to_string(), "bb".to_string()];
+        let order = length_order(&passages);
+        assert_eq!(order, vec![1, 2, 0]);
+        let computed = order.iter().map(|&index| passages[index].len()).collect();
+        assert_eq!(unsort(&order, computed), vec![3, 1, 2]);
     }
 
     #[cfg(not(feature = "release-dynamic-ort"))]
