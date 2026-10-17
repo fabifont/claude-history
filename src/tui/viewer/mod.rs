@@ -36,7 +36,7 @@ use tools::make_tool_summary_output_id;
 /// Width of the focus gutter indicator (▌ + space)
 pub const GUTTER_WIDTH: usize = 2;
 
-const NAME_WIDTH: usize = 9;
+pub(crate) const NAME_WIDTH: usize = 9;
 /// Width of timestamp prefix when timing is enabled (space + Mon DD HH:MM + space)
 pub(crate) const TIMESTAMP_WIDTH: usize = 14;
 

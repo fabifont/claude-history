@@ -24,10 +24,13 @@ use std::time::Duration;
 
 mod dialog_state;
 mod input_controller;
+mod list_preview;
 mod list_state;
 mod search_state;
 mod types;
 mod view_state;
+#[allow(unused_imports)]
+pub use list_preview::ListPreview;
 #[allow(unused_imports)]
 use search_state::{
     IndexScope, SearchCommand, SearchResponse, SemanticCorpus, SemanticSearchState,
@@ -39,6 +42,7 @@ pub use types::{
     SemanticProgress, SemanticResultMetadata, TuiSearchOptions, ViewFamily, ViewSearchMode,
     ViewState, list_lines_per_item,
 };
+pub use view_state::line_matches_query;
 
 /// Cards materialized for the first frame. Bounded so the first frame costs
 /// the same whatever the corpus size; the full list follows once the index
@@ -106,6 +110,8 @@ pub struct App {
     view_stack: Vec<ViewState>,
     /// Conversations related to the one in the viewer
     view_family: ViewFamily,
+    /// Selected search result as rendered in the list's preview pane
+    list_preview: Option<list_preview::ListPreview>,
     /// Status message with timestamp for auto-clear
     status_message: Option<(String, std::time::Instant)>,
     /// Progress of the reconcile pass shown as indexing
@@ -201,6 +207,7 @@ impl App {
             app_mode: parts.app_mode,
             view_stack: Vec::new(),
             view_family: ViewFamily::default(),
+            list_preview: None,
             status_message: None,
             indexing: None,
             tool_display: parts.tool_display,
@@ -916,7 +923,7 @@ impl App {
     }
 
     /// Index into `filtered` of the list item drawn at `row`, if any.
-    fn list_idx_at_row(&self, row: u16, frame_area: Rect) -> Option<usize> {
+    fn list_idx_at_row(&self, column: u16, row: u16, frame_area: Rect) -> Option<usize> {
         if !matches!(self.app_mode, AppMode::List)
             || self.dialog_mode != DialogMode::None
             || !self.readiness.list
@@ -924,23 +931,14 @@ impl App {
             return None;
         }
 
-        // Mirror the layout in render_list_mode: outer 1px border, then split
-        // [search bar (2), list (Min 1), bottom bar (1)] — or omit the bottom
-        // bar when the inner area is < 4 lines tall.
-        let inner_height = frame_area.height.saturating_sub(2);
-        let list_y = frame_area.y.saturating_add(1).saturating_add(2);
-        let list_height = if inner_height < 4 {
-            inner_height.saturating_sub(2)
-        } else {
-            inner_height.saturating_sub(3)
-        };
-
-        if list_height == 0 || row < list_y || row >= list_y.saturating_add(list_height) {
+        let list = crate::tui::ui::list_layout_rects(frame_area, self).list;
+        if !list.contains(Position::new(column, row)) {
             return None;
         }
+        let list_y = list.y;
 
         let lines_per_item = list_lines_per_item(self.list_search_mode, &self.query);
-        let items_per_page = (list_height as usize) / lines_per_item;
+        let items_per_page = (list.height as usize) / lines_per_item;
         if items_per_page == 0 {
             return None;
         }
@@ -957,8 +955,8 @@ impl App {
     /// Handle a left-click in list mode: select the conversation under the cursor.
     /// Returns true if the click landed on a list item — the caller is expected to
     /// then transition into view mode (matching the Enter-key behavior).
-    pub fn handle_list_click(&mut self, row: u16, frame_area: Rect) -> bool {
-        let Some(idx) = self.list_idx_at_row(row, frame_area) else {
+    pub fn handle_list_click(&mut self, column: u16, row: u16, frame_area: Rect) -> bool {
+        let Some(idx) = self.list_idx_at_row(column, row, frame_area) else {
             return false;
         };
         self.clear_selection_anchor();
@@ -969,8 +967,8 @@ impl App {
     /// Handle mouse movement in list mode: select the conversation under the
     /// cursor so the highlight shows which one a click would open. Returns
     /// true if the selection changed.
-    pub fn handle_list_mouse_move(&mut self, row: u16, frame_area: Rect) -> bool {
-        let Some(idx) = self.list_idx_at_row(row, frame_area) else {
+    pub fn handle_list_mouse_move(&mut self, column: u16, row: u16, frame_area: Rect) -> bool {
+        let Some(idx) = self.list_idx_at_row(column, row, frame_area) else {
             return false;
         };
         if self.selected == Some(idx) {

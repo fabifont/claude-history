@@ -143,7 +143,7 @@ fn snapshot_rows_open_resume_fork_and_edit() {
         app.handle_key(keys.fork.code, keys.fork.modifiers, 20),
         Some(Action::ForkResume(path)) if path == selected
     ));
-    assert!(app.handle_list_click(4, Rect::new(0, 0, 80, 30)));
+    assert!(app.handle_list_click(1, 4, Rect::new(0, 0, 80, 30)));
     assert_eq!(
         app.conversation_at(&selected).map(|c| c.session_id),
         Some("c".to_string())
@@ -161,10 +161,10 @@ fn hovering_a_row_selects_it() {
     let frame = Rect::new(0, 0, 80, 30);
     assert_eq!(app.selected(), Some(0));
 
-    assert!(app.handle_list_mouse_move(6, frame));
+    assert!(app.handle_list_mouse_move(1, 6, frame));
     assert_eq!(app.selected(), Some(1));
-    assert!(!app.handle_list_mouse_move(6, frame));
-    assert!(!app.handle_list_mouse_move(0, frame));
+    assert!(!app.handle_list_mouse_move(1, 6, frame));
+    assert!(!app.handle_list_mouse_move(1, 0, frame));
     assert_eq!(app.selected(), Some(1));
 }
 
@@ -173,7 +173,7 @@ fn without_a_generation_rows_wait() {
     let mut app = loading_app(None, vec![]);
     assert!(!app.readiness().list);
     assert!(app.is_loading());
-    assert!(!app.handle_list_click(4, Rect::new(0, 0, 80, 30)));
+    assert!(!app.handle_list_click(1, 4, Rect::new(0, 0, 80, 30)));
     app.show_conversations(corpus());
     assert!(app.readiness().list);
     assert_eq!(listed_paths(&app)[0], "/p/-tmp-alpha/c.jsonl");

@@ -6,7 +6,7 @@ use crate::search::query::ParsedQuery;
 use crate::text_match::{NormalizedText, is_word_separator};
 use crate::tui::app::{
     App, AppMode, DialogMode, ListSearchMode, SemanticResultMetadata, ViewSearchMode, ViewState,
-    list_lines_per_item,
+    line_matches_query, list_lines_per_item,
 };
 use crate::tui::theme::{self, Theme};
 use crate::tui::viewer::{LineStyle, RenderedLine};
@@ -112,6 +112,71 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
+/// Width from which the preview sits beside the list rather than below it.
+const PREVIEW_SIDE_MIN_WIDTH: u16 = 140;
+/// Height the list area needs before a preview is placed below it.
+const PREVIEW_BELOW_MIN_HEIGHT: u16 = 24;
+
+/// Areas of the list screen.
+#[derive(Clone, Copy, Debug)]
+pub struct ListLayoutRects {
+    pub search: Rect,
+    pub list: Rect,
+    /// Preview of the selected result, when searching and there is room
+    pub preview: Option<Rect>,
+    /// Status line or dialog, omitted on tiny terminals
+    pub bottom: Option<Rect>,
+}
+
+pub fn list_layout_rects(area: Rect, app: &App) -> ListLayoutRects {
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    let (search, middle, bottom) = if inner.height < 4 {
+        let [search, middle] =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
+        (search, middle, None)
+    } else {
+        let [search, middle, bottom] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        (search, middle, Some(bottom))
+    };
+
+    let (list, preview) = if !app.list_preview_wanted() {
+        (middle, None)
+    } else if middle.width >= PREVIEW_SIDE_MIN_WIDTH {
+        let [list, preview] =
+            Layout::horizontal([Constraint::Percentage(55), Constraint::Fill(1)]).areas(middle);
+        (list, Some(preview))
+    } else if middle.height >= PREVIEW_BELOW_MIN_HEIGHT {
+        // Whole rows only, so the list ends on a row separator, which the
+        // preview's top border then draws over.
+        let lines_per_item = list_lines_per_item(app.list_search_mode(), app.query()) as u16;
+        let list = Rect {
+            height: middle.height / 2 / lines_per_item * lines_per_item,
+            ..middle
+        };
+        let preview_y = list.bottom().saturating_sub(1);
+        let preview = Rect {
+            y: preview_y,
+            height: middle.bottom() - preview_y,
+            ..middle
+        };
+        (list, Some(preview))
+    } else {
+        (middle, None)
+    };
+
+    ListLayoutRects {
+        search,
+        list,
+        preview,
+        bottom,
+    }
+}
+
 /// Render the list mode (conversation browser)
 fn render_list_mode(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -121,42 +186,29 @@ fn render_list_mode(frame: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(rgb(th().border)));
-    let inner_area = outer_block.inner(area);
     frame.render_widget(outer_block, area);
 
-    // Graceful degradation for tiny terminals - skip bottom bar if too small
-    if inner_area.height < 4 {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Min(1)])
-            .split(inner_area);
-        render_search_bar(frame, app, chunks[0]);
-        render_list(frame, app, chunks[1]);
-        return;
+    let layout = list_layout_rects(area, app);
+    render_search_bar(frame, app, layout.search);
+    render_list(frame, app, layout.list);
+    if let Some(preview) = layout.preview {
+        render_list_preview(frame, app, preview, preview.y == layout.list.y);
     }
 
-    // Always reserve space for bottom bar (status, dialog, or hotkeys)
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(inner_area);
-
-    render_search_bar(frame, app, chunks[0]);
-    render_list(frame, app, chunks[1]);
+    // Graceful degradation for tiny terminals - skip bottom bar if too small
+    let Some(bottom) = layout.bottom else {
+        return;
+    };
 
     // Render bottom bar: confirm dialog > status message > hotkeys
     if *app.dialog_mode() == DialogMode::ConfirmDelete {
-        render_confirm_dialog(frame, chunks[2]);
+        render_confirm_dialog(frame, bottom);
     } else if let Some((msg, instant)) = app.status_message()
         && instant.elapsed() < STATUS_TTL
     {
-        render_status_message(frame, msg, chunks[2]);
+        render_status_message(frame, msg, bottom);
     } else {
-        render_list_status_bar(frame, app, chunks[2]);
+        render_list_status_bar(frame, app, bottom);
     }
 
     match app.dialog_mode() {
@@ -1627,6 +1679,70 @@ fn render_help_overlay(
 
     let content = Paragraph::new(lines);
     frame.render_widget(content, inner);
+}
+
+/// Content width the preview renders the conversation at, for a pane of
+/// `area`.
+pub fn list_preview_content_width(area: Rect, show_timing: bool) -> usize {
+    let timing_width = if show_timing {
+        crate::tui::viewer::TIMESTAMP_WIDTH
+    } else {
+        0
+    };
+    // One column of divider and one of padding on each side.
+    (area.width as usize).saturating_sub(3).saturating_sub(
+        crate::tui::viewer::NAME_WIDTH + 3 + crate::tui::viewer::GUTTER_WIDTH + timing_width,
+    )
+}
+
+/// The selected result rendered as in the viewer, scrolled to its first
+/// match. `beside` places the divider on the left rather than on top.
+fn render_list_preview(frame: &mut Frame, app: &App, area: Rect, beside: bool) {
+    let block = Block::default()
+        .borders(if beside { Borders::LEFT } else { Borders::TOP })
+        .border_style(Style::default().fg(rgb(th().border)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let inner = Rect {
+        width: inner.width.saturating_sub(1),
+        ..inner
+    };
+    let Some(preview) = app.list_preview() else {
+        return;
+    };
+
+    let height = inner.height as usize;
+    let query = ViewSearchQuery::parse(app.query());
+    let lines: Vec<Line> = preview
+        .lines
+        .iter()
+        .enumerate()
+        .skip(preview.scroll_offset(height))
+        .take(height)
+        .map(|(idx, rendered)| {
+            let mut spans = vec![if preview.anchor == Some(idx) {
+                Span::styled("▌ ", Style::default().fg(rgb(th().accent)))
+            } else {
+                Span::raw("  ")
+            }];
+            if line_matches_query(rendered, &query) {
+                spans.extend(highlight_line_matches(
+                    rendered,
+                    &query,
+                    preview.anchor == Some(idx),
+                ));
+            } else {
+                spans.extend(
+                    rendered
+                        .spans
+                        .iter()
+                        .map(|(text, style)| styled_span(text, style)),
+                );
+            }
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_list(frame: &mut Frame, app: &App, area: Rect) {
@@ -3701,7 +3817,7 @@ mod tests {
             .find(|&y| row_text(&terminal, y).contains("hidden-project"))
             .unwrap();
         assert_eq!(second_header_row, 7);
-        assert!(app.handle_list_click(second_header_row, frame));
+        assert!(app.handle_list_click(1, second_header_row, frame));
         assert_eq!(app.selected(), Some(1));
     }
 

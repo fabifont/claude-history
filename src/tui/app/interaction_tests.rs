@@ -247,7 +247,7 @@ fn semantic_list_click_uses_three_line_rows() {
     app.receive_search_results();
     let frame = Rect::new(0, 0, 80, 20);
 
-    assert!(app.handle_list_click(6, frame));
+    assert!(app.handle_list_click(1, 6, frame));
 
     assert_eq!(app.selected(), Some(1));
 }
@@ -711,4 +711,102 @@ fn a_session_without_relatives_says_so() {
     app.handle_key(KeyCode::Char('P'), KeyModifiers::NONE, 10);
     let (message, _) = app.status_message.take().unwrap();
     assert_eq!(message, "This session has no parent");
+}
+
+fn write_dialogue(path: &std::path::Path, turns: &[(&str, &str)]) {
+    let lines: Vec<String> = turns
+        .iter()
+        .map(|(role, text)| {
+            serde_json::json!({
+                "type": role,
+                "timestamp": "2024-01-01T00:00:00Z",
+                "message": {"role": role, "content": text}
+            })
+            .to_string()
+        })
+        .collect();
+    std::fs::write(path, lines.join("\n") + "\n").unwrap();
+}
+
+fn app_searching(path: PathBuf, query: &str) -> App {
+    let mut app = app_with_conversation(path, None);
+    app.query = query.to_string();
+    app.selected = Some(0);
+    app
+}
+
+#[test]
+fn list_preview_sits_beside_wide_lists_and_below_tall_ones() {
+    let app = app_searching(PathBuf::from("/tmp/none.jsonl"), "hello");
+
+    let wide = ui::list_layout_rects(Rect::new(0, 0, 160, 30), &app);
+    let preview = wide.preview.unwrap();
+    assert_eq!(preview.y, wide.list.y);
+    assert_eq!(preview.x, wide.list.right());
+
+    let tall = ui::list_layout_rects(Rect::new(0, 0, 100, 40), &app);
+    let preview = tall.preview.unwrap();
+    assert_eq!(preview.x, tall.list.x);
+    // The preview's top border replaces the list's last row separator.
+    assert_eq!(preview.y, tall.list.bottom() - 1);
+    assert_eq!(tall.list.height % 3, 0);
+
+    assert!(
+        ui::list_layout_rects(Rect::new(0, 0, 100, 20), &app)
+            .preview
+            .is_none()
+    );
+}
+
+#[test]
+fn list_preview_needs_a_query() {
+    let app = app_searching(PathBuf::from("/tmp/none.jsonl"), " ");
+
+    assert!(
+        ui::list_layout_rects(Rect::new(0, 0, 160, 30), &app)
+            .preview
+            .is_none()
+    );
+}
+
+#[test]
+fn list_preview_anchors_on_the_first_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dialogue.jsonl");
+    write_dialogue(
+        &path,
+        &[
+            ("user", "set up the tunnel"),
+            ("assistant", "the tunnel is up"),
+            ("user", "now rotate the token"),
+            ("assistant", "rotated the token and restarted"),
+        ],
+    );
+    let mut app = app_searching(path, "token");
+
+    app.fill_list_preview(60);
+
+    let preview = app.list_preview().unwrap();
+    let anchor = preview.anchor.unwrap();
+    let text: String = preview.lines[anchor]
+        .spans
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect();
+    assert!(text.contains("now rotate the token"), "{text}");
+    assert!(preview.scroll_offset(20) <= anchor);
+}
+
+#[test]
+fn list_click_in_preview_pane_selects_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("one.jsonl");
+    write_named_conversation(&path, "hello body");
+    let mut app = app_searching(path, "hello");
+    let frame = Rect::new(0, 0, 160, 30);
+    let layout = ui::list_layout_rects(frame, &app);
+    let preview = layout.preview.unwrap();
+
+    assert!(!app.handle_list_click(preview.x + 5, layout.list.y, frame));
+    assert!(app.handle_list_click(layout.list.x + 5, layout.list.y, frame));
 }

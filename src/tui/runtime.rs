@@ -163,6 +163,9 @@ fn prepare_frame(
 
     app.check_view_resize(content_width, viewport_height);
     if matches!(app.app_mode(), AppMode::List) {
+        if let Some(preview) = ui::list_layout_rects(frame_area, app).preview {
+            app.fill_list_preview(ui::list_preview_content_width(preview, app.show_timing()));
+        }
         let lines_per_item = super::app::list_lines_per_item(app.list_search_mode(), app.query());
         app.fill_visible_evidence(viewport_height / lines_per_item.max(1));
     }
@@ -214,7 +217,7 @@ where
                         return EventLoopResult::Break;
                     }
                     if allow_list_click_enter
-                        && app.handle_list_click(m.row, frame_state.frame_area)
+                        && app.handle_list_click(m.column, m.row, frame_state.frame_area)
                     {
                         app.enter_view_mode(frame_state.content_width);
                         return EventLoopResult::Break;
@@ -223,7 +226,7 @@ where
                 MouseEventKind::Moved => {
                     app.handle_view_mouse_move(m.row, frame_state.frame_area);
                     if allow_list_click_enter {
-                        app.handle_list_mouse_move(m.row, frame_state.frame_area);
+                        app.handle_list_mouse_move(m.column, m.row, frame_state.frame_area);
                     }
                 }
                 _ => {}
