@@ -464,6 +464,20 @@ pub fn model_cache_dir() -> PathBuf {
     semantic_cache_dir_with_fallback().join("fastembed")
 }
 
+/// Model downloads earlier versions used, in fastembed's cache layout.
+const SUPERSEDED_MODELS: &[&str] = &["models--Xenova--bge-small-en-v1.5"];
+
+/// Removes downloads of models this version no longer uses from the model
+/// cache `dir`. Failures are ignored; the files are only wasted space.
+pub fn remove_superseded_models(dir: &Path) {
+    for name in SUPERSEDED_MODELS {
+        let path = dir.join(name);
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
 pub fn clear_semantic_cache_files() -> std::io::Result<bool> {
     let Some(path) = semantic_cache_dir() else {
         return Ok(false);

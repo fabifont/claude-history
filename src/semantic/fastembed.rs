@@ -68,12 +68,13 @@ impl FastembedEmbedder {
         }
         init_onnx_runtime()?;
         let model = TextEmbedding::try_new(
-            TextInitOptions::new(EmbeddingModel::BGESmallENV15)
-                .with_cache_dir(cache_dir)
+            TextInitOptions::new(EmbeddingModel::SnowflakeArcticEmbedXS)
+                .with_cache_dir(cache_dir.clone())
                 .with_show_download_progress(show_download_progress)
                 .with_intra_threads(priority.threads()),
         )
         .map_err(to_config_error)?;
+        crate::semantic::cache::remove_superseded_models(&cache_dir);
         Ok(Self { model })
     }
 }
@@ -138,6 +139,8 @@ fn lower_current_thread_priority() {
     }
 }
 
+/// The query instruction snowflake-arctic-embed was trained with; passages
+/// take none.
 pub fn prefixed_query(query: &str) -> String {
     format!("Represent this sentence for searching relevant passages: {query}")
 }

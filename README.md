@@ -404,9 +404,16 @@ ranking bonus.
 Semantic search ranks conversations by meaning instead of exact word matches. It
 embeds recent conversation chunks locally, combines semantic similarity with
 lexical signals, and shows the best matching evidence preview for each result.
-The first semantic search may download the local model and generate embeddings,
-which can take a while for large histories. Exact lexical matches appear while
-semantic ranking is in progress, then the completed semantic results replace them.
+The first semantic search downloads the local embedding model,
+[snowflake-arctic-embed-xs](https://huggingface.co/Snowflake/snowflake-arctic-embed-xs)
+(about 90 MB), to `~/.cache/claude-history/semantic/`. Conversations without
+embeddings are indexed in the background on half the CPU cores at a lower
+scheduling priority, so neither startup, the list, nor lexical search waits for
+it. Semantic searches rank the conversations indexed so far right away, the status
+bar shows `sem indexing` with progress while the rest are embedded, and the
+results refresh when indexing finishes. Exact lexical matches appear while nothing
+indexed matches yet. After an upgrade that changes the embedding model, the
+history is re-embedded the same way and the old model download is removed.
 Agent hybrid search semantically ranks one compact routing passage per
 conversation, then fuses that conversation-level ranking with lexical evidence from
 bounded dialogue, thinking, tool calls, tool results, and subagent content. A route contains the title, summary, high-signal
@@ -415,7 +422,7 @@ embed every tool chunk, and routes are never shown as evidence. Global agent sea
 does not embed missing passages interactively, so a corpus query cannot trigger an
 embedding job. Within-conversation search can top up at most 32 passages per run.
 Run `--generate-semantic-cache` to prepare visible dialogue and compact routes
-explicitly. The on-disk embedding cache is limited to 50,000 entries; generated core
+explicitly, on every CPU core. The on-disk embedding cache is limited to 50,000 entries; generated core
 passages are protected while adaptive within-search entries use the remaining space.
 
 Agent search and within results expose `semantic=` and `lexical=` when a hit
