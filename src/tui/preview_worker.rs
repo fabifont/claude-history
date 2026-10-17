@@ -299,16 +299,24 @@ impl DocCache {
 }
 
 /// Line the result is at. When lines match `query`, it is one of them: the
-/// one `evidence` points at, else the first. A semantic chunk can span many
+/// one `evidence` points at, else the first. Lines holding every query word
+/// win over lines holding only some. A semantic chunk can span many
 /// messages, and the one sharing most words with it need not mention the
 /// query at all. Only when no line matches does `evidence` alone decide.
 fn anchor(doc: &PreviewDoc, query: &str, evidence: Option<&str>) -> Option<usize> {
     let query = ViewSearchQuery::parse(query);
-    let matching: Vec<bool> = doc
-        .texts
-        .iter()
-        .map(|text| !query.is_empty() && query.has_match(text))
-        .collect();
+    let lines_where = |matches: &dyn Fn(&str) -> bool| -> Vec<bool> {
+        doc.texts
+            .iter()
+            .map(|text| !query.is_empty() && matches(text))
+            .collect()
+    };
+    let full = lines_where(&|text| query.has_full_match(text));
+    let matching = if full.contains(&true) {
+        full
+    } else {
+        lines_where(&|text| query.has_match(text))
+    };
     let first_match = matching.iter().position(|&m| m);
     let eligible = |line: usize| first_match.is_none() || matching[line];
     evidence
@@ -481,6 +489,26 @@ mod tests {
 
         assert_eq!(anchor(&doc, "dark mode", Some(evidence)), Some(2));
         assert_eq!(anchor(&doc, "zebra", Some(evidence)), Some(0));
+    }
+
+    #[test]
+    fn anchor_prefers_lines_with_every_query_word() {
+        let doc = doc(
+            &[
+                "the light-mode wordmark from the docs",
+                "in dark mode only the banner changes",
+            ],
+            &[(0, 1), (1, 2)],
+        );
+
+        assert_eq!(
+            anchor(&doc, "dark mode", Some("light-mode wordmark docs")),
+            Some(1)
+        );
+        assert_eq!(
+            anchor(&doc, "mode", Some("light-mode wordmark docs")),
+            Some(0)
+        );
     }
 
     #[test]

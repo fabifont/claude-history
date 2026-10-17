@@ -2780,6 +2780,11 @@ impl ViewSearchQuery {
     pub(crate) fn has_match(&self, text: &str) -> bool {
         self.0.has_match(text)
     }
+
+    /// Whether `text` holds every word and literal of the query.
+    pub(crate) fn has_full_match(&self, text: &str) -> bool {
+        self.0.has_match(text) && self.0.covers_all_terms(text)
+    }
 }
 
 #[derive(Debug, Default)]

@@ -361,8 +361,6 @@ impl<'a, W: Write + ?Sized> OutputFormatter for PlainFormatter<'a, W> {
     }
 }
 
-/// Format tool result content to a string
-
 /// Create a display ID for subagent entries from a parent_tool_use_id.
 fn subagent_display_id(parent_tool_use_id: &str) -> String {
     crate::claude::short_parent_id(parent_tool_use_id)
