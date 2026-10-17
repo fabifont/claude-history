@@ -569,15 +569,13 @@ fn process_user_message<F: OutputFormatter>(
                     printed_content = true;
                 }
             }
-            Part::ToolResult { output, .. } => {
-                if !no_tools {
-                    if let Some(ref id) = agent_id {
-                        formatter.format_agent_tool_result(id, output.as_ref());
-                    } else {
-                        formatter.format_tool_result(output.as_ref());
-                    }
-                    printed_content = true;
+            Part::ToolResult { output, .. } if !no_tools => {
+                if let Some(ref id) = agent_id {
+                    formatter.format_agent_tool_result(id, output.as_ref());
+                } else {
+                    formatter.format_tool_result(output.as_ref());
                 }
+                printed_content = true;
             }
             _ => {}
         }

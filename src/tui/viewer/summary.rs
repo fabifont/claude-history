@@ -209,15 +209,19 @@ fn assistant_parts_are_tool_only(parts: &[Part], show_thinking: bool) -> bool {
     })
 }
 
-pub(super) fn tool_only_assistant_summary<'a>(
-    entry: &Entry<'a>,
-    options: &RenderOptions,
-) -> Option<(
+/// The parent tool use id, speaker, timestamp and tool calls of an
+/// assistant message that only calls tools.
+pub(super) type ToolOnlySummary<'a> = (
     Option<&'a str>,
     &'a str,
     Option<DateTime<Utc>>,
     ToolActivitySummary,
-)> {
+);
+
+pub(super) fn tool_only_assistant_summary<'a>(
+    entry: &Entry<'a>,
+    options: &RenderOptions,
+) -> Option<ToolOnlySummary<'a>> {
     let EntryKind::Message { message, speaker } = entry.kind else {
         return None;
     };

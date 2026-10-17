@@ -299,7 +299,7 @@ pub fn list_projects(root: &Path) -> Result<Vec<Project>> {
         .collect();
 
     // Sort by recently modified
-    projects.sort_by(|a, b| b.modified.cmp(&a.modified));
+    projects.sort_by_key(|a| std::cmp::Reverse(a.modified));
 
     Ok(projects)
 }

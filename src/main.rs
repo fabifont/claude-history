@@ -242,20 +242,16 @@ fn run() -> Result<()> {
 
     // Handle --delete flag: delete a session by UUID and exit
     if let Some(ref session_id) = args.delete {
-        match history::delete_session_by_uuid(session_id) {
-            Ok(count) => {
-                if count == 1 {
-                    eprintln!("Deleted session {}", session_id);
-                } else {
-                    eprintln!(
-                        "Deleted session {} ({} copies across projects)",
-                        session_id, count
-                    );
-                }
-                return Ok(());
-            }
-            Err(e) => return Err(e),
+        let count = history::delete_session_by_uuid(session_id)?;
+        if count == 1 {
+            eprintln!("Deleted session {}", session_id);
+        } else {
+            eprintln!(
+                "Deleted session {} ({} copies across projects)",
+                session_id, count
+            );
         }
+        return Ok(());
     }
 
     // Resolved before the search paths below so every one of them honours the
@@ -266,7 +262,7 @@ fn run() -> Result<()> {
     if let Some(ref query) = args.debug_search {
         let mut conversations = store::load_conversations(show_last, store::Contents::Full)?;
         conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
-        conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        conversations.sort_by_key(|a| std::cmp::Reverse(a.timestamp));
 
         let searchable = search::precompute_search_text(&conversations);
         let now = chrono::Local::now();
@@ -338,7 +334,7 @@ fn run() -> Result<()> {
     if let Some(ref query) = args.debug_semantic_search {
         let mut conversations = store::load_conversations(show_last, store::Contents::Full)?;
         conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
-        conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        conversations.sort_by_key(|a| std::cmp::Reverse(a.timestamp));
         return semantic_cli::debug_search(query, &conversations, args.local);
     }
 
@@ -351,7 +347,7 @@ fn run() -> Result<()> {
             ));
         }
         let mut conversations = store::load_conversations(show_last, store::Contents::Full)?;
-        conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        conversations.sort_by_key(|a| std::cmp::Reverse(a.timestamp));
         return semantic_cli::generate_cache(&conversations, args.local);
     }
 
@@ -361,7 +357,7 @@ fn run() -> Result<()> {
 
     if let Some(ref path) = args.dump_semantic_turns {
         let mut conversations = store::load_conversations(show_last, store::Contents::Full)?;
-        conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        conversations.sort_by_key(|a| std::cmp::Reverse(a.timestamp));
         return semantic_cli::dump_turns(&conversations, path);
     }
 
@@ -369,7 +365,7 @@ fn run() -> Result<()> {
     if let Some(ref query) = args.semantic_search {
         let mut conversations = store::load_conversations(show_last, store::Contents::Full)?;
         conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
-        conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        conversations.sort_by_key(|a| std::cmp::Reverse(a.timestamp));
         return semantic_cli::run(query, &conversations, args.semantic_top, args.local);
     }
 

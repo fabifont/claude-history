@@ -693,8 +693,6 @@ fn wrap_plain_text(text: &str, max_width: usize) -> String {
     result
 }
 
-/// Format tool result content for export
-
 #[cfg(test)]
 mod tests {
     use super::*;
