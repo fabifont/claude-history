@@ -44,6 +44,7 @@ pub fn format_tool_call(name: &str, input: &Value, max_width: usize) -> Formatte
         "suba_finish" => format_labeled("Suba finish", input, "id", "result"),
         "suba_list" => format_labeled("Suba list", input, "status", ""),
         "process" => format_process(input),
+        "Skill" if str_field(input, "skill").is_some() => format_skill(input, max_width),
         _ => format_fallback(name, input, max_width),
     }
 }
@@ -273,6 +274,16 @@ fn format_labeled(
 
 /// Pi's process tool: `Process <action>: <name or id>`, with a started
 /// process's command as the body.
+/// `Skill: /name args`, as the skill would be typed as a slash command.
+fn format_skill(input: &Value, max_width: usize) -> FormattedToolCall {
+    let command = format!(
+        "/{} {}",
+        str_or_empty(input, "skill"),
+        str_or_empty(input, "args")
+    );
+    wrap_after_prefix("Skill: ", command.trim_end(), max_width)
+}
+
 fn format_process(input: &Value) -> FormattedToolCall {
     let action = str_or_empty(input, "action");
     let subject = ["name", "id"]
@@ -590,6 +601,23 @@ mod tests {
         assert_eq!(format_tool_result(Some(&text)), "[exited with code 0]");
         assert_eq!(format_tool_result(Some(&json!([1, 2]))), "[\n  1,\n  2\n]");
         assert_eq!(format_tool_result(None), "<no content>");
+    }
+
+    #[test]
+    fn test_format_skill_as_slash_command() {
+        let skill = |input: Value| format_tool_call("Skill", &input, 0);
+        assert_eq!(
+            skill(json!({ "skill": "phased-implement", "args": "add dark mode" })).header,
+            "Skill: /phased-implement add dark mode"
+        );
+        assert_eq!(
+            skill(json!({ "skill": "consult-llm", "args": "" })).header,
+            "Skill: /consult-llm"
+        );
+        assert_eq!(skill(json!({ "skill": "commit" })).header, "Skill: /commit");
+        let multiline = skill(json!({ "skill": "review", "args": "first\nsecond" }));
+        assert_eq!(multiline.header, "Skill: /review first");
+        assert_eq!(multiline.body.as_deref(), Some("second"));
     }
 
     #[test]
