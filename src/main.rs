@@ -345,6 +345,12 @@ fn run() -> Result<()> {
         return semantic_cli::clear_cache();
     }
 
+    if let Some(ref path) = args.dump_semantic_turns {
+        let mut conversations = store::load_conversations(show_last, store::Contents::Full)?;
+        conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        return semantic_cli::dump_turns(&conversations, path);
+    }
+
     // Handle --semantic-search flag
     if let Some(ref query) = args.semantic_search {
         let mut conversations = store::load_conversations(show_last, store::Contents::Full)?;

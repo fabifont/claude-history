@@ -177,6 +177,36 @@ pub fn generate_cache(conversations: &[Conversation], local: bool) -> Result<()>
     Ok(())
 }
 
+/// Writes one JSON object per conversation with the semantic turns that
+/// chunking reads, so embedding can be benchmarked outside the app.
+pub fn dump_turns(conversations: &[Conversation], path: &std::path::Path) -> Result<()> {
+    use std::io::Write;
+
+    let file = std::fs::File::create(path).map_err(AppError::Io)?;
+    let mut out = std::io::BufWriter::new(file);
+    for conversation in conversations {
+        let line = serde_json::json!({
+            "path": conversation.path,
+            "timestamp": conversation.timestamp.to_rfc3339(),
+            "project": conversation.project_name,
+            "title": conversation.custom_title,
+            "summary": conversation.summary,
+            "preview": conversation.preview.as_ref(),
+            "message_count": conversation.message_count,
+            "turns": conversation.semantic_turns.as_ref(),
+        });
+        serde_json::to_writer(&mut out, &line).map_err(|error| AppError::Io(error.into()))?;
+        out.write_all(b"\n").map_err(AppError::Io)?;
+    }
+    out.flush().map_err(AppError::Io)?;
+    eprintln!(
+        "Wrote semantic turns of {} conversation(s) to {}",
+        conversations.len(),
+        path.display()
+    );
+    Ok(())
+}
+
 pub fn debug_search(query: &str, conversations: &[Conversation], local: bool) -> Result<()> {
     use crate::semantic::cache::{
         cache_contains_text, cache_miss_count, cached_chunks, embedding_cache_file_path,

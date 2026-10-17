@@ -303,6 +303,7 @@ impl AgentWithinArgs {
             "semantic_search",
             "generate_semantic_cache",
             "clear_semantic_cache",
+            "dump_semantic_turns",
             "render",
             "input_file",
         ])
@@ -503,6 +504,11 @@ pub struct Args {
     /// Clear semantic embedding and model cache files and exit
     #[arg(long = "clear-semantic-cache", hide = true)]
     pub clear_semantic_cache: bool,
+
+    /// Write every conversation's semantic turns as JSON lines to PATH and
+    /// exit, for benchmarking embedding outside the app
+    #[arg(long = "dump-semantic-turns", value_name = "PATH", hide = true)]
+    pub dump_semantic_turns: Option<PathBuf>,
 
     /// Input JSONL file to view directly (skips conversation selection)
     #[arg(
