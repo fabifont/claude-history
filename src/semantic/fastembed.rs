@@ -3,9 +3,10 @@ use crate::semantic::embed::SemanticEmbedder;
 use crate::semantic::types::MODEL_BATCH_SIZE;
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 #[cfg(feature = "release-dynamic-ort")]
-use std::{path::Path, sync::OnceLock};
+use std::path::Path;
 
 pub struct FastembedEmbedder {
     model: TextEmbedding,
@@ -42,8 +43,7 @@ impl FastembedEmbedder {
 
     /// An embedder for the calling thread that shows no download progress.
     /// With `EmbedPriority::Background` it also lowers the scheduling
-    /// priority of the calling thread, which the inference threads it
-    /// creates inherit.
+    /// priority of the calling thread, which takes part in inference.
     pub fn new_quiet(priority: EmbedPriority) -> Result<Self> {
         if priority == EmbedPriority::Background {
             lower_current_thread_priority();
@@ -66,7 +66,7 @@ impl FastembedEmbedder {
                 "the embedding model is not loaded in tests".into(),
             ));
         }
-        init_onnx_runtime()?;
+        init_onnx_runtime(priority)?;
         let model = TextEmbedding::try_new(
             TextInitOptions::new(EmbeddingModel::SnowflakeArcticEmbedXS)
                 .with_cache_dir(cache_dir.clone())
@@ -152,41 +152,87 @@ pub fn prefixed_passages(passages: &[&str]) -> Vec<String> {
         .collect()
 }
 
-#[cfg(feature = "release-dynamic-ort")]
-fn init_onnx_runtime() -> Result<()> {
+/// Sets up the ONNX Runtime environment, once per process, for embedders of
+/// `priority`; later embedders share it.
+fn init_onnx_runtime(priority: EmbedPriority) -> Result<()> {
     static INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
-    match INIT.get_or_init(initialize_bundled_onnx_runtime) {
+    match INIT.get_or_init(|| initialize_onnx_runtime(priority)) {
         Ok(()) => Ok(()),
         Err(message) => Err(AppError::ConfigError(message.clone())),
     }
 }
 
-#[cfg(not(feature = "release-dynamic-ort"))]
-fn init_onnx_runtime() -> Result<()> {
+fn initialize_onnx_runtime(priority: EmbedPriority) -> std::result::Result<(), String> {
+    #[cfg(feature = "release-dynamic-ort")]
+    let builder = bundled_onnx_runtime()?;
+    #[cfg(not(feature = "release-dynamic-ort"))]
+    let builder = ort::init();
+    let builder = match priority {
+        EmbedPriority::Foreground => builder,
+        EmbedPriority::Background => builder.with_global_thread_pool(
+            background_thread_pool(priority.threads())
+                .map_err(|error| format!("Failed to configure ONNX Runtime threads: {error}"))?,
+        ),
+    };
+    if !builder.commit() {
+        return Err(
+            "Failed to initialize ONNX Runtime: an environment is already configured".to_string(),
+        );
+    }
     Ok(())
 }
 
+/// A pool of `threads` inference threads at background priority, which
+/// sessions use instead of creating their own. Its threads sleep rather
+/// than spin when out of work, since background embedding comes in bursts.
+fn background_thread_pool(
+    threads: usize,
+) -> ort::Result<ort::environment::GlobalThreadPoolOptions> {
+    ort::environment::GlobalThreadPoolOptions::default()
+        .with_intra_threads(threads)?
+        .with_inter_threads(1)?
+        .with_spin_control(false)?
+        .with_thread_manager(BackgroundThreads)
+}
+
+/// Spawns ONNX Runtime's threads with lowered scheduling priority. Threads
+/// it creates do not inherit the QoS class of the thread creating them on
+/// macOS, so each lowers its own.
+struct BackgroundThreads;
+
+impl ort::environment::ThreadManager for BackgroundThreads {
+    type Thread = std::thread::JoinHandle<()>;
+
+    fn create(&self, work: impl FnOnce() + Send + 'static) -> ort::Result<Self::Thread> {
+        std::thread::Builder::new()
+            .name("semantic-embed".to_string())
+            .spawn(move || {
+                lower_current_thread_priority();
+                work();
+            })
+            .map_err(|error| ort::Error::new(error.to_string()))
+    }
+
+    fn join(thread: Self::Thread) -> ort::Result<()> {
+        let _ = thread.join();
+        Ok(())
+    }
+}
+
 #[cfg(feature = "release-dynamic-ort")]
-fn initialize_bundled_onnx_runtime() -> std::result::Result<(), String> {
+fn bundled_onnx_runtime() -> std::result::Result<ort::environment::EnvironmentBuilder, String> {
     let path = bundled_onnx_runtime_path().ok_or_else(|| {
         format!(
             "Bundled ONNX Runtime library was not found beside the executable; expected a compatible {}",
             runtime_library_name()
         )
     })?;
-    let builder = ort::init_from(&path).map_err(|error| {
+    ort::init_from(&path).map_err(|error| {
         format!(
             "Failed to load bundled ONNX Runtime from {}: {error}",
             path.display()
         )
-    })?;
-    if !builder.commit() {
-        return Err(format!(
-            "Failed to initialize bundled ONNX Runtime from {}: an ONNX Runtime environment is already configured",
-            path.display()
-        ));
-    }
-    Ok(())
+    })
 }
 
 #[cfg(feature = "release-dynamic-ort")]
@@ -282,8 +328,8 @@ mod tests {
 
     #[cfg(not(feature = "release-dynamic-ort"))]
     #[test]
-    fn non_release_runtime_initialization_is_a_noop() {
-        assert!(init_onnx_runtime().is_ok());
+    fn non_release_runtime_initialization_needs_no_bundled_runtime() {
+        assert!(init_onnx_runtime(EmbedPriority::Foreground).is_ok());
     }
 
     #[cfg(feature = "release-dynamic-ort")]
