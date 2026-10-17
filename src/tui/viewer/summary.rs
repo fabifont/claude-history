@@ -157,33 +157,39 @@ pub(super) fn render_tool_activity_summary(
     label_color: (u8, u8, u8),
     dimmed: bool,
     timing: TimingSlot<'_>,
-    text: String,
+    rows: Vec<String>,
     tool_output_id: Option<&ToolOutputId>,
 ) {
-    let content = vec![(
-        text,
-        LineStyle {
-            fg: Some(th().tool_text),
-            dimmed: true,
-            ..Default::default()
-        },
-    )];
-    push_row(
-        lines,
-        LedgerRow {
-            timing,
-            name: NameCol::Label {
-                text: label,
-                color: label_color,
-                bold: false,
-                dimmed,
+    for (i, text) in rows.into_iter().enumerate() {
+        let content = vec![(
+            text,
+            LineStyle {
+                fg: Some(th().tool_text),
+                dimmed: true,
+                ..Default::default()
             },
-            separator_dimmed: dimmed,
-            tool_output_id,
-            clickable: tool_output_id.is_some(),
-        },
-        content,
-    );
+        )];
+        push_row(
+            lines,
+            LedgerRow {
+                timing: if i == 0 {
+                    timing
+                } else {
+                    timing.continuation()
+                },
+                name: NameCol::Label {
+                    text: label,
+                    color: label_color,
+                    bold: false,
+                    dimmed,
+                },
+                separator_dimmed: dimmed,
+                tool_output_id,
+                clickable: tool_output_id.is_some(),
+            },
+            content,
+        );
+    }
 }
 
 pub(super) fn summarize_tool_calls(parts: &[Part]) -> ToolActivitySummary {
@@ -367,12 +373,12 @@ fn render_summary_group_details(
     }
 }
 
-/// The summary text for a pending group; see [`summary_line`].
-fn group_summary_line(
+/// The collapsed rows for a pending group; see [`summary_rows`].
+fn group_summary_rows(
     entries: &[RenderableEntry],
     pending: &PendingToolSummary,
-    width: usize,
-) -> String {
+    options: &RenderOptions,
+) -> Vec<String> {
     let parts = entries[pending.first_parsed_idx..=pending.last_parsed_idx]
         .iter()
         .filter_map(|parsed| match parsed.entry.kind {
@@ -385,14 +391,39 @@ fn group_summary_line(
             _ => None,
         })
         .flat_map(|message| &message.parts);
-    summary_line(&pending.summary, parts, width)
+    summary_rows(&pending.summary, parts, options)
+}
+
+/// The collapsed rows for the calls among `parts`: each call on one line in
+/// calls mode, otherwise the single summary line.
+pub(super) fn summary_rows<'a>(
+    summary: &ToolActivitySummary,
+    parts: impl Iterator<Item = &'a Part>,
+    options: &RenderOptions,
+) -> Vec<String> {
+    let width = options.content_width;
+    if options.tool_display != ToolDisplayMode::Calls {
+        return vec![summary_line(summary, parts, width)];
+    }
+    parts
+        .filter_map(|part| match part {
+            Part::ToolCall { name, input, .. } => Some(call_line(name, input, width)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A tool call as one formatted line cut to `width`.
+fn call_line(name: &str, input: &serde_json::Value, width: usize) -> String {
+    let header = crate::tool_format::format_tool_call(name, input, 0).header;
+    truncate_end(&header, width)
 }
 
 /// The summary text for the calls among `parts`. A single call to a tool
 /// without its own summary wording shows as the call itself on one line cut
 /// to `width`, which says more than "Called clock__sleep". Any other text is
 /// cut to `width` too, since tool names make it unbounded.
-pub(super) fn summary_line<'a>(
+fn summary_line<'a>(
     summary: &ToolActivitySummary,
     mut parts: impl Iterator<Item = &'a Part>,
     width: usize,
@@ -402,10 +433,7 @@ pub(super) fn summary_line<'a>(
         _ => None,
     });
     match single_call {
-        Some((name, input)) if summary.is_single_other_tool() => {
-            let header = crate::tool_format::format_tool_call(name, input, 0).header;
-            truncate_end(&header, width)
-        }
+        Some((name, input)) if summary.is_single_other_tool() => call_line(name, input, width),
         _ => truncate_end(&summary.sentence(), width),
     }
 }
@@ -460,7 +488,7 @@ pub(super) fn flush_tool_summary(
             th().accent_dim,
             pending.parent_id.is_some(),
             timing,
-            group_summary_line(entries, &pending, options.content_width),
+            group_summary_rows(entries, &pending, options),
             Some(&pending.id),
         );
     }

@@ -476,6 +476,35 @@ fn summary_tool_mode_coalesces_tool_calls_across_records_that_show_nothing() {
 }
 
 #[test]
+fn calls_tool_mode_lists_each_call_on_one_line_without_results() {
+    let entries = tool_summary_entries();
+    let summary_id = make_tool_summary_output_id(0, None);
+    let rendered = render_parsed_conversation(
+        &renderable(&entries),
+        &test_render_options(ToolDisplayMode::Calls),
+    );
+    let text = rendered_text(&rendered);
+
+    assert!(text.contains(r#"Grep: "one" in ."#), "{text}");
+    assert!(text.contains("Read: src/main.rs"), "{text}");
+    assert!(text.contains("Bash: cargo test"), "{text}");
+    assert!(!text.contains("Result"), "{text}");
+    assert!(!text.contains("grep result"), "{text}");
+    assert!(
+        rendered
+            .lines
+            .iter()
+            .filter(|line| !line.spans.is_empty())
+            .all(|line| line.clickable && line.tool_output_id.as_ref() == Some(&summary_id))
+    );
+
+    let mut options = test_render_options(ToolDisplayMode::Calls);
+    options.expanded_tool_outputs.insert(summary_id);
+    let expanded = rendered_text(&render_parsed_conversation(&renderable(&entries), &options));
+    assert!(expanded.contains("grep result"), "{expanded}");
+}
+
+#[test]
 fn summary_tool_mode_coalesces_tool_only_entries_across_results() {
     let entries = tool_summary_entries();
     let rendered = render_parsed_conversation(
@@ -676,7 +705,7 @@ fn off_tool_mode_status_label_is_off() {
 fn tool_display_mode_cycles_from_off_through_full() {
     let mut mode = ToolDisplayMode::Off;
     let mut seen = vec![mode];
-    for _ in 0..4 {
+    for _ in 0..5 {
         mode = mode.next();
         seen.push(mode);
     }
@@ -685,6 +714,7 @@ fn tool_display_mode_cycles_from_off_through_full() {
         vec![
             ToolDisplayMode::Off,
             ToolDisplayMode::Summary,
+            ToolDisplayMode::Calls,
             ToolDisplayMode::Truncated,
             ToolDisplayMode::Full,
             ToolDisplayMode::Off,

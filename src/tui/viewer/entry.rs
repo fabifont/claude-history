@@ -9,7 +9,7 @@ use super::commands::process_command_message;
 use super::ledger::{render_ledger_block_styled, render_ledger_block_styled_dimmed};
 use super::markdown::{apply_thinking_style, render_markdown_to_lines};
 use super::style::subagent_label;
-use super::summary::{render_tool_activity_summary, summarize_tool_calls, summary_line};
+use super::summary::{render_tool_activity_summary, summarize_tool_calls, summary_rows};
 use super::timing::{RowTiming, TimingSlot};
 use super::tools::{
     ToolCallRenderSpec, ToolOutputKind, ToolResultRenderSpec, format_tool_result_content,
@@ -396,7 +396,7 @@ fn step_tool_summary(
     timing: &mut RowTiming<'_>,
     blocks: &[Part],
 ) -> bool {
-    if !ctx.options.tool_display.is_summary() {
+    if !ctx.options.tool_display.groups_tools() {
         return false;
     }
     let summary = summarize_tool_calls(blocks);
@@ -409,7 +409,7 @@ fn step_tool_summary(
         th().accent_dim,
         ctx.style.is_subagent,
         timing.consume(),
-        summary_line(&summary, blocks.iter(), ctx.options.content_width),
+        summary_rows(&summary, blocks.iter(), ctx.options),
         None,
     );
     true

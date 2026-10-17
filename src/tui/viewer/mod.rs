@@ -60,23 +60,27 @@ pub enum ToolDisplayMode {
     Off,
     #[default]
     Summary,
+    /// Each tool call on one line, without results
+    Calls,
     Truncated,
     Full,
 }
 
 impl ToolDisplayMode {
-    /// Cycle to the next mode: Off → Summary → Truncated → Full → Off
+    /// Cycle to the next mode: Off → Summary → Calls → Truncated → Full → Off
     pub fn next(self) -> Self {
         match self {
             Self::Off => Self::Summary,
-            Self::Summary => Self::Truncated,
+            Self::Summary => Self::Calls,
+            Self::Calls => Self::Truncated,
             Self::Truncated => Self::Full,
             Self::Full => Self::Off,
         }
     }
 
-    pub fn is_summary(self) -> bool {
-        matches!(self, Self::Summary)
+    /// Whether runs of tool calls collapse into rows that expand on click
+    pub fn groups_tools(self) -> bool {
+        matches!(self, Self::Summary | Self::Calls)
     }
 
     /// Whether full or truncated tool details should be rendered
@@ -94,6 +98,7 @@ impl ToolDisplayMode {
         match self {
             Self::Off => "off",
             Self::Summary => "sum",
+            Self::Calls => "cal",
             Self::Truncated => "trn",
             Self::Full => "all",
         }
@@ -168,7 +173,7 @@ pub fn render_parsed_conversation(
     let mut pending_tool_summary: Option<PendingToolSummary> = None;
 
     for (parsed_idx, parsed) in entries.iter().enumerate() {
-        if options.tool_display.is_summary()
+        if options.tool_display.groups_tools()
             && try_extend_or_start_pending_summary(
                 &mut lines,
                 &mut messages,

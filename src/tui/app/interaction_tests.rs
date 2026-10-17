@@ -287,14 +287,15 @@ fn cycling_tools_to_off_keeps_focus_on_a_visible_message() {
     app.selected = Some(0);
     app.enter_view_mode(80);
 
-    // Focus the tool summary row, then cycle summary → truncated → full → off.
+    // Focus the tool summary row, then cycle summary → calls → truncated →
+    // full → off.
     if let AppMode::View(ref mut state) = app.app_mode {
         assert_eq!(state.message_ranges[1].entry_index, 1);
         state.focused_message = Some(1);
         state.message_nav_active = true;
     }
     assert!(view_text(&app).contains("Ran 1 shell command"));
-    for _ in 0..3 {
+    for _ in 0..4 {
         app.toggle_view_tools(20);
     }
 
