@@ -260,8 +260,8 @@ fn describe(paths: &Paths, enabled: bool, now_ms: i64) -> String {
             }
             let _ = writeln!(
                 out,
-                "Quick pass: every {} s, last {}",
-                status.quick_interval_secs,
+                "Quick pass: every {} min, last {}",
+                schedule::QUICK_INTERVAL.as_secs() / 60,
                 ago(status.last_quick_pass_ms)
             );
         }

@@ -5,12 +5,11 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
-/// Quick pass interval while sessions are changing.
-pub const QUICK_ACTIVE: Duration = Duration::from_secs(30);
-/// Quick pass interval after the first pass without changes.
-pub const QUICK_BASE: Duration = Duration::from_secs(60);
-/// Longest quick pass interval, reached by doubling while nothing changes.
-pub const QUICK_IDLE_MAX: Duration = Duration::from_secs(5 * 60);
+/// Interval of the quick pass, which finds changed session files.
+pub const QUICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Delay of the full pass that follows one finding another process
+/// publishing the store.
+pub const BUSY_RETRY: Duration = Duration::from_secs(30);
 /// Interval of the full pass, which lists every session file.
 pub const FULL_INTERVAL: Duration = Duration::from_secs(20 * 60);
 /// Delay before the first semantic sweep, so a launch that starts the
@@ -37,7 +36,6 @@ pub struct Due {
 
 #[derive(Debug)]
 pub struct Schedule {
-    quick_interval: Duration,
     next_quick: Instant,
     next_full: Instant,
     next_sweep: Instant,
@@ -49,16 +47,11 @@ impl Schedule {
     /// A schedule starting at `now` with a full pass.
     pub fn new(now: Instant) -> Self {
         Self {
-            quick_interval: QUICK_BASE,
-            next_quick: now + QUICK_BASE,
+            next_quick: now + QUICK_INTERVAL,
             next_full: now,
             next_sweep: now + SWEEP_DELAY,
             next_job: now,
         }
-    }
-
-    pub fn quick_interval(&self) -> Duration {
-        self.quick_interval
     }
 
     pub fn due(&self, now: Instant) -> Due {
@@ -74,23 +67,15 @@ impl Schedule {
         now >= self.next_job
     }
 
-    /// Records a quick pass at `now`: the next comes sooner while files
-    /// change and later while they do not.
-    pub fn quick_done(&mut self, now: Instant, changed: bool) {
-        self.quick_interval = if changed {
-            QUICK_ACTIVE
-        } else if self.quick_interval < QUICK_BASE {
-            QUICK_BASE
-        } else {
-            (self.quick_interval * 2).min(QUICK_IDLE_MAX)
-        };
-        self.next_quick = now + self.quick_interval;
+    /// Records a quick pass at `now`.
+    pub fn quick_done(&mut self, now: Instant) {
+        self.next_quick = now + QUICK_INTERVAL;
     }
 
     /// Records a full pass at `now`, which counts as a quick pass too.
-    pub fn full_done(&mut self, now: Instant, changed: bool) {
+    pub fn full_done(&mut self, now: Instant) {
         self.next_full = now + FULL_INTERVAL;
-        self.quick_done(now, changed);
+        self.quick_done(now);
     }
 
     /// Records the end of a sweep: the next after the interval when it
@@ -104,10 +89,10 @@ impl Schedule {
         self.next_sweep = self.next_sweep.min(now);
     }
 
-    /// Brings the next full pass forward to `QUICK_ACTIVE` after `now`, as
+    /// Brings the next full pass forward to `BUSY_RETRY` after `now`, as
     /// when a pass found another process publishing.
     pub fn full_soon(&mut self, now: Instant) {
-        self.next_full = self.next_full.min(now + QUICK_ACTIVE);
+        self.next_full = self.next_full.min(now + BUSY_RETRY);
     }
 
     /// Holds embedding jobs back until `JOB_RETRY` after `now`.
@@ -233,26 +218,27 @@ mod tests {
     }
 
     #[test]
-    fn quick_passes_speed_up_while_files_change_and_back_off_when_idle() {
+    fn quick_passes_come_every_interval() {
         let mut now = Instant::now();
         let mut schedule = Schedule::new(now);
-        schedule.full_done(now, false);
-        let mut intervals = Vec::new();
-        for changed in [true, true, false, false, false, false, false, true, false] {
-            now += schedule.quick_interval();
+        schedule.full_done(now);
+        for _ in 0..3 {
+            assert!(
+                !schedule
+                    .due(now + QUICK_INTERVAL - Duration::from_secs(1))
+                    .quick
+            );
+            now += QUICK_INTERVAL;
             assert!(schedule.due(now).quick);
-            schedule.quick_done(now, changed);
-            intervals.push(schedule.quick_interval().as_secs());
-            assert!(!schedule.due(now + schedule.quick_interval() / 2).quick);
+            schedule.quick_done(now);
         }
-        assert_eq!(intervals, [30, 30, 60, 120, 240, 300, 300, 30, 60]);
     }
 
     #[test]
     fn full_passes_come_every_interval() {
         let start = Instant::now();
         let mut schedule = Schedule::new(start);
-        schedule.full_done(start, false);
+        schedule.full_done(start);
         assert!(
             !schedule
                 .due(start + FULL_INTERVAL - Duration::from_secs(1))
@@ -260,7 +246,7 @@ mod tests {
         );
         let next = start + FULL_INTERVAL;
         assert!(schedule.due(next).full);
-        schedule.full_done(next, false);
+        schedule.full_done(next);
         assert!(!schedule.due(next + Duration::from_secs(1)).full);
     }
 
@@ -282,19 +268,19 @@ mod tests {
     fn a_busy_store_brings_the_full_pass_forward() {
         let start = Instant::now();
         let mut schedule = Schedule::new(start);
-        schedule.full_done(start, false);
+        schedule.full_done(start);
         schedule.full_soon(start);
-        assert!(!schedule.due(start + QUICK_ACTIVE / 2).full);
-        assert!(schedule.due(start + QUICK_ACTIVE).full);
+        assert!(!schedule.due(start + BUSY_RETRY / 2).full);
+        assert!(schedule.due(start + BUSY_RETRY).full);
     }
 
     #[test]
     fn the_daemon_wakes_for_the_earliest_work() {
         let start = Instant::now();
         let mut schedule = Schedule::new(start);
-        schedule.full_done(start, false);
+        schedule.full_done(start);
         schedule.sweep_done(start, true);
-        let quick = start + QUICK_BASE * 2;
+        let quick = start + QUICK_INTERVAL;
         assert_eq!(schedule.next_wake(None, false), quick);
         let ready = start + Duration::from_secs(10);
         assert_eq!(schedule.next_wake(Some(ready), false), ready);

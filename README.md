@@ -494,8 +494,7 @@ How it works:
 
 - **Changes are found by polling, not file watching.** A quick pass stats the
   project directories and the sessions modified in the last day, plus a
-  session's `subagents/` when the session changes. It runs every 30 seconds
-  while sessions change and backs off to every 5 minutes when nothing does. A
+  session's `subagents/` when the session changes. It runs every 5 minutes. A
   full pass lists every session file every 20 minutes. Changes are published
   to the keyword store the same way a launch does, so a launch finds nothing
   left to do.

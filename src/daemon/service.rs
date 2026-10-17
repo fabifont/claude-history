@@ -245,7 +245,6 @@ impl Daemon {
         } else if due.quick {
             self.quick_pass(now);
         }
-        self.status.quick_interval_secs = self.schedule.quick_interval().as_secs();
     }
 
     fn full_pass(&mut self, now: Instant) {
@@ -253,7 +252,7 @@ impl Daemon {
         if !store_exists(&self.root) {
             // A launch builds the store; the daemon only keeps it current.
             self.store_current = false;
-            self.schedule.full_done(now, false);
+            self.schedule.full_done(now);
             return;
         }
         let today = chrono::Local::now().date_naive();
@@ -277,16 +276,14 @@ impl Daemon {
         let result = self.pass(None);
         // Recorded first: a pass that finds the store busy asks for the
         // next one sooner.
-        self.schedule.full_done(now, false);
-        if self.after_pass(result, started, "full") {
-            self.schedule.quick_done(now, true);
-        }
+        self.schedule.full_done(now);
+        self.after_pass(result, started, "full");
     }
 
     fn quick_pass(&mut self, now: Instant) {
         self.status.last_quick_pass_ms = Some(now_ms());
         if !self.primed {
-            self.schedule.quick_done(now, false);
+            self.schedule.quick_done(now);
             return;
         }
         let started = SystemTime::now();
@@ -297,14 +294,12 @@ impl Daemon {
             if self.store_current {
                 self.last_pass = Some(started);
             }
-            self.schedule.quick_done(now, false);
+            self.schedule.quick_done(now);
             return;
         }
         let result = self.pass(Some(&changes.targets));
-        self.schedule.quick_done(now, false);
-        if self.after_pass(result, started, "quick") {
-            self.schedule.quick_done(now, true);
-        }
+        self.schedule.quick_done(now);
+        self.after_pass(result, started, "quick");
     }
 
     /// Runs a reconcile pass over `targets`, or a full pass, in a child
@@ -347,21 +342,15 @@ impl Daemon {
         }
     }
 
-    /// Takes in the outcome of a pass that started at `started`; returns
-    /// whether it found changed conversations.
-    fn after_pass(
-        &mut self,
-        result: std::io::Result<PassReport>,
-        started: SystemTime,
-        kind: &str,
-    ) -> bool {
+    /// Takes in the outcome of a pass that started at `started`.
+    fn after_pass(&mut self, result: std::io::Result<PassReport>, started: SystemTime, kind: &str) {
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(error) => {
                 self.error(&format!("{kind} pass: {error}"));
                 self.store_current = false;
                 self.schedule.full_soon(Instant::now());
-                return false;
+                return;
             }
         };
         if outcome.busy {
@@ -370,7 +359,7 @@ impl Daemon {
                 .line(&format!("{kind} pass: another process is publishing"));
             self.store_current = false;
             self.schedule.full_soon(Instant::now());
-            return false;
+            return;
         }
         self.store_current = true;
         self.last_pass = Some(started);
@@ -386,10 +375,8 @@ impl Daemon {
         for path in &outcome.changed {
             self.watcher.add_hot(path.clone(), false);
         }
-        let changed = !outcome.changed.is_empty();
         self.pending.add(outcome.changed);
         self.status.pending_conversations = self.pending.len();
-        changed
     }
 
     /// When `path` was last modified, if it is in the store as it is now;

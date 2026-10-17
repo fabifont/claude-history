@@ -17,8 +17,6 @@ pub struct Status {
     /// `paused on battery`, or `exited` with `exit_reason`.
     pub state: String,
     pub exit_reason: Option<String>,
-    /// Interval of the quick pass, which adapts to how much changes.
-    pub quick_interval_secs: u64,
     pub last_quick_pass_ms: Option<i64>,
     pub last_full_pass_ms: Option<i64>,
     /// Last time a pass published a new generation of the keyword store.
@@ -52,7 +50,6 @@ impl Status {
             started_ms: now_ms,
             state: "starting".to_owned(),
             exit_reason: None,
-            quick_interval_secs: 0,
             last_quick_pass_ms: None,
             last_full_pass_ms: None,
             last_publish_ms: None,
