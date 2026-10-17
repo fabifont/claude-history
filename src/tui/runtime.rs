@@ -555,6 +555,9 @@ pub fn run_with_loader(
         let wait = [
             app.has_search_work_in_flight()
                 .then_some(Duration::from_millis(8)),
+            app.semantic_indexing()
+                .is_some()
+                .then_some(Duration::from_millis(250)),
             store
                 .as_ref()
                 .is_some_and(Store::pending)
@@ -886,6 +889,27 @@ pub fn bench_startup(
                 "bench semantic_top {}",
                 app.conversations()[row].path.display()
             );
+        }
+        if app.semantic_indexing().is_some() {
+            while app.semantic_indexing().is_some() {
+                if !app.receive_search_results() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            wait(app);
+            draw(terminal, app)?;
+            eprintln!(
+                "bench semantic_indexed {:.1}ms",
+                started.elapsed().as_secs_f64() * 1e3
+            );
+            bench::mark_peak_rss_as("semantic_indexed_peak_rss");
+            eprintln!("bench semantic_indexed_results {}", app.filtered().len());
+            for &row in app.filtered().iter().take(10) {
+                eprintln!(
+                    "bench semantic_indexed_top {}",
+                    app.conversations()[row].path.display()
+                );
+            }
         }
         app.set_list_search_mode(ListSearchMode::Lexical);
         app.replace_query("");

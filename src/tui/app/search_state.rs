@@ -5,7 +5,7 @@ use crate::search::{self, SearchableConversation};
 use crate::semantic::types::SemanticCancellationToken;
 use crate::store;
 use crate::tui::semantic_worker::{
-    SemanticSearchMessage, SemanticWorkerCommand, spawn_semantic_worker,
+    SemanticIndexing, SemanticSearchMessage, SemanticWorkerCommand, spawn_semantic_worker,
 };
 use chrono::Local;
 use rayon::prelude::*;
@@ -21,6 +21,9 @@ pub(super) struct SemanticSearchState {
     pub(super) pending_status: Option<SemanticProgress>,
     pub(super) prewarm_generation: Option<u64>,
     pub(super) prewarm_status: Option<SemanticProgress>,
+    /// Progress of embedding the conversations the worker has no
+    /// embeddings for, while it does.
+    pub(super) indexing: Option<SemanticIndexing>,
     pub(super) last_status: SemanticProgress,
     pub(super) error: Option<String>,
     pub(super) results: HashMap<usize, SemanticResultMetadata>,
@@ -869,6 +872,20 @@ impl App {
                             }
                         }
                     }
+                    SemanticSearchMessage::Indexing(indexing) => {
+                        // A search waiting for indexing shows its progress.
+                        if let (Some(SemanticProgress::Embedding { .. }), Some(indexing)) =
+                            (&self.semantic_search.pending_status, indexing)
+                        {
+                            self.semantic_search.pending_status =
+                                Some(SemanticProgress::Embedding {
+                                    completed: indexing.completed,
+                                    total: indexing.total,
+                                });
+                        }
+                        self.semantic_search.indexing = indexing;
+                        applied = true;
+                    }
                     SemanticSearchMessage::Complete(response) => {
                         if self.list_search_mode == ListSearchMode::Semantic {
                             if response.prewarm
@@ -894,6 +911,14 @@ impl App {
                                 }
                                 applied = true;
                             } else if response.generation == active_generation {
+                                // Results refreshed after indexing replace ones
+                                // already shown; keep a row the user moved to.
+                                if self.semantic_search.pending_generation.is_none()
+                                    && self.selection_anchor.is_none()
+                                    && self.selected.is_some_and(|selected| selected > 0)
+                                {
+                                    self.selection_anchor = self.get_selected_path();
+                                }
                                 self.search_in_flight = false;
                                 self.semantic_search.pending_generation = None;
                                 self.semantic_search.pending_status = None;
@@ -912,6 +937,11 @@ impl App {
             self.semantic_search.worker_rx = Some(rx);
         }
         applied
+    }
+
+    /// Progress of the semantic worker's background indexing, while it runs.
+    pub fn semantic_indexing(&self) -> Option<SemanticIndexing> {
+        self.semantic_search.indexing
     }
 
     pub fn has_search_work_in_flight(&self) -> bool {
@@ -1020,7 +1050,15 @@ impl App {
             .semantic_search
             .prewarm_status
             .as_ref()
-            .or(self.semantic_search.pending_status.as_ref())?;
+            .or(self.semantic_search.pending_status.as_ref());
+        let Some(status) = status else {
+            let SemanticIndexing { completed, total } = self.semantic_search.indexing?;
+            let percent = completed.min(total).saturating_mul(100) / total.max(1);
+            return Some(format!(
+                "sem indexing {percent}%  {}/{total} chunks",
+                completed.min(total)
+            ));
+        };
         match status {
             SemanticProgress::InitializingModel => Some("sem preparing embeddings".to_string()),
             SemanticProgress::Embedding { completed, total } => {

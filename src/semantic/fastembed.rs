@@ -28,6 +28,12 @@ impl FastembedEmbedder {
         cache_dir: PathBuf,
         show_download_progress: bool,
     ) -> Result<Self> {
+        // Tests use fake embedders; the model lives in the user's cache.
+        if cfg!(test) {
+            return Err(AppError::ConfigError(
+                "the embedding model is not loaded in tests".into(),
+            ));
+        }
         init_onnx_runtime()?;
         let model = TextEmbedding::try_new(
             TextInitOptions::new(EmbeddingModel::BGESmallENV15)

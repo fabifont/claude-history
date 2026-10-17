@@ -41,6 +41,8 @@ pub struct SemanticIndexResponse {
     pub chunk_hits: Vec<SemanticHit>,
     pub indexed_chunk_count: usize,
     pub missing_chunk_count: usize,
+    /// Passages this call embedded.
+    pub embedded_chunk_count: usize,
     pub query_embedding_returned: bool,
     pub progress: SemanticIndexProgress,
     pub prewarm: bool,
@@ -173,7 +175,31 @@ impl SemanticIndexState {
         if self.resident.is_complete(request) {
             self.signature = Some(next_signature);
         }
-        Ok(self.refresh_response(request, missing_chunk_count))
+        let mut response = self.refresh_response(request, missing_chunk_count);
+        response.embedded_chunk_count = embedding_count;
+        Ok(response)
+    }
+
+    /// Embeds at most `budget` of the corpus passages that have no
+    /// embedding yet, in corpus order, and makes everything embedded so far
+    /// rankable. The response says how many it embedded and
+    /// how many remain.
+    pub fn index_slice(
+        &mut self,
+        request: &SemanticIndexRequest<'_>,
+        embedder: &mut dyn SemanticEmbedder,
+        cancellation: &SemanticCancellationToken,
+        budget: usize,
+        save_cache: impl FnMut(&EmbeddingCache),
+    ) -> Result<SemanticIndexResponse> {
+        self.refresh_passages_with_budget(
+            request,
+            embedder,
+            cancellation,
+            Some(budget),
+            |_| {},
+            save_cache,
+        )
     }
 
     pub fn rank_refreshed(
@@ -339,6 +365,7 @@ impl SemanticIndexState {
             chunk_hits,
             indexed_chunk_count: self.indexed_chunk_count(),
             missing_chunk_count: 0,
+            embedded_chunk_count: 0,
             query_embedding_returned,
             progress,
             prewarm,
