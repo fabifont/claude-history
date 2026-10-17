@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- New: While searching, the selected result is previewed next to or below the
+  list, scrolled to a line that matches the query. The best match is
+  highlighted brightly and other matches are shaded more softly
+
 ## v0.1.78 (2026-10-17)
 
 - Semantic search shows results without waiting for indexing to finish.
