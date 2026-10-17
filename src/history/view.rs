@@ -34,9 +34,22 @@ pub enum EntryKind<'a> {
         text: &'a str,
         searchable: bool,
     },
-    /// A record that shows nothing. It still ends a run of tool calls
-    /// the viewer summarizes as one.
+    /// A record that shows nothing.
     Hidden,
+}
+
+impl EntryKind<'_> {
+    /// Whether the entry renders nothing in the viewer.
+    pub fn shows_nothing(&self) -> bool {
+        matches!(
+            self,
+            Self::Hidden
+                | Self::Note {
+                    searchable: false,
+                    ..
+                }
+        )
+    }
 }
 
 const FORK_LABEL: &str = "Fork";

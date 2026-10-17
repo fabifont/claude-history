@@ -28,7 +28,7 @@ pub use output::{LineStyle, RenderedLine};
 
 use entry::render_entry;
 use summary::{
-    PendingToolSummary, flush_tool_summary, tool_only_assistant_summary,
+    PendingToolSummary, entry_shows_nothing, flush_tool_summary, tool_only_assistant_summary,
     user_entry_is_only_tool_results,
 };
 use tools::make_tool_summary_output_id;
@@ -243,6 +243,12 @@ fn try_extend_or_start_pending_summary(
                 });
             }
         }
+        return true;
+    }
+
+    // Records that render nothing sit between a tool result and the next
+    // call; they must not split one run of tool calls into several rows.
+    if pending.is_some() && entry_shows_nothing(entry, options) {
         return true;
     }
 

@@ -445,6 +445,37 @@ fn summary_tool_mode_names_unknown_tools_in_group() {
 }
 
 #[test]
+fn summary_tool_mode_coalesces_tool_calls_across_records_that_show_nothing() {
+    let entries = vec![
+        entry(
+            0,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]}}"#,
+        ),
+        entry(
+            1,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#,
+        ),
+        entry(2, r#"{"type":"last-prompt","lastPrompt":"x"}"#),
+        entry(
+            3,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"next"}]}}"#,
+        ),
+        entry(
+            4,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"pwd"}}]}}"#,
+        ),
+    ];
+    let rendered = render_parsed_conversation(
+        &renderable(&entries),
+        &test_render_options(ToolDisplayMode::Summary),
+    );
+    let text = rendered_text(&rendered);
+
+    assert!(text.contains("Ran 2 shell commands"), "{text}");
+    assert!(!text.contains("Ran 1 shell command"), "{text}");
+}
+
+#[test]
 fn summary_tool_mode_coalesces_tool_only_entries_across_results() {
     let entries = tool_summary_entries();
     let rendered = render_parsed_conversation(

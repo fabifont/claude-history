@@ -237,6 +237,23 @@ pub(super) fn tool_only_assistant_summary<'a>(
     ))
 }
 
+/// Whether the entry renders nothing: a record with no display, or an
+/// assistant message of only thinking while thinking is hidden.
+pub(super) fn entry_shows_nothing(entry: &Entry<'_>, options: &RenderOptions) -> bool {
+    match entry.kind {
+        EntryKind::Message { message, .. } => {
+            !options.show_thinking
+                && message.role == Role::Assistant
+                && !message.parts.is_empty()
+                && message
+                    .parts
+                    .iter()
+                    .all(|part| matches!(part, Part::Thinking(_)))
+        }
+        ref kind => kind.shows_nothing(),
+    }
+}
+
 pub(super) fn user_entry_is_only_tool_results(entry: &Entry<'_>, options: &RenderOptions) -> bool {
     let EntryKind::Message { message, .. } = entry.kind else {
         return false;
