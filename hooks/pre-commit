@@ -1,2 +1,7 @@
 #!/usr/bin/env bash
-exec checkle pre-commit
+if ! checkle pre-commit; then
+  echo 'pre-commit checks failed' >&2
+  echo 'if clippy reported fixable lints, run: just clippy-fix' >&2
+  echo 'review and stage any fixes, then commit again' >&2
+  exit 1
+fi

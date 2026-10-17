@@ -36,9 +36,13 @@ format:
 # Check Rust formatting through checkle
 format-check: format
 
-# Check clippy through checkle
+# Run clippy and fail on any warnings
 clippy:
     checkle run clippy
+
+# Auto-fix clippy warnings
+clippy-fix:
+    cargo clippy --fix --allow-dirty --all-targets --locked -- -D warnings -W clippy::all
 
 # Check clippy through checkle
 clippy-check: clippy
