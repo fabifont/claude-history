@@ -42,12 +42,12 @@ pub(super) struct ToolActivitySummary {
 impl ToolActivitySummary {
     fn add_call(&mut self, name: &str) {
         match name {
-            "Bash" => self.shell_commands += 1,
-            "Read" => self.read_files += 1,
-            "Grep" => self.searched_patterns += 1,
-            "Glob" => self.searched_file_patterns += 1,
-            "Edit" => self.edited_files += 1,
-            "Write" => self.wrote_files += 1,
+            "Bash" | "bash" => self.shell_commands += 1,
+            "Read" | "read" => self.read_files += 1,
+            "Grep" | "grep" => self.searched_patterns += 1,
+            "Glob" | "find" => self.searched_file_patterns += 1,
+            "Edit" | "edit" => self.edited_files += 1,
+            "Write" | "write" => self.wrote_files += 1,
             "Task" => self.agents += 1,
             "WebFetch" => self.fetched_urls += 1,
             "WebSearch" => self.web_searches += 1,

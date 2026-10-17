@@ -16,15 +16,18 @@ pub struct FormattedToolCall {
 /// Format a tool call for display
 ///
 /// The `max_width` parameter controls line wrapping for tools with long content (e.g., Bash commands).
+/// Claude Code tool names and Pi's lowercase ones (`bash`, `read`, ...)
+/// share formatters; Pi names files with `path` where Claude uses `file_path`.
 pub fn format_tool_call(name: &str, input: &Value, max_width: usize) -> FormattedToolCall {
     match name {
         "Task" => format_task(input),
-        "Bash" => format_bash(input, max_width),
-        "Read" => format_read(input),
-        "Grep" => format_grep(input),
-        "Glob" => format_glob(input),
-        "Edit" => format_edit(input),
-        "Write" => format_write(input),
+        "Bash" | "bash" => format_bash(input, max_width),
+        "Read" | "read" => format_read(input),
+        "Grep" | "grep" => format_grep(input),
+        "Glob" => format_glob("Glob", input),
+        "find" => format_glob("Find", input),
+        "Edit" | "edit" => format_edit(input),
+        "Write" | "write" => format_write(input),
         "WebFetch" => format_web_fetch(input),
         "WebSearch" => format_web_search(input),
         _ => format_fallback(name, input, max_width),
@@ -102,11 +105,16 @@ fn wrap_after_prefix(prefix: &str, text: &str, max_width: usize) -> FormattedToo
     }
 }
 
+/// The file a tool call targets, under Claude's or Pi's key.
+fn file_path(input: &Value) -> &str {
+    ["file_path", "path"]
+        .iter()
+        .find_map(|key| input.get(key).and_then(|v| v.as_str()))
+        .unwrap_or("")
+}
+
 fn format_read(input: &Value) -> FormattedToolCall {
-    let file_path = input
-        .get("file_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let file_path = file_path(input);
     let offset = input.get("offset").and_then(|v| v.as_u64());
     let limit = input.get("limit").and_then(|v| v.as_u64());
 
@@ -137,43 +145,45 @@ fn format_grep(input: &Value) -> FormattedToolCall {
     }
 }
 
-fn format_glob(input: &Value) -> FormattedToolCall {
+fn format_glob(label: &str, input: &Value) -> FormattedToolCall {
     let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
     let path = input.get("path").and_then(|v| v.as_str());
 
     let header = match path {
-        Some(p) => format!("Glob: {} in {}", pattern, p),
-        None => format!("Glob: {}", pattern),
+        Some(p) => format!("{}: {} in {}", label, pattern, p),
+        None => format!("{}: {}", label, pattern),
     };
 
     FormattedToolCall { header, body: None }
 }
 
-fn format_edit(input: &Value) -> FormattedToolCall {
-    let file_path = input
-        .get("file_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let old_string = input.get("old_string").and_then(|v| v.as_str());
-    let new_string = input.get("new_string").and_then(|v| v.as_str());
+fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(|v| v.as_str())
+}
 
-    let body = match (old_string, new_string) {
-        (Some(old), Some(new)) => {
-            let mut diff = String::new();
-            for line in old.lines() {
-                diff.push_str(&format!("- {}\n", line));
-            }
-            for line in new.lines() {
-                diff.push_str(&format!("+ {}\n", line));
-            }
-            // Remove trailing newline
-            if diff.ends_with('\n') {
-                diff.pop();
-            }
-            Some(diff)
-        }
-        _ => None,
+fn format_edit(input: &Value) -> FormattedToolCall {
+    let file_path = file_path(input);
+
+    // Claude edits one span; Pi passes a list of `edits`.
+    let replacements: Vec<(&str, &str)> = match input.get("edits").and_then(|v| v.as_array()) {
+        Some(edits) => edits
+            .iter()
+            .filter_map(|e| Some((str_field(e, "oldText")?, str_field(e, "newText")?)))
+            .collect(),
+        None => str_field(input, "old_string")
+            .zip(str_field(input, "new_string"))
+            .into_iter()
+            .collect(),
     };
+
+    let body = (!replacements.is_empty()).then(|| {
+        let mut diff = Vec::new();
+        for (old, new) in replacements {
+            diff.extend(old.lines().map(|line| format!("- {}", line)));
+            diff.extend(new.lines().map(|line| format!("+ {}", line)));
+        }
+        diff.join("\n")
+    });
 
     FormattedToolCall {
         header: format!("Edit: {}", file_path),
@@ -182,10 +192,7 @@ fn format_edit(input: &Value) -> FormattedToolCall {
 }
 
 fn format_write(input: &Value) -> FormattedToolCall {
-    let file_path = input
-        .get("file_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let file_path = file_path(input);
 
     FormattedToolCall {
         header: format!("Write: {}", file_path),
@@ -350,6 +357,30 @@ mod tests {
         let result = format_tool_call("mcp__search", &input, 30);
         assert!(result.header.starts_with("mcp__search: {"));
         assert!(result.body.is_some());
+    }
+
+    #[test]
+    fn test_format_pi_tools() {
+        let bash = format_tool_call("bash", &json!({ "command": "ls", "timeout": 30 }), 80);
+        assert_eq!(bash.header, "Bash: ls");
+        let read = format_tool_call(
+            "read",
+            &json!({ "path": "a.rs", "offset": 5, "limit": 10 }),
+            80,
+        );
+        assert_eq!(read.header, "Read: a.rs:5-15");
+        let find = format_tool_call("find", &json!({ "pattern": "*.rs", "path": "src" }), 80);
+        assert_eq!(find.header, "Find: *.rs in src");
+        let edit = format_tool_call(
+            "edit",
+            &json!({ "path": "a.rs", "edits": [
+                { "oldText": "a", "newText": "b" },
+                { "oldText": "c", "newText": "d" }
+            ] }),
+            80,
+        );
+        assert_eq!(edit.header, "Edit: a.rs");
+        assert_eq!(edit.body, Some("- a\n+ b\n- c\n+ d".to_string()));
     }
 
     #[test]
