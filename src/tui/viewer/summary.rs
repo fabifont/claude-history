@@ -34,7 +34,9 @@ pub(super) struct ToolActivitySummary {
     agents: usize,
     fetched_urls: usize,
     web_searches: usize,
-    other_tools: usize,
+    /// Tools without their own summary wording, by name in first-call order,
+    /// with their call counts.
+    other_tools: Vec<(String, usize)>,
 }
 
 impl ToolActivitySummary {
@@ -49,7 +51,14 @@ impl ToolActivitySummary {
             "Task" => self.agents += 1,
             "WebFetch" => self.fetched_urls += 1,
             "WebSearch" => self.web_searches += 1,
-            _ => self.other_tools += 1,
+            _ => self.add_other_tool(name, 1),
+        }
+    }
+
+    fn add_other_tool(&mut self, name: &str, count: usize) {
+        match self.other_tools.iter_mut().find(|(seen, _)| seen == name) {
+            Some((_, seen_count)) => *seen_count += count,
+            None => self.other_tools.push((name.to_string(), count)),
         }
     }
 
@@ -63,10 +72,16 @@ impl ToolActivitySummary {
         self.agents += other.agents;
         self.fetched_urls += other.fetched_urls;
         self.web_searches += other.web_searches;
-        self.other_tools += other.other_tools;
+        for (name, count) in &other.other_tools {
+            self.add_other_tool(name, *count);
+        }
     }
 
     pub(super) fn is_empty(&self) -> bool {
+        self.other_tools.is_empty() && self.known_tool_calls() == 0
+    }
+
+    fn known_tool_calls(&self) -> usize {
         self.searched_patterns
             + self.searched_file_patterns
             + self.read_files
@@ -76,19 +91,12 @@ impl ToolActivitySummary {
             + self.agents
             + self.fetched_urls
             + self.web_searches
-            + self.other_tools
-            == 0
     }
 
     /// Whether the group is one call to a tool without its own summary
     /// wording, which reads better as the call itself than as "Called 1 tool".
     fn is_single_other_tool(&self) -> bool {
-        self.other_tools == 1
-            && Self {
-                other_tools: 0,
-                ..*self
-            }
-            .is_empty()
+        matches!(self.other_tools.as_slice(), [(_, 1)]) && self.known_tool_calls() == 0
     }
 
     fn sentence(&self) -> String {
@@ -112,7 +120,17 @@ impl ToolActivitySummary {
         push_summary_item(&mut parts, self.agents, "started", "agent");
         push_summary_item(&mut parts, self.fetched_urls, "fetched", "URL");
         push_summary_item(&mut parts, self.web_searches, "searched", "web");
-        push_summary_item(&mut parts, self.other_tools, "called", "tool");
+        if !self.other_tools.is_empty() {
+            let names: Vec<String> = self
+                .other_tools
+                .iter()
+                .map(|(name, count)| match count {
+                    1 => name.clone(),
+                    _ => format!("{name} ×{count}"),
+                })
+                .collect();
+            parts.push(format!("called {}", names.join(", ")));
+        }
         capitalize_first(parts.join(", "))
     }
 }
@@ -355,7 +373,8 @@ fn group_summary_line(
 
 /// The summary text for the calls among `parts`. A single call to a tool
 /// without its own summary wording shows as the call itself on one line cut
-/// to `width`, which says more than "Called 1 tool".
+/// to `width`, which says more than "Called clock__sleep". Any other text is
+/// cut to `width` too, since tool names make it unbounded.
 pub(super) fn summary_line<'a>(
     summary: &ToolActivitySummary,
     mut parts: impl Iterator<Item = &'a Part>,
@@ -370,7 +389,7 @@ pub(super) fn summary_line<'a>(
             let header = crate::tool_format::format_tool_call(name, input, 0).header;
             truncate_end(&header, width)
         }
-        _ => summary.sentence(),
+        _ => truncate_end(&summary.sentence(), width),
     }
 }
 

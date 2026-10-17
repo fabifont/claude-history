@@ -430,6 +430,21 @@ fn summary_tool_mode_shows_single_unknown_tool_call_inline() {
 }
 
 #[test]
+fn summary_tool_mode_names_unknown_tools_in_group() {
+    let entry = entry(
+        0,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"mcp__docs__search","input":{"query":"x"}},{"type":"tool_use","id":"toolu_2","name":"clock__sleep","input":{"duration_ms":1}},{"type":"tool_use","id":"toolu_3","name":"clock__sleep","input":{"duration_ms":2}},{"type":"tool_use","id":"toolu_4","name":"Read","input":{"file_path":"src/main.rs"}}]}}"#,
+    );
+    let rendered = render_parsed_conversation(
+        &renderable(&[entry]),
+        &test_render_options(ToolDisplayMode::Summary),
+    );
+    let text = rendered_text(&rendered);
+
+    assert!(text.contains("Read 1 file, called mcp__docs__search, clock__sleep ×2"));
+}
+
+#[test]
 fn summary_tool_mode_coalesces_tool_only_entries_across_results() {
     let entries = tool_summary_entries();
     let rendered = render_parsed_conversation(
