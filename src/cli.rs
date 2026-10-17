@@ -497,6 +497,11 @@ pub struct Args {
     #[arg(long = "bench-scan", hide = true)]
     pub bench_scan: bool,
 
+    /// Time the daemon's quick pass over the session files and its parts,
+    /// read-only, for benchmarking
+    #[arg(long = "bench-quick-pass", hide = true)]
+    pub bench_quick_pass: bool,
+
     /// Debug semantic search matching for a query
     #[arg(
         long = "debug-semantic-search",

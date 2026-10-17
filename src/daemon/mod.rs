@@ -12,6 +12,7 @@
 //! `status.json`, the log, and `launched`, whose modification time is the
 //! last launch.
 
+mod dirs;
 pub mod embed;
 pub mod identity;
 pub mod lock;
@@ -303,6 +304,86 @@ fn ago(now_ms: i64, ms: i64) -> String {
         60..3600 => format!("{} min ago", secs / 60),
         3600..86_400 => format!("{} h {} min ago", secs / 3600, secs % 3600 / 60),
         _ => format!("{} days ago", secs / 86_400),
+    }
+}
+
+/// `--bench-quick-pass`: times quick passes over the real history, and
+/// the parts of one, read-only. Prints CPU per pass to stderr.
+pub fn bench_quick_pass() {
+    use crate::bench::cpu_time;
+    use std::time::Instant;
+    const RUNS: u32 = 20;
+    let measure = |name: &str, count: usize, run: &dyn Fn()| {
+        run();
+        let (cpu, wall) = (cpu_time(), Instant::now());
+        for _ in 0..RUNS {
+            run();
+        }
+        eprintln!(
+            "bench {name:<24} n={count:<6} wall={:.2}ms cpu={:.2}ms",
+            wall.elapsed().as_secs_f64() * 1e3 / f64::from(RUNS),
+            (cpu_time() - cpu).as_secs_f64() * 1e3 / f64::from(RUNS),
+        );
+    };
+    let today = chrono::Local::now().date_naive();
+    let hot = crate::store::default_root()
+        .and_then(|root| crate::store::Snapshot::open(&root, false, Default::default()))
+        .map(|cards| {
+            let since = SystemTime::now() - watch::HOT_WINDOW;
+            cards.paths_modified_since(since)
+        })
+        .unwrap_or_default();
+    let mut watcher = watch::Watcher::from_env();
+    let (cpu, wall) = (cpu_time(), Instant::now());
+    watcher.prime(hot, today);
+    eprintln!(
+        "bench prime hot={} wall={:.1}ms cpu={:.1}ms",
+        watcher.hot_len(),
+        wall.elapsed().as_secs_f64() * 1e3,
+        (cpu_time() - cpu).as_secs_f64() * 1e3,
+    );
+    watcher.bench_parts(today, |name, count, run| measure(name, count, run));
+    let watcher = std::cell::RefCell::new(watcher);
+    measure("quick pass", 0, &|| {
+        let changes = watcher.borrow_mut().quick_pass(SystemTime::now(), today);
+        if !changes.is_empty() {
+            eprintln!("bench changes {:?}", changes.targets);
+        }
+    });
+    // Passes minutes apart, as an idle daemon makes them, find the
+    // filesystem's metadata caches colder than passes back to back.
+    if let Some(spacing) = std::env::var("CLAUDE_HISTORY_BENCH_SPACING")
+        .ok()
+        .and_then(|secs| secs.parse().ok())
+    {
+        for _ in 0..3 {
+            std::thread::sleep(Duration::from_secs(spacing));
+            let (cpu, wall) = (cpu_time(), Instant::now());
+            watcher.borrow_mut().quick_pass(SystemTime::now(), today);
+            eprintln!(
+                "bench quick pass after {spacing}s wall={:.2}ms cpu={:.2}ms",
+                wall.elapsed().as_secs_f64() * 1e3,
+                (cpu_time() - cpu).as_secs_f64() * 1e3,
+            );
+        }
+    }
+    measure("load config", 1, &|| {
+        let _ = crate::config::load_config();
+    });
+    let identity = BinaryIdentity::current().expect("binary");
+    measure("binary check", 1, &|| {
+        identity.still_installed();
+    });
+    let dir = tempfile::tempdir().expect("temp dir");
+    let status = Status::new(1, identity.clone(), 0);
+    let path = dir.path().join("status.json");
+    measure("status write", 1, &|| {
+        status.write(&path).expect("status");
+    });
+    if let Some(paths) = Paths::from_env() {
+        measure("last launch", 1, &|| {
+            paths.last_launch();
+        });
     }
 }
 

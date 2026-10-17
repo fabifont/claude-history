@@ -147,6 +147,10 @@ fn run() -> Result<()> {
     if args.reconcile {
         return tui::reconcile();
     }
+    if args.bench_quick_pass {
+        daemon::bench_quick_pass();
+        return Ok(());
+    }
     if args.bench_scan {
         store::reconcile::bench_scan(&history::sources::Registry::from_env());
         return Ok(());

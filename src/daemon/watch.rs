@@ -1,11 +1,10 @@
 //! The daemon's quick pass: finds session files that changed since the
-//! last pass with a few thousand `stat` calls instead of listing every
-//! directory, which a full reconcile pass does.
+//! last pass from directory times instead of listing every directory,
+//! which a full reconcile pass does.
 //!
-//! - Each root directory and each project directory under it is stated. A
-//!   new session file changes its project directory's modification time, and
-//!   only then is that directory listed; a new project directory changes its
-//!   root's.
+//! - The modification time of each project directory is read, in one
+//!   listing of its root. A new session file changes its project
+//!   directory's, and only then is that directory listed.
 //! - Files modified recently (the hot set) are stated every pass, as are
 //!   the files that changed since. When a Claude session changes, its
 //!   `<session>/subagents/` directory is listed for sidecars, which are
@@ -18,12 +17,14 @@
 //! What the quick pass misses, such as a file changed outside the hot set
 //! without a new file beside it, the periodic full pass finds.
 
+use super::dirs::child_dirs;
 use crate::history::model::SourceKind;
 use crate::history::omp_loader::OmpSessionRoot;
 use crate::history::pi_loader::PiSessionRoot;
 use crate::store::reconcile::Targets;
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -44,6 +45,16 @@ pub fn stamp(path: &Path) -> Option<Stamp> {
 
 /// How long a file stays in the hot set after it was last modified.
 pub const HOT_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+/// Files modified before this, at `now`, leave the hot set.
+fn cutoff(now: SystemTime) -> SystemTime {
+    now.checked_sub(HOT_WINDOW)
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+fn is_hot(stamp: Stamp, cutoff: SystemTime) -> bool {
+    stamp.modified.is_none_or(|modified| modified >= cutoff)
+}
+
 /// Files modified this close to their directory's earlier modification time
 /// are taken as new when the directory changes, for file systems whose
 /// times are coarse.
@@ -62,10 +73,9 @@ enum Layout {
 struct Tree {
     root: PathBuf,
     layout: Layout,
-    root_stamp: Option<Stamp>,
-    /// Each project directory, or the root itself when flat, with its stamp
-    /// when it was last listed (`None`: not listed yet).
-    dirs: HashMap<PathBuf, Option<Stamp>>,
+    /// Modification time of each project directory, or of the root itself
+    /// when flat, when last compared.
+    dirs: HashMap<PathBuf, Option<SystemTime>>,
 }
 
 impl Tree {
@@ -73,39 +83,23 @@ impl Tree {
         Self {
             root,
             layout,
-            root_stamp: None,
             dirs: HashMap::new(),
         }
     }
 
-    fn flat(&self) -> bool {
-        matches!(self.layout, Layout::Pi { flat: true })
-    }
-
-    /// Lists the root for its project directories, keeping the stamps of
-    /// those already known.
-    fn list_root(&mut self) {
-        if self.flat() {
-            self.dirs.entry(self.root.clone()).or_insert(None);
-            return;
-        }
-        let Ok(entries) = fs::read_dir(&self.root) else {
-            self.dirs.clear();
-            return;
+    /// The current modification time of each project directory; none when
+    /// the root is gone, and an error when it cannot be read.
+    fn current_dirs(&self) -> io::Result<HashMap<PathBuf, Option<SystemTime>>> {
+        let dirs = if matches!(self.layout, Layout::Pi { flat: true }) {
+            fs::metadata(&self.root)
+                .map(|metadata| HashMap::from([(self.root.clone(), metadata.modified().ok())]))
+        } else {
+            child_dirs(&self.root)
         };
-        let mut dirs = HashMap::new();
-        for entry in entries.flatten() {
-            let is_dir = match entry.file_type() {
-                Ok(kind) if !kind.is_symlink() => kind.is_dir(),
-                _ => entry.path().is_dir(),
-            };
-            if is_dir {
-                let path = entry.path();
-                let known = self.dirs.get(&path).copied().flatten();
-                dirs.insert(path, known);
-            }
+        match dirs {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(HashMap::new()),
+            dirs => dirs,
         }
-        self.dirs = dirs;
     }
 
     /// Session files directly in project directory `dir`.
@@ -287,11 +281,7 @@ impl Watcher {
     /// before this.
     pub fn prime(&mut self, hot: Vec<PathBuf>, today: chrono::NaiveDate) {
         for (_, tree) in &mut self.trees {
-            tree.root_stamp = stamp(&tree.root);
-            tree.list_root();
-            for (dir, recorded) in tree.dirs.iter_mut() {
-                *recorded = stamp(dir);
-            }
+            tree.dirs = tree.current_dirs().unwrap_or_default();
         }
         if let Some(codex) = &mut self.codex {
             codex.stamps = codex
@@ -307,6 +297,11 @@ impl Watcher {
         for path in hot {
             self.add_hot(path, true);
         }
+        // Of the files the store lists, those since removed or last
+        // modified before the window stay out.
+        let cutoff = cutoff(SystemTime::now());
+        self.hot
+            .retain(|_, hot| hot.stamp.is_some_and(|stamp| is_hot(stamp, cutoff)));
     }
 
     /// Adds `path` to the hot set; unless `stated`, the next pass reports
@@ -337,6 +332,33 @@ impl Watcher {
         self.hot.len()
     }
 
+    /// Times each part of a quick pass with `time(name, count, run)`,
+    /// for `--bench-quick-pass`.
+    pub fn bench_parts(
+        &self,
+        today: chrono::NaiveDate,
+        mut time: impl FnMut(&str, usize, &dyn Fn()),
+    ) {
+        for (kind, tree) in &self.trees {
+            time(&format!("{kind:?} dirs"), tree.dirs.len(), &|| {
+                let _ = tree.current_dirs();
+            });
+        }
+        let hot: Vec<&PathBuf> = self.hot.keys().collect();
+        time("hot files", hot.len(), &|| {
+            for path in &hot {
+                stamp(path);
+            }
+        });
+        if let Some(codex) = &self.codex {
+            time("codex watched", codex.watched(today).len(), &|| {
+                for path in codex.watched(today) {
+                    stamp(&path);
+                }
+            });
+        }
+    }
+
     /// Finds what changed since the last pass, at `now` on day `today`.
     pub fn quick_pass(&mut self, now: SystemTime, today: chrono::NaiveDate) -> Changes {
         let mut changed: Vec<PathBuf> = Vec::new();
@@ -344,27 +366,22 @@ impl Watcher {
 
         let hot = &self.hot;
         for (_, tree) in &mut self.trees {
-            let root_stamp = stamp(&tree.root);
-            if root_stamp != tree.root_stamp || tree.dirs.is_empty() {
-                tree.root_stamp = root_stamp;
-                tree.list_root();
-            }
-            let mut listed = Vec::new();
-            for (dir, recorded) in tree.dirs.iter_mut() {
-                let current = stamp(dir);
-                if current != *recorded {
-                    listed.push((dir.clone(), *recorded));
-                    *recorded = current;
-                }
-            }
-            for (dir, before) in listed {
+            // A root that cannot be read is compared again next pass.
+            let Ok(current) = tree.current_dirs() else {
+                continue;
+            };
+            for (dir, modified) in &current {
                 // Files modified since the directory last changed are new or
-                // were written since; a directory not listed before is new
+                // were written since; a directory not seen before is new
                 // with all its files. Hot files are stated below.
-                let since = before
-                    .and_then(|before| before.modified)
-                    .map(|modified| modified.checked_sub(DIR_SLACK).unwrap_or(modified));
-                for file in tree.session_files(&dir) {
+                let since = match tree.dirs.get(dir) {
+                    Some(before) if before == modified => continue,
+                    Some(before) => {
+                        before.map(|before| before.checked_sub(DIR_SLACK).unwrap_or(before))
+                    }
+                    None => None,
+                };
+                for file in tree.session_files(dir) {
                     if hot.contains_key(&file) {
                         continue;
                     }
@@ -378,6 +395,7 @@ impl Watcher {
                     }
                 }
             }
+            tree.dirs = current;
         }
 
         if let Some(codex) = &mut self.codex {
@@ -388,9 +406,7 @@ impl Watcher {
             }
         }
 
-        let cutoff = now
-            .checked_sub(HOT_WINDOW)
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let cutoff = cutoff(now);
         let mut sessions_changed = Vec::new();
         self.hot.retain(|path, hot| {
             let current = stamp(path);
@@ -406,7 +422,7 @@ impl Watcher {
                     }
                 }
             }
-            current.is_some_and(|stamp| stamp.modified.is_none_or(|modified| modified >= cutoff))
+            current.is_some_and(|stamp| is_hot(stamp, cutoff))
         });
         for session in sessions_changed {
             for sidecar in sidecars(&session) {
@@ -430,7 +446,7 @@ impl Watcher {
             if !self.hot.contains_key(path)
                 && let Some(kind) = self.kind_of(path)
                 && let Some(stamp) = stamp(path)
-                && stamp.modified.is_none_or(|modified| modified >= cutoff)
+                && is_hot(stamp, cutoff)
             {
                 self.hot.insert(
                     path.clone(),
@@ -648,6 +664,16 @@ mod tests {
         );
         assert_eq!(fixture.pass().targets.instances, vec![SourceKind::Codex]);
         assert!(fixture.pass().is_empty());
+    }
+
+    #[test]
+    fn priming_leaves_out_removed_and_cold_files() {
+        let mut fixture = Fixture::new();
+        let recent = fixture.write("claude/-p/recent.jsonl", HOUR);
+        let cold = fixture.write("claude/-p/cold.jsonl", WEEK);
+        let gone = fixture.path("claude/-p/gone.jsonl");
+        fixture.watcher.prime(vec![recent, cold, gone], today());
+        assert_eq!(fixture.watcher.hot_len(), 1);
     }
 
     #[test]
