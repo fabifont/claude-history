@@ -435,7 +435,7 @@ fn render_calls_group(
                 timing
             };
             let expanded = options.expanded_tool_outputs.contains(&row_id);
-            if rendered_any && (expanded || after_expanded) {
+            if after_expanded {
                 lines.push(RenderedLine::new(vec![]));
             }
             if expanded {

@@ -516,12 +516,16 @@ fn calls_tool_mode_lists_each_call_on_one_line_without_results() {
         expanded_text.contains(r#"Grep: "one" in ."#),
         "{expanded_text}"
     );
-    let collapse_line = expanded
+    let collapse_idx = expanded
         .lines
         .iter()
-        .find(|line| line.tool_output_id.as_ref() == Some(&row_ids[2]))
+        .position(|line| line.tool_output_id.as_ref() == Some(&row_ids[2]))
         .unwrap();
-    assert!(collapse_line.clickable);
+    assert!(expanded.lines[collapse_idx].clickable);
+    assert!(
+        !expanded.lines[collapse_idx - 1].spans.is_empty(),
+        "an expanded call stays directly below the row above it"
+    );
 }
 
 #[test]
