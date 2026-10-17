@@ -283,7 +283,10 @@ fn append_clipboard_blocks(output: &mut String, parts: &[Part], options: &Export
             Part::ToolResult {
                 output: content, ..
             } if options.show_tools => {
-                append_separated(output, &format_tool_result_for_export(content.as_ref()));
+                append_separated(
+                    output,
+                    &crate::tool_format::format_tool_result(content.as_ref()),
+                );
             }
             Part::Thinking(thinking) if options.show_thinking => {
                 append_separated(output, thinking);
@@ -299,7 +302,7 @@ fn for_user_tool_results(parts: &[Part], options: &ExportOptions, mut f: impl Fn
     if options.show_tools {
         for part in parts {
             if let Part::ToolResult { output, .. } = part {
-                let content_str = format_tool_result_for_export(output.as_ref());
+                let content_str = crate::tool_format::format_tool_result(output.as_ref());
                 f(&content_str);
             }
         }
@@ -691,27 +694,6 @@ fn wrap_plain_text(text: &str, max_width: usize) -> String {
 }
 
 /// Format tool result content for export
-fn format_tool_result_for_export(content: Option<&serde_json::Value>) -> String {
-    match content {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(serde_json::Value::Array(arr)) => {
-            // Handle array of content blocks
-            let texts: Vec<&str> = arr
-                .iter()
-                .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
-                .collect();
-            if !texts.is_empty() {
-                texts.join("\n\n")
-            } else {
-                serde_json::to_string_pretty(&arr).unwrap_or_else(|_| "<error>".to_string())
-            }
-        }
-        Some(value) => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| "<error>".to_string())
-        }
-        None => "<no content>".to_string(),
-    }
-}
 
 #[cfg(test)]
 mod tests {

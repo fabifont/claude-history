@@ -12,9 +12,9 @@ use super::style::subagent_label;
 use super::summary::{render_tool_activity_summary, summarize_tool_calls, summary_rows};
 use super::timing::{RowTiming, TimingSlot};
 use super::tools::{
-    ToolCallRenderSpec, ToolOutputKind, ToolResultRenderSpec, format_tool_result_content,
-    make_tool_output_id, render_dimmed_tool_result_body, render_subagent_tool_result_header,
-    render_tool_call, render_tool_result, tool_result_display_text,
+    ToolCallRenderSpec, ToolOutputKind, ToolResultRenderSpec, make_tool_output_id,
+    render_dimmed_tool_result_body, render_subagent_tool_result_header, render_tool_call,
+    render_tool_result, tool_result_display_text,
 };
 use super::*;
 
@@ -498,15 +498,7 @@ fn step_user_tool_results(
     blocks: &[Part],
 ) -> bool {
     let mut printed = false;
-    let tool_results = collect_tool_result_rows(
-        ctx,
-        blocks,
-        if ctx.style.is_subagent {
-            format_tool_result_content
-        } else {
-            tool_result_display_text
-        },
-    );
+    let tool_results = collect_tool_result_rows(ctx, blocks, tool_result_display_text);
     for row in tool_results {
         let row_timing = if ctx.style.is_subagent {
             timing.pad()
@@ -533,7 +525,7 @@ fn step_agent_tool_results(
     blocks: &[Part],
 ) -> bool {
     let mut printed = false;
-    let tool_results = collect_tool_result_rows(ctx, blocks, format_tool_result_content);
+    let tool_results = collect_tool_result_rows(ctx, blocks, tool_result_display_text);
     for row in tool_results {
         let row_timing = TimingSlot::from_show_timing(ctx.options.show_timing);
         render_dimmed_tool_result_row(lines, ctx, &row, row_timing);

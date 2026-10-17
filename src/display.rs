@@ -214,10 +214,11 @@ impl<W: Write + ?Sized> OutputFormatter for LedgerFormatter<'_, W> {
     }
 
     fn format_tool_result(&mut self, content: Option<&serde_json::Value>) {
-        // Render markdown for string content, otherwise format as JSON
+        // Render markdown for string content, otherwise show it as formatted
+        let text = crate::tool_format::format_tool_result(content);
         let rendered = match content {
-            Some(serde_json::Value::String(s)) => render_markdown(s, self.content_width),
-            _ => format_tool_content(content),
+            Some(serde_json::Value::String(_)) => render_markdown(&text, self.content_width),
+            _ => text,
         };
 
         // Print with ↳ Result label
@@ -272,7 +273,7 @@ impl<W: Write + ?Sized> OutputFormatter for LedgerFormatter<'_, W> {
             |s| s.custom_color(dim_teal()).dimmed(),
             "<Result>",
         );
-        let content_str = format_tool_content(content);
+        let content_str = crate::tool_format::format_tool_result(content);
         self.print_continuation(&content_str);
     }
 }
@@ -306,7 +307,7 @@ impl<'a, W: Write + ?Sized> OutputFormatter for PlainFormatter<'a, W> {
 
     fn format_tool_result(&mut self, content: Option<&serde_json::Value>) {
         let _ = writeln!(self.writer, "Tool: <Result>");
-        let content_str = format_tool_content(content);
+        let content_str = crate::tool_format::format_tool_result(content);
         let _ = writeln!(self.writer, "{}", content_str);
     }
 
@@ -353,7 +354,7 @@ impl<'a, W: Write + ?Sized> OutputFormatter for PlainFormatter<'a, W> {
 
     fn format_agent_tool_result(&mut self, _agent_id: &str, content: Option<&serde_json::Value>) {
         let _ = writeln!(self.writer, "    Tool: <Result>");
-        let content_str = format_tool_content(content);
+        let content_str = crate::tool_format::format_tool_result(content);
         for line in content_str.lines() {
             let _ = writeln!(self.writer, "    {}", line);
         }
@@ -361,20 +362,6 @@ impl<'a, W: Write + ?Sized> OutputFormatter for PlainFormatter<'a, W> {
 }
 
 /// Format tool result content to a string
-fn format_tool_content(content: Option<&serde_json::Value>) -> String {
-    match content {
-        Some(value) => {
-            if let Some(s) = value.as_str() {
-                s.to_string()
-            } else if let Ok(formatted) = serde_json::to_string_pretty(value) {
-                formatted
-            } else {
-                "<invalid content>".to_string()
-            }
-        }
-        None => "<no content>".to_string(),
-    }
-}
 
 /// Create a display ID for subagent entries from a parent_tool_use_id.
 fn subagent_display_id(parent_tool_use_id: &str) -> String {
