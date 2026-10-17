@@ -12,6 +12,9 @@ use super::*;
 pub(super) enum ToolOutputKind {
     ToolCall,
     ToolResult,
+    /// A call's one-line row in calls mode, which expands to the call
+    /// and its result.
+    CallRow,
 }
 
 impl ToolOutputKind {
@@ -19,6 +22,7 @@ impl ToolOutputKind {
         match self {
             Self::ToolCall => "call",
             Self::ToolResult => "result",
+            Self::CallRow => "row",
         }
     }
 }

@@ -478,7 +478,6 @@ fn summary_tool_mode_coalesces_tool_calls_across_records_that_show_nothing() {
 #[test]
 fn calls_tool_mode_lists_each_call_on_one_line_without_results() {
     let entries = tool_summary_entries();
-    let summary_id = make_tool_summary_output_id(0, None);
     let rendered = render_parsed_conversation(
         &renderable(&entries),
         &test_render_options(ToolDisplayMode::Calls),
@@ -489,19 +488,40 @@ fn calls_tool_mode_lists_each_call_on_one_line_without_results() {
     assert!(text.contains("Read: src/main.rs"), "{text}");
     assert!(text.contains("Bash: cargo test"), "{text}");
     assert!(!text.contains("Result"), "{text}");
-    assert!(!text.contains("grep result"), "{text}");
-    assert!(
-        rendered
-            .lines
-            .iter()
-            .filter(|line| !line.spans.is_empty())
-            .all(|line| line.clickable && line.tool_output_id.as_ref() == Some(&summary_id))
+
+    let row_ids: Vec<_> = rendered
+        .lines
+        .iter()
+        .filter(|line| !line.spans.is_empty())
+        .map(|line| {
+            assert!(line.clickable);
+            line.tool_output_id.clone().unwrap()
+        })
+        .collect();
+    assert_eq!(row_ids.len(), 3);
+    assert_eq!(
+        row_ids.iter().collect::<BTreeSet<_>>().len(),
+        3,
+        "each call row expands on its own"
     );
 
+    // Expanding the Bash row shows its result and leaves the others collapsed.
     let mut options = test_render_options(ToolDisplayMode::Calls);
-    options.expanded_tool_outputs.insert(summary_id);
-    let expanded = rendered_text(&render_parsed_conversation(&renderable(&entries), &options));
-    assert!(expanded.contains("grep result"), "{expanded}");
+    options.expanded_tool_outputs.insert(row_ids[2].clone());
+    let expanded = render_parsed_conversation(&renderable(&entries), &options);
+    let expanded_text = rendered_text(&expanded);
+    assert!(expanded_text.contains("bash result"), "{expanded_text}");
+    assert!(!expanded_text.contains("grep result"), "{expanded_text}");
+    assert!(
+        expanded_text.contains(r#"Grep: "one" in ."#),
+        "{expanded_text}"
+    );
+    let collapse_line = expanded
+        .lines
+        .iter()
+        .find(|line| line.tool_output_id.as_ref() == Some(&row_ids[2]))
+        .unwrap();
+    assert!(collapse_line.clickable);
 }
 
 #[test]

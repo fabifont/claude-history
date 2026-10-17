@@ -561,8 +561,8 @@ outputs. Press `t` to cycle through modes: off → summary → calls → truncat
 full. Off mode hides tool calls and results entirely, leaving only the
 conversation text; messages that consist only of tool calls disappear. Calls
 mode lists each tool call on one line, such as `Bash: cargo test`, without
-results. Click a summary or calls row to expand that group into its tool calls
-and results. Truncated mode shows the
+results. Click a summary row to expand that group into its tool calls and
+results, or a calls row to expand just that call and its result. Truncated mode shows the
 tool header plus the first few body lines with a "(N more lines...)" indicator.
 Click a truncated tool call/result to expand that specific output, and click it
 again to collapse it. Use `--show-tools` (or `-t`) to start in full mode, or

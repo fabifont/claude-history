@@ -1,4 +1,4 @@
-use crate::history::model::{Part, Role};
+use crate::history::model::{Message, Part, Role};
 use crate::history::view::{Entry, EntryKind};
 use chrono::{DateTime, Utc};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -373,25 +373,173 @@ fn render_summary_group_details(
     }
 }
 
-/// The collapsed rows for a pending group; see [`summary_rows`].
-fn group_summary_rows(
-    entries: &[RenderableEntry],
-    pending: &PendingToolSummary,
-    options: &RenderOptions,
-) -> Vec<String> {
-    let parts = entries[pending.first_parsed_idx..=pending.last_parsed_idx]
+/// The group's messages of `role`, with the entry index each came from.
+fn group_messages<'a>(
+    entries: &'a [RenderableEntry],
+    pending: &'a PendingToolSummary,
+    role: Role,
+) -> impl Iterator<Item = (usize, &'a Message)> {
+    entries[pending.first_parsed_idx..=pending.last_parsed_idx]
         .iter()
-        .filter_map(|parsed| match parsed.entry.kind {
+        .filter_map(move |parsed| match parsed.entry.kind {
             EntryKind::Message { message, .. }
-                if message.role == Role::Assistant
+                if message.role == role
                     && message.parent_tool_use_id.as_deref() == pending.parent_id.as_deref() =>
             {
-                Some(message)
+                Some((parsed.entry_index, message))
             }
             _ => None,
         })
-        .flat_map(|message| &message.parts);
-    summary_rows(&pending.summary, parts, options)
+}
+
+/// The summary line for a pending group; see [`summary_line`].
+fn group_summary_line(
+    entries: &[RenderableEntry],
+    pending: &PendingToolSummary,
+    width: usize,
+) -> String {
+    let parts =
+        group_messages(entries, pending, Role::Assistant).flat_map(|(_, message)| &message.parts);
+    summary_line(&pending.summary, parts, width)
+}
+
+/// Calls mode: each call of the group on its own clickable row. A clicked row
+/// expands into that call and its result; clicking the call's first line
+/// collapses it again.
+fn render_calls_group(
+    lines: &mut Vec<RenderedLine>,
+    entries: &[RenderableEntry],
+    pending: &PendingToolSummary,
+    label: &str,
+    timing: TimingSlot<'_>,
+    options: &RenderOptions,
+) {
+    let parent_id = pending.parent_id.as_deref();
+    let mut rendered_any = false;
+    let mut after_expanded = false;
+    for (entry_index, message) in group_messages(entries, pending, Role::Assistant) {
+        for (block_idx, block) in message.parts.iter().enumerate() {
+            let Part::ToolCall { id, name, input } = block else {
+                continue;
+            };
+            let row_id = make_tool_output_id(
+                entry_index,
+                parent_id,
+                block_idx,
+                ToolOutputKind::CallRow,
+                Some(id),
+            );
+            let row_timing = if rendered_any {
+                timing.continuation()
+            } else {
+                timing
+            };
+            let expanded = options.expanded_tool_outputs.contains(&row_id);
+            if rendered_any && (expanded || after_expanded) {
+                lines.push(RenderedLine::new(vec![]));
+            }
+            if expanded {
+                let first_line = lines.len();
+                render_call_details(
+                    lines,
+                    entries,
+                    pending,
+                    (entry_index, block_idx, id, name, input),
+                    label,
+                    row_timing,
+                    options,
+                );
+                if let Some(line) = lines.get_mut(first_line) {
+                    line.tool_output_id = Some(row_id);
+                    line.clickable = true;
+                }
+            } else {
+                render_tool_activity_summary(
+                    lines,
+                    label,
+                    th().accent_dim,
+                    parent_id.is_some(),
+                    row_timing,
+                    vec![call_line(name, input, options.content_width)],
+                    Some(&row_id),
+                );
+            }
+            rendered_any = true;
+            after_expanded = expanded;
+        }
+    }
+}
+
+/// One call of a group in truncated form, followed by its result when the
+/// group holds it.
+fn render_call_details(
+    lines: &mut Vec<RenderedLine>,
+    entries: &[RenderableEntry],
+    pending: &PendingToolSummary,
+    (entry_index, block_idx, call_id, name, input): (usize, usize, &str, &str, &serde_json::Value),
+    label: &str,
+    timing: TimingSlot<'_>,
+    options: &RenderOptions,
+) {
+    let parent_id = pending.parent_id.as_deref();
+    let call_output_id = make_tool_output_id(
+        entry_index,
+        parent_id,
+        block_idx,
+        ToolOutputKind::ToolCall,
+        Some(call_id),
+    );
+    render_tool_call(
+        lines,
+        &ToolCallRenderSpec {
+            name,
+            input,
+            label,
+            label_color: th().accent_dim,
+            dimmed: true,
+            content_width: options.content_width,
+            timing,
+            tool_display: ToolDisplayMode::Truncated,
+            tool_output_id: &call_output_id,
+            expanded: options.expanded_tool_outputs.contains(&call_output_id),
+        },
+    );
+
+    let result = group_messages(entries, pending, Role::User).find_map(|(entry_index, message)| {
+        message
+            .parts
+            .iter()
+            .enumerate()
+            .find_map(|(block_idx, part)| match part {
+                Part::ToolResult {
+                    output,
+                    call_id: result_call_id,
+                } if result_call_id == call_id => Some((entry_index, block_idx, output)),
+                _ => None,
+            })
+    });
+    let Some((entry_index, block_idx, output)) = result else {
+        return;
+    };
+    let result_output_id = make_tool_output_id(
+        entry_index,
+        parent_id,
+        block_idx,
+        ToolOutputKind::ToolResult,
+        Some(call_id),
+    );
+    lines.push(RenderedLine::new(vec![]));
+    render_tool_result(
+        lines,
+        &ToolResultRenderSpec {
+            text: &tool_result_display_text(output.as_ref()),
+            content_width: options.content_width,
+            timing: timing.continuation(),
+            tool_display: ToolDisplayMode::Truncated,
+            tool_output_id: &result_output_id,
+            expanded: options.expanded_tool_outputs.contains(&result_output_id),
+        },
+    );
 }
 
 /// The collapsed rows for the calls among `parts`: each call on one line in
@@ -479,7 +627,9 @@ pub(super) fn flush_tool_summary(
         Some(ts) => TimingSlot::Stamp(ts),
         None => TimingSlot::Disabled,
     };
-    if options.expanded_tool_outputs.contains(&pending.id) {
+    if options.tool_display == ToolDisplayMode::Calls {
+        render_calls_group(lines, entries, &pending, &label, timing, options);
+    } else if options.expanded_tool_outputs.contains(&pending.id) {
         render_summary_group_details(lines, entries, &pending, options);
     } else {
         render_tool_activity_summary(
@@ -488,7 +638,7 @@ pub(super) fn flush_tool_summary(
             th().accent_dim,
             pending.parent_id.is_some(),
             timing,
-            group_summary_rows(entries, &pending, options),
+            vec![group_summary_line(entries, &pending, options.content_width)],
             Some(&pending.id),
         );
     }
