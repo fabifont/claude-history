@@ -465,6 +465,61 @@ mode = "semantic"
 The older `[tui] semantic_search = true` setting is still accepted for existing
 configs.
 
+### Background daemon
+
+claude-history usually runs for seconds: open it, find a session, resume. That
+is rarely long enough to embed new conversations, so semantic search falls
+behind. The opt-in daemon keeps the keyword store and the semantic cache up to
+date in the background, so every launch finds them current:
+
+```toml
+[semantic]
+daemon = true
+```
+
+Any launch, of the TUI or of a CLI command, starts the daemon when it is
+enabled and not already running. It needs no launchd or systemd setup. It runs
+detached from the terminal and keeps running when the terminal closes. Only one
+daemon runs per cache directory. It exits by itself when the claude-history
+binary is upgraded or replaced (the next launch starts the new version), after
+three days without a launch, or when the config no longer enables it.
+
+```sh
+claude-history daemon status   # state, backlog, last passes, last error, memory
+claude-history daemon stop     # stop it; the next launch starts it again
+claude-history daemon start    # start it now
+```
+
+How it works:
+
+- **Changes are found by polling, not file watching.** A quick pass stats the
+  project directories and the sessions modified in the last day, plus a
+  session's `subagents/` when the session changes. It runs every 30 seconds
+  while sessions change and backs off to every 5 minutes when nothing does. A
+  full pass lists every session file every 20 minutes. Changes are published
+  to the keyword store the same way a launch does, so a launch finds nothing
+  left to do.
+- **Conversations are embedded once quiet.** Agents append to a session all the
+  time while they work, so a changed conversation is embedded once it has gone
+  a minute without writes. A sweep embeds anything else missing, newest first:
+  30 seconds after the daemon starts, every 6 hours, and when the TUI is
+  launched. After an upgrade that changes the embedding model, the sweep
+  re-embeds the history in the background.
+- **The TUI defers to it.** While the daemon runs, the TUI does not embed in
+  the background itself. It picks up what the daemon writes to the cache. A lock
+  in the cache directory keeps the two from ever embedding at the same time.
+
+Resource use: the daemon runs at a low scheduling priority (nice 10, and the
+utility QoS class on macOS). Passes and embedding run in short-lived child
+processes. Embedding uses two inference threads and loads the model only for
+the batch at hand, so the idle daemon holds no model and stays at about 10 MB
+of memory; an embedding process uses 200–400 MB while it runs. With no sessions
+changing, the daemon uses about two seconds of CPU an hour. On battery power, embedding pauses until a charger is connected; set
+`pause_on_battery = false` to keep embedding on battery.
+
+The daemon logs to `~/.cache/claude-history/daemon/daemon.log`, rotated at
+1 MB. Its lock and `status.json` live in the same directory.
+
 ### Direct file input
 
 You can open a JSONL conversation file directly, bypassing the conversation
@@ -877,6 +932,14 @@ mode = "lexical"
 # Deprecated: use [search].mode instead
 semantic_search = false
 
+[semantic]
+# Keep the caches warm in a background daemon that launches start
+# (default: false)
+daemon = false
+
+# Pause the daemon's embedding on battery power (default: true)
+pause_on_battery = true
+
 EOF
 ```
 
@@ -952,6 +1015,14 @@ Customize the keybindings for list actions. Values are key combinations like
 - `semantic_search` (boolean): Deprecated compatibility alias. When
   `[search].mode` is unset, `true` starts list search in semantic mode and
   `false` starts lexical mode. Press `Ctrl+T` in the TUI to switch modes.
+
+#### Semantic options
+
+- `daemon` (boolean): Keep the keyword store and the semantic cache up to date
+  in a background daemon that any launch starts (default: false). See
+  [Background daemon](#background-daemon).
+- `pause_on_battery` (boolean): Pause the daemon's embedding while the machine
+  runs on battery power (default: true).
 
 ### Overriding config
 

@@ -8,6 +8,12 @@
 - New: A calls mode in the viewer's `t` cycle (off, summary, calls, truncated,
   full) lists each tool call on one line, such as `Bash: cargo test`, without
   its result. Click a call to expand it with its result
+- New: An opt-in background daemon keeps semantic search and the conversation
+  list current without leaving claude-history open. Set `daemon = true` under
+  `[semantic]`; any launch then starts it. It embeds new conversations once
+  they go quiet, at low priority, and pauses on battery power. Check on it
+  with `claude-history daemon status`, and stop it with
+  `claude-history daemon stop`
 - Tool calls without their own formatting, such as MCP and Codex tools, show
   as one line of JSON, and summary rows name them instead of "Called N tools"
 - Summary mode merges a run of tool calls into one row even when Claude Code
@@ -18,6 +24,7 @@
   base64 data, and errors as `Error: ...`. One-line JSON results are
   pretty-printed
 - Hovering over the conversation list selects the row under the mouse
+- Launches spend less CPU checking session files for changes
 
 ## v0.1.78 (2026-10-17)
 
