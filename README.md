@@ -401,41 +401,58 @@ ranking bonus.
 
 ### Semantic search
 
-Semantic search ranks conversations by meaning instead of exact word matches. It
-embeds recent conversation chunks locally, combines semantic similarity with
-lexical signals, and shows the best matching evidence preview for each result.
-The first semantic search downloads the local embedding model,
+Semantic search finds conversations by meaning, so `fix flaky reconnect after
+laptop sleep` can find a conversation that never uses those exact words. Results
+blend meaning with keyword matches and show the passage that matched best.
+
+It runs entirely on your machine. The first semantic search downloads the
+embedding model,
 [snowflake-arctic-embed-xs](https://huggingface.co/Snowflake/snowflake-arctic-embed-xs)
-(about 90 MB), to `~/.cache/claude-history/semantic/`. Conversations without
-embeddings are indexed in the background on half the CPU cores at a lower
-scheduling priority, so neither startup, the list, nor lexical search waits for
-it. Semantic searches rank the conversations indexed so far right away, the status
-bar shows `sem indexing` with progress while the rest are embedded, and the
-results refresh when indexing finishes. Exact lexical matches appear while nothing
-indexed matches yet. After an upgrade that changes the embedding model, the
-history is re-embedded the same way and the old model download is removed.
-Agent hybrid search semantically ranks one compact routing passage per
-conversation, then fuses that conversation-level ranking with lexical evidence from
-bounded dialogue, thinking, tool calls, tool results, and subagent content. A route contains the title, summary, high-signal
-terms, and sparse excerpts from the already-bounded searchable text. It does not
-embed every tool chunk, and routes are never shown as evidence. Global agent search
-does not embed missing passages interactively, so a corpus query cannot trigger an
-embedding job. Within-conversation search can top up at most 32 passages per run.
-Run `--generate-semantic-cache` to prepare visible dialogue and compact routes
-explicitly, on every CPU core. The on-disk embedding cache is limited to 50,000 entries; generated core
-passages are protected while adaptive within-search entries use the remaining space.
+(about 90 MB), to `~/.cache/claude-history/semantic/`.
 
-Agent search and within results expose `semantic=` and `lexical=` when a hit
-has semantic evidence, alongside `score=`. These are cosine similarity and the
-semantic word-overlap bonus; their sum gives the combined similarity, not a
-correctness probability. Ranked conversation records summarize their first
-retained hit. See the [agent skill](skills/claude-history/SKILL.md) for field
-semantics and missing-value behavior.
+#### Indexing
 
-Quoted text works in semantic mode too. For example,
-`deployment "DEPLOYMENT_TOKEN"` finds conversations where the matching visible
-semantic evidence also contains the exact identifier. A quoted-only semantic
-search, such as `"DEPLOYMENT_TOKEN"`, returns exact matches newest-first.
+Each conversation has to be embedded before semantic search can find it.
+Embedding never blocks you:
+
+- While claude-history is open, new conversations are embedded in the
+  background, newest first, at low priority on half the CPU cores. Startup, the
+  list and keyword search never wait for it.
+- Semantic searches answer right away from the conversations embedded so far.
+  The status bar shows `sem indexing` with progress, and results refresh when it
+  finishes.
+- If nothing embedded matches yet, exact keyword matches are shown instead.
+
+Background embedding only runs while claude-history is open. To embed everything
+at once, using every CPU core, run:
+
+```sh
+claude-history --generate-semantic-cache
+```
+
+Run it again any time; it only embeds what is new. After an upgrade that changes
+the embedding model, the history is re-embedded and the old model is deleted.
+
+Codex exec runs and subagent transcripts are never embedded, so only keyword
+search finds them.
+
+#### Exact text in semantic queries
+
+Quoted text works in semantic mode too: `deployment "DEPLOYMENT_TOKEN"` finds
+conversations about deployment whose matching passage also contains
+`DEPLOYMENT_TOKEN`. A query that is only quoted text, such as
+`"DEPLOYMENT_TOKEN"`, returns exact matches, newest first.
+
+#### Agent search
+
+`claude-history agent search` uses semantic ranking too. It ranks what is
+already embedded and never starts embedding itself, so indexing never slows a
+search down. `agent within` embeds at most 32 missing passages of the one
+conversation it searches. Run `--generate-semantic-cache` first to make sure
+everything is covered. Results show `semantic=` and `lexical=` next to `score=`; see the
+[agent skill](skills/claude-history/SKILL.md) for what each field means.
+
+#### Switching modes
 
 Press `Ctrl+T` in the conversation list to switch between lexical and semantic
 search. To start in semantic mode by default, set:
