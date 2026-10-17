@@ -2,10 +2,11 @@
 
 - Semantic search no longer makes you wait for new conversations to be
   embedded: results appear within about a second while indexing continues in
-  the background on several threads at low priority. It now uses the
-  snowflake-arctic-embed-xs model, which is faster and finds results more
-  reliably. Existing embeddings are rebuilt once in the background, newest
-  conversations first
+  the background, newest conversations first, for as long as claude-history is
+  open. It now uses the snowflake-arctic-embed-xs model, which is faster and
+  finds results more reliably, so existing embeddings are rebuilt once. Run
+  `claude-history --generate-semantic-cache` to embed everything up front on
+  all cores
 - New: Tool calls can be hidden entirely. Press `t` in the viewer to cycle
   off, summary, truncated, and full, and `--no-tools` now starts with tools off
   ([#46](https://github.com/raine/claude-history/issues/46))
