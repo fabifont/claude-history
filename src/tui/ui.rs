@@ -1180,20 +1180,37 @@ fn highlight_line_matches(
         .iter()
         .map(|(text, _)| text.as_str())
         .collect();
-    let match_byte_ranges = query.0.match_ranges(&full_text);
-    highlight_ranges_in_line(rendered, &full_text, &match_byte_ranges, is_current_match)
+    let match_style = if is_current_match {
+        Style::default().bg(Color::Yellow).fg(Color::Black)
+    } else {
+        filled_match_style()
+    };
+    let styled_ranges: Vec<_> = query
+        .0
+        .match_ranges(&full_text)
+        .into_iter()
+        .map(|(start, end)| (start, end, match_style))
+        .collect();
+    highlight_ranges_in_line(rendered, &full_text, &styled_ranges)
         .into_iter()
         .map(|span| Span::styled(span.content.into_owned(), span.style))
         .collect()
 }
 
-/// `rendered` with `match_byte_ranges` of `full_text`, its spans joined,
-/// highlighted. Matches may span several styled spans.
+/// A match drawn as a filled block.
+fn filled_match_style() -> Style {
+    Style::default()
+        .bg(rgb(th().search_match_bg))
+        .fg(Color::Black)
+}
+
+/// `rendered` with each sorted, disjoint `(start, end, style)` byte range of
+/// `full_text`, its spans joined, drawn in its style. Matches may span
+/// several styled spans.
 fn highlight_ranges_in_line<'a>(
     rendered: &'a RenderedLine,
     full_text: &'a str,
-    match_byte_ranges: &[(usize, usize)],
-    is_current_match: bool,
+    match_byte_ranges: &[(usize, usize, Style)],
 ) -> Vec<Span<'a>> {
     if match_byte_ranges.is_empty() {
         return rendered
@@ -1202,14 +1219,6 @@ fn highlight_ranges_in_line<'a>(
             .map(|(text, style)| Span::styled(text.as_str(), build_style(style)))
             .collect();
     }
-
-    let match_style = if is_current_match {
-        Style::default().bg(Color::Yellow).fg(Color::Black)
-    } else {
-        Style::default()
-            .bg(rgb(th().search_match_bg))
-            .fg(Color::Black)
-    };
 
     // Build output spans by walking through original spans and splitting at match boundaries
     let mut result: Vec<Span<'a>> = Vec::new();
@@ -1229,7 +1238,7 @@ fn highlight_ranges_in_line<'a>(
             }
 
             if match_idx < match_byte_ranges.len() {
-                let (ms, me) = match_byte_ranges[match_idx];
+                let (ms, me, match_style) = match_byte_ranges[match_idx];
                 if pos >= ms && pos < me {
                     // Inside a match
                     let end = me.min(span_end);
@@ -1736,28 +1745,112 @@ fn render_list_preview(frame: &mut Frame, app: &App, area: Rect, beside: bool) {
     let height = inner.height as usize;
     let query = ViewSearchQuery::parse(app.query());
     let offset = doc.scroll_offset(anchor, height);
-    let lines: Vec<Line> = doc.lines[offset..]
-        .iter()
-        .zip(&doc.texts[offset..])
-        .zip(offset..)
-        .take(height)
-        .map(|((rendered, text), idx)| {
-            let is_anchor = anchor == Some(idx);
-            let mut spans = vec![if is_anchor {
+    let visible = offset..(offset + height).min(doc.lines.len());
+    let ranges = preview_match_ranges(&doc.texts, visible.clone(), anchor, &doc.messages, &query);
+    let lines: Vec<Line> = visible
+        .zip(ranges)
+        .map(|(idx, ranges)| {
+            let mut spans = vec![if anchor == Some(idx) {
                 Span::styled("▌ ", Style::default().fg(rgb(th().accent)))
             } else {
                 Span::raw("  ")
             }];
-            let ranges = if query.is_empty() {
-                Vec::new()
-            } else {
-                query.0.match_ranges(text)
-            };
-            spans.extend(highlight_ranges_in_line(rendered, text, &ranges, is_anchor));
+            spans.extend(highlight_ranges_in_line(
+                &doc.lines[idx],
+                &doc.texts[idx],
+                &ranges,
+            ));
             Line::from(spans)
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Styled match ranges for each line of `visible` in the list preview.
+///
+/// The hit, the message the result was found by, draws its matches of the
+/// whole query as filled blocks: or, when it has none, the matches on the
+/// `anchor` line. Every other match is drawn like matches in the list, as
+/// colored text. Matches widen to whole words, so a prefix match on `tests`
+/// does not stop mid-word.
+fn preview_match_ranges(
+    texts: &[Box<str>],
+    visible: std::ops::Range<usize>,
+    anchor: Option<usize>,
+    messages: &[crate::tui::viewer::MessageRange],
+    query: &ViewSearchQuery,
+) -> Vec<Vec<(usize, usize, Style)>> {
+    let ranges_at = |idx: usize| {
+        if query.is_empty() {
+            Vec::new()
+        } else {
+            widen_to_words(&texts[idx], query.0.match_ranges(&texts[idx]))
+        }
+    };
+    let hit = anchor.and_then(|line| {
+        messages
+            .iter()
+            .find(|m| m.start_line <= line && line < m.end_line)
+            .map(|m| m.start_line..m.end_line)
+    });
+    let full_match_lines: Vec<usize> = hit
+        .clone()
+        .into_iter()
+        .flatten()
+        .filter(|&idx| {
+            ranges_at(idx)
+                .iter()
+                .any(|&(start, end)| query.0.covers_all_terms(&texts[idx][start..end]))
+        })
+        .collect();
+    let strong = |idx: usize, matched: &str| {
+        if full_match_lines.is_empty() {
+            anchor == Some(idx)
+        } else {
+            full_match_lines.contains(&idx) && query.0.covers_all_terms(matched)
+        }
+    };
+    let light = Style::default().fg(rgb(th().context_highlight)).bold();
+
+    visible
+        .map(|idx| {
+            ranges_at(idx)
+                .into_iter()
+                .map(|(start, end)| {
+                    let style = if strong(idx, &texts[idx][start..end]) {
+                        filled_match_style()
+                    } else {
+                        light
+                    };
+                    (start, end, style)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Sorted `ranges` of `text` widened to the whole words they touch, merged
+/// where they then meet.
+fn widen_to_words(text: &str, ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    let is_word_char = |c: char| c.is_alphanumeric();
+    let mut widened: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        let start = text[..start]
+            .char_indices()
+            .rev()
+            .take_while(|&(_, c)| is_word_char(c))
+            .last()
+            .map_or(start, |(i, _)| i);
+        let end = text[end..]
+            .char_indices()
+            .find(|&(_, c)| !is_word_char(c))
+            .map_or(text.len(), |(i, _)| end + i);
+        match widened.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => widened.push((start, end)),
+        }
+    }
+    widened
 }
 
 fn render_list(frame: &mut Frame, app: &App, area: Rect) {
@@ -2757,6 +2850,16 @@ impl HighlightQuery {
             .cloned()
             .map(ContextMatchSpec::Literal)
             .collect()
+    }
+
+    /// Whether `matched` holds every word and literal of the query, as a
+    /// match of the whole query, not one of its words, does.
+    fn covers_all_terms(&self, matched: &str) -> bool {
+        let normalized = normalize_for_search(matched);
+        self.unquoted
+            .split_whitespace()
+            .all(|term| normalized.contains(term))
+            && self.literals.iter().all(|literal| literal.matches(matched))
     }
 
     fn has_match(&self, text: &str) -> bool {
@@ -4195,6 +4298,85 @@ mod tests {
             .iter()
             .map(|s| (s.content.as_ref(), s.style == highlight_style))
             .collect()
+    }
+
+    fn preview_styles(
+        lines: &[&str],
+        anchor: Option<usize>,
+        messages: &[(usize, usize)],
+        query: &str,
+    ) -> Vec<Vec<(String, bool)>> {
+        let texts: Vec<Box<str>> = lines.iter().map(|line| (*line).into()).collect();
+        let messages: Vec<_> = messages
+            .iter()
+            .map(|&(start_line, end_line)| crate::tui::viewer::MessageRange {
+                entry_index: 0,
+                start_line,
+                end_line,
+            })
+            .collect();
+        let query = ViewSearchQuery::parse(query);
+        preview_match_ranges(&texts, 0..texts.len(), anchor, &messages, &query)
+            .into_iter()
+            .zip(&texts)
+            .map(|(ranges, text)| {
+                ranges
+                    .into_iter()
+                    .map(|(start, end, style)| {
+                        (text[start..end].to_string(), style == filled_match_style())
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn preview_fills_only_whole_query_matches_in_the_hit_message() {
+        let styles = preview_styles(
+            &[
+                "failed on one flaky test: navigation",
+                "3,125 tests passed",
+                "Fix the flakyness and a flaky test",
+            ],
+            Some(1),
+            &[(0, 2), (2, 3)],
+            "flaky test",
+        );
+        assert_eq!(styles[0], vec![("flaky test".to_string(), true)]);
+        assert_eq!(styles[1], vec![("tests".to_string(), false)]);
+        assert_eq!(
+            styles[2],
+            vec![
+                ("flakyness".to_string(), false),
+                ("flaky test".to_string(), false)
+            ]
+        );
+    }
+
+    #[test]
+    fn preview_fills_anchor_line_when_hit_lacks_whole_query_match() {
+        let styles = preview_styles(
+            &["a flaky run", "the test failed"],
+            Some(1),
+            &[(0, 2)],
+            "flaky test",
+        );
+        assert_eq!(styles[0], vec![("flaky".to_string(), false)]);
+        assert_eq!(styles[1], vec![("test".to_string(), true)]);
+    }
+
+    #[test]
+    fn widen_to_words_covers_whole_words() {
+        let text = "src/tui/app_tests/nav and untested";
+        let ranges = widen_to_words(
+            text,
+            [text.find("test").unwrap(), text.rfind("test").unwrap()]
+                .into_iter()
+                .map(|start| (start, start + 4))
+                .collect(),
+        );
+        let words: Vec<_> = ranges.iter().map(|&(s, e)| &text[s..e]).collect();
+        assert_eq!(words, vec!["tests", "untested"]);
     }
 
     #[test]
