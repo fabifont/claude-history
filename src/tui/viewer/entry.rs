@@ -9,7 +9,7 @@ use super::commands::process_command_message;
 use super::ledger::{render_ledger_block_styled, render_ledger_block_styled_dimmed};
 use super::markdown::{apply_thinking_style, render_markdown_to_lines};
 use super::style::subagent_label;
-use super::summary::{render_tool_activity_summary, summarize_tool_calls};
+use super::summary::{render_tool_activity_summary, summarize_tool_calls, summary_line};
 use super::timing::{RowTiming, TimingSlot};
 use super::tools::{
     ToolCallRenderSpec, ToolOutputKind, ToolResultRenderSpec, format_tool_result_content,
@@ -409,7 +409,7 @@ fn step_tool_summary(
         th().accent_dim,
         ctx.style.is_subagent,
         timing.consume(),
-        &summary,
+        summary_line(&summary, blocks.iter(), ctx.options.content_width),
         None,
     );
     true

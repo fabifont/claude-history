@@ -1,6 +1,7 @@
 use crate::history::model::{Part, Role};
 use crate::history::view::{Entry, EntryKind};
 use chrono::{DateTime, Utc};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::ledger::{LedgerRow, NameCol, push_row};
 use super::style::assistant_label;
@@ -79,6 +80,17 @@ impl ToolActivitySummary {
             == 0
     }
 
+    /// Whether the group is one call to a tool without its own summary
+    /// wording, which reads better as the call itself than as "Called 1 tool".
+    fn is_single_other_tool(&self) -> bool {
+        self.other_tools == 1
+            && Self {
+                other_tools: 0,
+                ..*self
+            }
+            .is_empty()
+    }
+
     fn sentence(&self) -> String {
         let mut parts = Vec::new();
         push_summary_item(
@@ -127,15 +139,11 @@ pub(super) fn render_tool_activity_summary(
     label_color: (u8, u8, u8),
     dimmed: bool,
     timing: TimingSlot<'_>,
-    summary: &ToolActivitySummary,
+    text: String,
     tool_output_id: Option<&ToolOutputId>,
 ) {
-    if summary.is_empty() {
-        return;
-    }
-
     let content = vec![(
-        summary.sentence(),
+        text,
         LineStyle {
             fg: Some(th().tool_text),
             dimmed: true,
@@ -324,6 +332,67 @@ fn render_summary_group_details(
     }
 }
 
+/// The summary text for a pending group; see [`summary_line`].
+fn group_summary_line(
+    entries: &[RenderableEntry],
+    pending: &PendingToolSummary,
+    width: usize,
+) -> String {
+    let parts = entries[pending.first_parsed_idx..=pending.last_parsed_idx]
+        .iter()
+        .filter_map(|parsed| match parsed.entry.kind {
+            EntryKind::Message { message, .. }
+                if message.role == Role::Assistant
+                    && message.parent_tool_use_id.as_deref() == pending.parent_id.as_deref() =>
+            {
+                Some(message)
+            }
+            _ => None,
+        })
+        .flat_map(|message| &message.parts);
+    summary_line(&pending.summary, parts, width)
+}
+
+/// The summary text for the calls among `parts`. A single call to a tool
+/// without its own summary wording shows as the call itself on one line cut
+/// to `width`, which says more than "Called 1 tool".
+pub(super) fn summary_line<'a>(
+    summary: &ToolActivitySummary,
+    mut parts: impl Iterator<Item = &'a Part>,
+    width: usize,
+) -> String {
+    let single_call = parts.find_map(|part| match part {
+        Part::ToolCall { name, input, .. } => Some((name, input)),
+        _ => None,
+    });
+    match single_call {
+        Some((name, input)) if summary.is_single_other_tool() => {
+            let header = crate::tool_format::format_tool_call(name, input, 0).header;
+            truncate_end(&header, width)
+        }
+        _ => summary.sentence(),
+    }
+}
+
+/// `text` cut to `max_width` columns, ending in `…` when cut.
+fn truncate_end(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width + 1 > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out.push('…');
+    out
+}
+
 pub(super) fn flush_tool_summary(
     lines: &mut Vec<RenderedLine>,
     messages: &mut Vec<MessageRange>,
@@ -355,7 +424,7 @@ pub(super) fn flush_tool_summary(
             th().accent_dim,
             pending.parent_id.is_some(),
             timing,
-            &pending.summary,
+            group_summary_line(entries, &pending, options.content_width),
             Some(&pending.id),
         );
     }

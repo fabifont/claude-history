@@ -27,7 +27,7 @@ pub fn format_tool_call(name: &str, input: &Value, max_width: usize) -> Formatte
         "Write" => format_write(input),
         "WebFetch" => format_web_fetch(input),
         "WebSearch" => format_web_search(input),
-        _ => format_fallback(name, input),
+        _ => format_fallback(name, input, max_width),
     }
 }
 
@@ -50,15 +50,18 @@ fn format_task(input: &Value) -> FormattedToolCall {
 
 fn format_bash(input: &Value, max_width: usize) -> FormattedToolCall {
     let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
-    let prefix = "Bash: ";
-    let prefix_len = prefix.len();
+    wrap_after_prefix("Bash: ", command, max_width)
+}
 
-    // Available width for command text (accounting for prefix on first line)
-    let available_width = max_width.saturating_sub(prefix_len);
+/// Lay out `prefix` + `text` as a header line, wrapping the text to
+/// `max_width` and spilling extra lines into the body. A `max_width` of 0
+/// disables wrapping.
+fn wrap_after_prefix(prefix: &str, text: &str, max_width: usize) -> FormattedToolCall {
+    // Available width for the text (accounting for prefix on first line)
+    let available_width = max_width.saturating_sub(prefix.len());
 
-    let wrapped: Vec<_> = if command.contains('\n') {
-        command
-            .lines()
+    let wrapped: Vec<_> = if text.contains('\n') {
+        text.lines()
             .flat_map(|line| {
                 if available_width == 0 || line.chars().count() <= available_width {
                     vec![line.to_string()]
@@ -70,13 +73,13 @@ fn format_bash(input: &Value, max_width: usize) -> FormattedToolCall {
                 }
             })
             .collect()
-    } else if available_width == 0 || command.chars().count() <= available_width {
+    } else if available_width == 0 || text.chars().count() <= available_width {
         return FormattedToolCall {
-            header: format!("{}{}", prefix, command),
+            header: format!("{}{}", prefix, text),
             body: None,
         };
     } else {
-        textwrap::wrap(command, available_width)
+        textwrap::wrap(text, available_width)
             .into_iter()
             .map(|cow| cow.into_owned())
             .collect()
@@ -84,7 +87,7 @@ fn format_bash(input: &Value, max_width: usize) -> FormattedToolCall {
 
     if wrapped.len() <= 1 {
         return FormattedToolCall {
-            header: format!("{}{}", prefix, command),
+            header: format!("{}{}", prefix, text),
             body: None,
         };
     }
@@ -209,12 +212,29 @@ fn format_web_search(input: &Value) -> FormattedToolCall {
     }
 }
 
-fn format_fallback(name: &str, input: &Value) -> FormattedToolCall {
-    let body = serde_json::to_string_pretty(input).ok();
+fn format_fallback(name: &str, input: &Value, max_width: usize) -> FormattedToolCall {
+    wrap_after_prefix(&format!("{}: ", name), &compact_json(input), max_width)
+}
 
-    FormattedToolCall {
-        header: format!("{}:", name),
-        body,
+/// Single-line JSON with a space after separators, e.g.
+/// `{ "duration_ms": 20000, "tags": ["a", "b"] }`.
+fn compact_json(value: &Value) -> String {
+    match value {
+        Value::Object(map) if map.is_empty() => "{}".to_string(),
+        Value::Object(map) => {
+            let fields: Vec<String> = map
+                .iter()
+                .map(|(key, value)| {
+                    format!("{}: {}", Value::from(key.as_str()), compact_json(value))
+                })
+                .collect();
+            format!("{{ {} }}", fields.join(", "))
+        }
+        Value::Array(items) => {
+            let items: Vec<String> = items.iter().map(compact_json).collect();
+            format!("[{}]", items.join(", "))
+        }
+        scalar => scalar.to_string(),
     }
 }
 
@@ -311,6 +331,25 @@ mod tests {
         });
         let result = format_tool_call("Grep", &input, 80);
         assert_eq!(result.header, "Grep: \"fn main\" in src/*.rs");
+    }
+
+    #[test]
+    fn test_format_fallback_is_single_line_json() {
+        let input = json!({ "duration_ms": 20000, "tags": ["a", "b"], "opts": {} });
+        let result = format_tool_call("clock__sleep", &input, 80);
+        assert_eq!(
+            result.header,
+            r#"clock__sleep: { "duration_ms": 20000, "opts": {}, "tags": ["a", "b"] }"#
+        );
+        assert_eq!(result.body, None);
+    }
+
+    #[test]
+    fn test_format_fallback_wraps_long_input() {
+        let input = json!({ "query": "one two three four five six seven" });
+        let result = format_tool_call("mcp__search", &input, 30);
+        assert!(result.header.starts_with("mcp__search: {"));
+        assert!(result.body.is_some());
     }
 
     #[test]

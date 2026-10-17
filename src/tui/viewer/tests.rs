@@ -414,6 +414,22 @@ fn summary_tool_mode_renders_activity_summary() {
 }
 
 #[test]
+fn summary_tool_mode_shows_single_unknown_tool_call_inline() {
+    let entry = entry(
+        0,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"clock__sleep","input":{"duration_ms":20000}}]}}"#,
+    );
+    let rendered = render_parsed_conversation(
+        &renderable(&[entry]),
+        &test_render_options(ToolDisplayMode::Summary),
+    );
+    let text = rendered_text(&rendered);
+
+    assert!(text.contains(r#"clock__sleep: { "duration_ms": 20000 }"#));
+    assert!(!text.contains("Called 1 tool"));
+}
+
+#[test]
 fn summary_tool_mode_coalesces_tool_only_entries_across_results() {
     let entries = tool_summary_entries();
     let rendered = render_parsed_conversation(
