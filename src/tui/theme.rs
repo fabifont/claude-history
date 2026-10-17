@@ -61,6 +61,8 @@ pub struct Theme {
 
     // Search
     pub search_match_bg: Rgb,
+    /// Background of matches drawn less prominently than the main hit
+    pub search_match_soft_bg: Rgb,
 
     // Viewer colors
     pub green: Rgb,
@@ -117,6 +119,7 @@ impl Theme {
             dim_label: (60, 60, 60),
 
             search_match_bg: (78, 201, 176),
+            search_match_soft_bg: (38, 82, 74),
 
             green: (0, 255, 0),
             blue: (100, 149, 237),
@@ -171,6 +174,7 @@ impl Theme {
             dim_label: (180, 188, 194),
 
             search_match_bg: (194, 226, 220), // Pale teal wash for matches
+            search_match_soft_bg: (224, 240, 236), // Paler wash for secondary matches
 
             green: (40, 130, 60), // Dark green for quotes
             blue: (36, 97, 160),  // Dark blue for links

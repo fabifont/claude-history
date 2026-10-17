@@ -1770,9 +1770,9 @@ fn render_list_preview(frame: &mut Frame, app: &App, area: Rect, beside: bool) {
 ///
 /// The hit, the message the result was found by, draws its matches of the
 /// whole query as filled blocks: or, when it has none, the matches on the
-/// `anchor` line. Every other match is drawn like matches in the list, as
-/// colored text. Matches widen to whole words, so a prefix match on `tests`
-/// does not stop mid-word.
+/// `anchor` line. Every other match gets a softer wash of the same color.
+/// Matches widen to whole words, so a prefix match on `tests` does not stop
+/// mid-word.
 fn preview_match_ranges(
     texts: &[Box<str>],
     visible: std::ops::Range<usize>,
@@ -1810,7 +1810,7 @@ fn preview_match_ranges(
             full_match_lines.contains(&idx) && query.0.covers_all_terms(matched)
         }
     };
-    let light = Style::default().fg(rgb(th().context_highlight)).bold();
+    let light = Style::default().bg(rgb(th().search_match_soft_bg));
 
     visible
         .map(|idx| {
