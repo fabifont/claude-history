@@ -78,6 +78,33 @@ impl SemanticIndexState {
         }
     }
 
+    /// Takes in embeddings another process wrote to the cache on disk since
+    /// it was read, so the next refresh ranks with them. Returns whether
+    /// there were any.
+    pub fn reload_cache(&mut self) -> bool {
+        self.absorb_cache(read_embedding_cache(self.chunk_config))
+    }
+
+    fn absorb_cache(&mut self, disk: EmbeddingCache) -> bool {
+        let new = disk
+            .entries
+            .keys()
+            .any(|key| !self.cache.entries.contains_key(key));
+        if !new {
+            return false;
+        }
+        // The disk's entries replace this process's mapped ones, which
+        // refer to an older version of the file.
+        let mut entries = disk.entries;
+        for (key, entry) in self.cache.entries.drain() {
+            entries.entry(key).or_insert(entry);
+        }
+        self.cache.entries = entries;
+        self.cache.access_counter = self.cache.access_counter.max(disk.access_counter);
+        self.signature = None;
+        true
+    }
+
     pub fn indexed_chunk_count(&self) -> usize {
         self.resident.chunk_count()
     }
@@ -828,6 +855,40 @@ mod tests {
                 .iter()
                 .all(|hit| hit.explanation.chunk.source == SemanticChunkSource::VisibleDialogue)
         );
+    }
+
+    #[test]
+    fn embeddings_another_process_wrote_are_ranked_without_embedding() {
+        let conversations = vec![
+            conversation("/projects/project-a/session-a.jsonl", vec!["visible alpha"]),
+            conversation("/projects/project-a/session-b.jsonl", vec!["visible beta"]),
+        ];
+        let (query, candidates) = request("beta", conversations, vec![0, 1]);
+        let request = index_request(&query, &candidates);
+        let (mut state, mut embedder) = prepare_empty_state(ChunkConfig::default());
+        let cancellation = SemanticCancellationToken::new();
+        let response = state
+            .index_slice(&request, &mut embedder, &cancellation, 0, |_| {})
+            .unwrap();
+        assert_eq!(response.missing_chunk_count, 2);
+
+        let disk = |filled: bool| {
+            let mut cache = empty_embedding_cache(ChunkConfig::default());
+            if filled {
+                cache_request_passages(&mut cache, &request);
+            }
+            cache
+        };
+        assert!(!state.absorb_cache(disk(false)));
+        assert!(state.absorb_cache(disk(true)));
+        assert!(!state.absorb_cache(disk(true)));
+        let response = state
+            .index_slice(&request, &mut embedder, &cancellation, 0, |_| {})
+            .unwrap();
+        assert_eq!(response.missing_chunk_count, 0);
+        let response = run_refresh(&mut state, &request, &mut embedder).unwrap();
+        assert_eq!(embedder.passage_calls, 0);
+        assert_eq!(response.hits[0].conversation_index, 1);
     }
 
     #[test]

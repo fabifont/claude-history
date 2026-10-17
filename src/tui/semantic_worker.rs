@@ -2,7 +2,7 @@ use crate::error::{AppError, Result};
 use crate::history::Conversation;
 use crate::search::literal::{build_literal_corpus, exact_fallback};
 use crate::search::query::ParsedQuery;
-use crate::semantic::cache::write_embedding_cache;
+use crate::semantic::cache::{EmbedLock, MatrixStamp, matrix_stamp, write_embedding_cache};
 use crate::semantic::embed::SemanticEmbedder;
 use crate::semantic::fastembed::{EmbedPriority, FastembedEmbedder};
 use crate::semantic::index::{
@@ -16,8 +16,10 @@ use crate::semantic::types::{
 use crate::store::SearchIndex;
 use crate::tui::app::{SemanticProgress, SemanticResultMetadata};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub enum SemanticWorkerCommand {
@@ -104,6 +106,17 @@ pub fn spawn_semantic_worker_with(
     mpsc::Receiver<SemanticSearchMessage>,
     SemanticCancellationToken,
 ) {
+    spawn_semantic_worker_coordinated(new_embedder, Coordination::from_env)
+}
+
+fn spawn_semantic_worker_coordinated(
+    new_embedder: EmbedderFactory,
+    coordination: fn() -> Coordination,
+) -> (
+    mpsc::Sender<SemanticWorkerCommand>,
+    mpsc::Receiver<SemanticSearchMessage>,
+    SemanticCancellationToken,
+) {
     let (cmd_tx, cmd_rx) = mpsc::channel::<SemanticWorkerCommand>();
     let (res_tx, res_rx) = mpsc::channel::<SemanticSearchMessage>();
     let cancellation = SemanticCancellationToken::new();
@@ -117,11 +130,102 @@ pub fn spawn_semantic_worker_with(
                 .thread_name(|_| "semantic-rank-worker".to_string())
                 .build()
                 .expect("failed to create semantic ranking thread pool");
-            pool.install(|| run_semantic_worker(cmd_rx, res_tx, worker_cancellation, new_embedder));
+            pool.install(|| {
+                run_semantic_worker(
+                    cmd_rx,
+                    res_tx,
+                    worker_cancellation,
+                    new_embedder,
+                    coordination(),
+                )
+            });
         })
         .expect("failed to spawn semantic search worker thread");
 
     (cmd_tx, res_rx, cancellation)
+}
+
+/// How the worker shares embedding with other processes. It never embeds
+/// while another process holds the cache's embedding lock, and while the
+/// daemon runs it leaves embedding to the daemon, taking in what the daemon
+/// writes, unless the daemon writes nothing for `DAEMON_GRACE`.
+struct Coordination {
+    /// The semantic cache directory; `None` embeds without coordinating.
+    dir: Option<PathBuf>,
+    daemon_running: fn() -> bool,
+    /// Version of the matrix last taken in.
+    seen: Option<MatrixStamp>,
+    /// Since when the daemon has been waited for, or last wrote.
+    waiting_since: Option<Instant>,
+}
+
+impl Coordination {
+    /// How long the daemon may leave passages unembedded before the worker
+    /// embeds them itself, as it does beyond the daemon's capacity.
+    const DAEMON_GRACE: Duration = Duration::from_secs(120);
+    /// Interval of checks for the matrix while deferring.
+    const POLL: Duration = Duration::from_secs(3);
+
+    fn from_env() -> Self {
+        let dir = crate::semantic::cache::semantic_cache_dir();
+        Self {
+            seen: dir.as_deref().and_then(matrix_stamp),
+            dir,
+            daemon_running: crate::daemon::running,
+            waiting_since: None,
+        }
+    }
+
+    /// Starts a round of indexing, which first gives the daemon its grace.
+    fn begin(&mut self) {
+        self.waiting_since = None;
+    }
+
+    /// Whether to leave the next slice to another process.
+    fn defer(&mut self) -> bool {
+        let Some(dir) = &self.dir else {
+            return false;
+        };
+        let now = Instant::now();
+        if EmbedLock::is_held(dir) {
+            self.waiting_since = Some(now);
+            return true;
+        }
+        if !(self.daemon_running)() {
+            return false;
+        }
+        let since = *self.waiting_since.get_or_insert(now);
+        now.duration_since(since) < Self::DAEMON_GRACE
+    }
+
+    /// Takes in what another process wrote to the matrix; returns whether
+    /// it added embeddings.
+    fn take_in(&mut self, state: &mut SemanticIndexState) -> bool {
+        let Some(dir) = &self.dir else {
+            return false;
+        };
+        let stamp = matrix_stamp(dir);
+        if stamp == self.seen {
+            return false;
+        }
+        self.seen = stamp;
+        self.waiting_since = Some(Instant::now());
+        state.reload_cache()
+    }
+
+    /// The embedding lock for a slice: `Some(None)` when there is nothing
+    /// to lock, `None` when another process holds it.
+    fn lock(&self) -> Option<Option<EmbedLock>> {
+        let Some(dir) = &self.dir else {
+            return Some(None);
+        };
+        match EmbedLock::try_acquire(dir) {
+            Ok(Some(lock)) => Some(Some(lock)),
+            Ok(None) => None,
+            // Without a lock file, embedding goes on uncoordinated.
+            Err(_) => Some(None),
+        }
+    }
 }
 
 /// The embedder, made on first use.
@@ -215,6 +319,7 @@ fn run_semantic_worker(
     res_tx: mpsc::Sender<SemanticSearchMessage>,
     cancellation_source: SemanticCancellationToken,
     new_embedder: EmbedderFactory,
+    mut coordination: Coordination,
 ) {
     let mut worker = SemanticWorkerState::default();
     let mut state = SemanticIndexState::new();
@@ -229,7 +334,14 @@ fn run_semantic_worker(
                 generation: worker.last_search_generation,
             });
         }
-        let command = if indexing.is_some() {
+        let deferring = indexing.is_some() && coordination.defer();
+        let command = if deferring {
+            match cmd_rx.recv_timeout(Coordination::POLL) {
+                Ok(command) => Some(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else if indexing.is_some() {
             match cmd_rx.try_recv() {
                 Ok(command) => Some(command),
                 Err(mpsc::TryRecvError::Empty) => None,
@@ -243,14 +355,34 @@ fn run_semantic_worker(
         };
         let Some(command) = command else {
             if let Some(current) = indexing.as_mut() {
-                let done = index_slice(
-                    &worker,
-                    &mut state,
-                    &mut embedder,
-                    current,
-                    &cancellation_source,
-                    &res_tx,
-                );
+                let done = if deferring {
+                    // Only what another process embedded is taken in.
+                    coordination.take_in(&mut state)
+                        && index_slice(
+                            &worker,
+                            &mut state,
+                            &mut embedder,
+                            current,
+                            0,
+                            &cancellation_source,
+                            &res_tx,
+                        )
+                } else if let Some(lock) = coordination.lock() {
+                    let budget = current.budget;
+                    let done = index_slice(
+                        &worker,
+                        &mut state,
+                        &mut embedder,
+                        current,
+                        budget,
+                        &cancellation_source,
+                        &res_tx,
+                    );
+                    drop(lock);
+                    done
+                } else {
+                    false
+                };
                 if done {
                     indexing = None;
                 }
@@ -346,8 +478,10 @@ fn run_semantic_worker(
                         if missing == 0 {
                             return Some(response);
                         }
-                        let current =
-                            indexing.get_or_insert_with(|| Indexing::new(request.clone()));
+                        let current = indexing.get_or_insert_with(|| {
+                            coordination.begin();
+                            Indexing::new(request.clone())
+                        });
                         let unanswered = response.filtered.is_empty() && !request.prewarm;
                         if !request.prewarm || current.request.prewarm {
                             current.request = request.clone();
@@ -402,14 +536,16 @@ fn run_semantic_worker(
     }
 }
 
-/// Embeds one slice of the passages still without embeddings. Returns
-/// whether indexing is over: every passage is embedded, and the search it
-/// serves has been answered again with all of them, or embedding failed.
+/// Embeds one slice of at most `budget` of the passages still without
+/// embeddings. Returns whether indexing is over: every passage is embedded,
+/// and the search it serves has been answered again with all of them, or
+/// embedding failed.
 fn index_slice(
     worker: &SemanticWorkerState,
     state: &mut SemanticIndexState,
     embedder: &mut Embedder,
     indexing: &mut Indexing,
+    budget: usize,
     cancellation_source: &SemanticCancellationToken,
     res_tx: &mpsc::Sender<SemanticSearchMessage>,
 ) -> bool {
@@ -428,7 +564,6 @@ fn index_slice(
     };
     let cancellation = cancellation_source.child();
     let started = std::time::Instant::now();
-    let budget = indexing.budget;
     let slice = state.index_slice(&index_request, model, &cancellation, budget, |cache| {
         indexing.save(cache)
     });
@@ -442,7 +577,9 @@ fn index_slice(
         }
     };
     indexing.completed += response.embedded_chunk_count;
-    indexing.resize(response.embedded_chunk_count, started.elapsed());
+    if budget > 0 {
+        indexing.resize(response.embedded_chunk_count, started.elapsed());
+    }
     if response.missing_chunk_count > 0 {
         let _ = res_tx.send(SemanticSearchMessage::Indexing(
             indexing.progress(response.missing_chunk_count),
@@ -458,7 +595,9 @@ fn index_slice(
         return false;
     }
 
-    write_embedding_cache(&state.cache);
+    if indexing.completed > 0 {
+        write_embedding_cache(&state.cache);
+    }
     if let Some(response) = rank_current(worker, state, model, &indexing.request, &cancellation) {
         let _ = res_tx.send(SemanticSearchMessage::Complete(response));
     }
