@@ -49,8 +49,8 @@ impl ToolActivitySummary {
             "Edit" | "edit" => self.edited_files += 1,
             "Write" | "write" => self.wrote_files += 1,
             "Task" => self.agents += 1,
-            "WebFetch" => self.fetched_urls += 1,
-            "WebSearch" => self.web_searches += 1,
+            "WebFetch" | "fetch_content" => self.fetched_urls += 1,
+            "WebSearch" | "web_search" => self.web_searches += 1,
             _ => self.add_other_tool(name, 1),
         }
     }
@@ -561,10 +561,22 @@ pub(super) fn summary_rows<'a>(
         .collect()
 }
 
-/// A tool call as one formatted line cut to `width`.
+/// A tool call as one formatted line cut to `width`. A call with more to
+/// show than its header, such as a multi-line command, ends with how many
+/// lines it hides.
 fn call_line(name: &str, input: &serde_json::Value, width: usize) -> String {
-    let header = crate::tool_format::format_tool_call(name, input, 0).header;
-    truncate_end(&header, width)
+    let formatted = crate::tool_format::format_tool_call(name, input, 0);
+    let hidden = formatted
+        .body
+        .as_deref()
+        .map_or(0, |body| body.lines().count());
+    if hidden == 0 {
+        return truncate_end(&formatted.header, width);
+    }
+    let noun = if hidden == 1 { "line" } else { "lines" };
+    let suffix = format!(" ({hidden} more {noun})");
+    let header_width = width.saturating_sub(UnicodeWidthStr::width(suffix.as_str()));
+    format!("{}{suffix}", truncate_end(&formatted.header, header_width))
 }
 
 /// The summary text for the calls among `parts`. A single call to a tool

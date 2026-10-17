@@ -28,8 +28,22 @@ pub fn format_tool_call(name: &str, input: &Value, max_width: usize) -> Formatte
         "find" => format_glob("Find", input),
         "Edit" | "edit" => format_edit(input),
         "Write" | "write" => format_write(input),
-        "WebFetch" => format_web_fetch(input),
-        "WebSearch" => format_web_search(input),
+        "WebFetch" | "fetch_content" => format_web_fetch(input),
+        "WebSearch" | "web_search" => format_web_search(input),
+        "codemode" => wrap_after_prefix("Codemode: ", str_or_empty(input, "code"), max_width),
+        "ls" => FormattedToolCall {
+            header: format!(
+                "List: {}",
+                input.get("path").and_then(|v| v.as_str()).unwrap_or(".")
+            ),
+            body: None,
+        },
+        "suba" => format_labeled("Suba", input, "name", "task"),
+        "suba_send" => format_labeled("Suba send", input, "id", "message"),
+        "suba_resume" => format_labeled("Suba resume", input, "id", "task"),
+        "suba_finish" => format_labeled("Suba finish", input, "id", "result"),
+        "suba_list" => format_labeled("Suba list", input, "status", ""),
+        "process" => format_process(input),
         _ => format_fallback(name, input, max_width),
     }
 }
@@ -201,7 +215,11 @@ fn format_write(input: &Value) -> FormattedToolCall {
 }
 
 fn format_web_fetch(input: &Value) -> FormattedToolCall {
-    let url = input.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    // Pi's fetch_content takes either one `url` or a list of `urls`.
+    let url = match input.get("urls").and_then(|v| v.as_array()) {
+        Some(urls) => strings(urls).join(", "),
+        None => str_or_empty(input, "url").to_string(),
+    };
     let prompt = input.get("prompt").and_then(|v| v.as_str());
 
     FormattedToolCall {
@@ -211,12 +229,63 @@ fn format_web_fetch(input: &Value) -> FormattedToolCall {
 }
 
 fn format_web_search(input: &Value) -> FormattedToolCall {
-    let query = input.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    // Pi's web_search takes either one `query` or a list of `queries`.
+    let queries = match input.get("queries").and_then(|v| v.as_array()) {
+        Some(queries) => strings(queries),
+        None => vec![str_or_empty(input, "query")],
+    };
+    let quoted: Vec<String> = queries.iter().map(|q| format!("\"{}\"", q)).collect();
 
     FormattedToolCall {
-        header: format!("Search: \"{}\"", query),
+        header: format!("Search: {}", quoted.join(", ")),
         body: None,
     }
+}
+
+fn str_or_empty<'a>(input: &'a Value, key: &str) -> &'a str {
+    input.get(key).and_then(|v| v.as_str()).unwrap_or("")
+}
+
+fn strings(values: &[Value]) -> Vec<&str> {
+    values.iter().filter_map(Value::as_str).collect()
+}
+
+/// `label: <subject>` with the long text under `body_key` as the body.
+fn format_labeled(
+    label: &str,
+    input: &Value,
+    subject_key: &str,
+    body_key: &str,
+) -> FormattedToolCall {
+    let subject = str_or_empty(input, subject_key);
+    let header = if subject.is_empty() {
+        label.to_string()
+    } else {
+        format!("{}: {}", label, subject)
+    };
+    let body = input
+        .get(body_key)
+        .and_then(|v| v.as_str())
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
+    FormattedToolCall { header, body }
+}
+
+/// Pi's process tool: `Process <action>: <name or id>`, with a started
+/// process's command as the body.
+fn format_process(input: &Value) -> FormattedToolCall {
+    let action = str_or_empty(input, "action");
+    let subject = ["name", "id"]
+        .iter()
+        .map(|key| str_or_empty(input, key))
+        .find(|value| !value.is_empty())
+        .unwrap_or("");
+    let label = format!("Process {}", action);
+    let mut formatted = format_labeled(label.trim_end(), input, "", "command");
+    if !subject.is_empty() {
+        formatted.header = format!("{}: {}", formatted.header, subject);
+    }
+    formatted
 }
 
 fn format_fallback(name: &str, input: &Value, max_width: usize) -> FormattedToolCall {
@@ -269,11 +338,12 @@ fn is_content_block(value: &Value) -> bool {
 
 fn format_result_string(text: &str) -> String {
     let trimmed = text.trim();
-    if let Some(error) = trimmed
-        .strip_prefix("<tool_use_error>")
-        .and_then(|rest| rest.strip_suffix("</tool_use_error>"))
-    {
-        return format!("Error: {}", error.trim());
+    if let Some(error) = strip_tag(trimmed, "tool_use_error") {
+        return format!("Error: {}", error);
+    }
+    // Claude Code's notice for output too large to keep inline.
+    if let Some(notice) = strip_tag(trimmed, "persisted-output") {
+        return notice.to_string();
     }
     if !trimmed.contains('\n')
         && let Ok(value @ (Value::Object(_) | Value::Array(_))) =
@@ -282,6 +352,13 @@ fn format_result_string(text: &str) -> String {
         return pretty_json(&value);
     }
     text.to_string()
+}
+
+/// The trimmed contents of `text` when it is wholly wrapped in `<tag>`.
+fn strip_tag<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    text.strip_prefix(&format!("<{}>", tag))?
+        .strip_suffix(&format!("</{}>", tag))
+        .map(str::trim)
 }
 
 fn format_result_block(block: &Value) -> String {
@@ -502,10 +579,59 @@ mod tests {
             format_tool_result(Some(&one_line_json)),
             "{\n  \"ok\": true,\n  \"path\": \"a.md\"\n}"
         );
+        let persisted = json!(
+            "<persisted-output>\nOutput too large (48KB). Full output saved to: /t/a.txt\n\nPreview (first 2KB):\nhello\n</persisted-output>"
+        );
+        assert_eq!(
+            format_tool_result(Some(&persisted)),
+            "Output too large (48KB). Full output saved to: /t/a.txt\n\nPreview (first 2KB):\nhello"
+        );
         let text = json!("[exited with code 0]");
         assert_eq!(format_tool_result(Some(&text)), "[exited with code 0]");
         assert_eq!(format_tool_result(Some(&json!([1, 2]))), "[\n  1,\n  2\n]");
         assert_eq!(format_tool_result(None), "<no content>");
+    }
+
+    #[test]
+    fn test_format_more_pi_tools() {
+        let header = |name: &str, input: Value| format_tool_call(name, &input, 0).header;
+        assert_eq!(header("ls", json!({ "path": "src" })), "List: src");
+        assert_eq!(
+            header(
+                "web_search",
+                json!({ "queries": ["a b", "c"], "numResults": 5 })
+            ),
+            r#"Search: "a b", "c""#
+        );
+        assert_eq!(
+            header(
+                "fetch_content",
+                json!({ "urls": ["https://a", "https://b"] })
+            ),
+            "Fetch: https://a, https://b"
+        );
+        let suba = format_tool_call("suba", &json!({ "name": "review", "task": "Check it" }), 0);
+        assert_eq!(suba.header, "Suba: review");
+        assert_eq!(suba.body.as_deref(), Some("Check it"));
+        assert_eq!(
+            header("suba_list", json!({ "status": "all" })),
+            "Suba list: all"
+        );
+        let process = format_tool_call(
+            "process",
+            &json!({ "action": "start", "name": "smoke", "command": "make test" }),
+            0,
+        );
+        assert_eq!(process.header, "Process start: smoke");
+        assert_eq!(process.body.as_deref(), Some("make test"));
+        assert_eq!(
+            header("process", json!({ "action": "list" })),
+            "Process list"
+        );
+        let codemode =
+            format_tool_call("codemode", &json!({ "code": "const r = 1;\nreturn r;" }), 0);
+        assert_eq!(codemode.header, "Codemode: const r = 1;");
+        assert_eq!(codemode.body.as_deref(), Some("return r;"));
     }
 
     #[test]

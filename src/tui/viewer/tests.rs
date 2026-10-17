@@ -529,6 +529,25 @@ fn calls_tool_mode_lists_each_call_on_one_line_without_results() {
 }
 
 #[test]
+fn calls_tool_mode_counts_lines_a_call_row_hides() {
+    let entry = entry(
+        0,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"python3 - <<'EOF'\nprint(1)\nEOF"}},{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"ls"}}]}}"#,
+    );
+    let rendered = render_parsed_conversation(
+        &renderable(&[entry]),
+        &test_render_options(ToolDisplayMode::Calls),
+    );
+    let text = rendered_text(&rendered);
+
+    assert!(
+        text.contains("Bash: python3 - <<'EOF' (2 more lines)"),
+        "{text}"
+    );
+    assert!(text.contains("Bash: ls\n"), "{text}");
+}
+
+#[test]
 fn summary_tool_mode_coalesces_tool_only_entries_across_results() {
     let entries = tool_summary_entries();
     let rendered = render_parsed_conversation(
