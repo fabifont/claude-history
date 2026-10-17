@@ -154,6 +154,21 @@ fn snapshot_rows_open_resume_fork_and_edit() {
 }
 
 #[test]
+fn hovering_a_row_selects_it() {
+    let root = publish(&corpus());
+    let mut app = loading_app(None, vec![]);
+    show(&mut app, &root, TimeFilter::default());
+    let frame = Rect::new(0, 0, 80, 30);
+    assert_eq!(app.selected(), Some(0));
+
+    assert!(app.handle_list_mouse_move(6, frame));
+    assert_eq!(app.selected(), Some(1));
+    assert!(!app.handle_list_mouse_move(6, frame));
+    assert!(!app.handle_list_mouse_move(0, frame));
+    assert_eq!(app.selected(), Some(1));
+}
+
+#[test]
 fn without_a_generation_rows_wait() {
     let mut app = loading_app(None, vec![]);
     assert!(!app.readiness().list);

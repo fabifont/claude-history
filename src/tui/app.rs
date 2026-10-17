@@ -915,15 +915,13 @@ impl App {
                 .matches(KeyCode::Char('t'), KeyModifiers::CONTROL)
     }
 
-    /// Handle a left-click in list mode: select the conversation under the cursor.
-    /// Returns true if the click landed on a list item — the caller is expected to
-    /// then transition into view mode (matching the Enter-key behavior).
-    pub fn handle_list_click(&mut self, row: u16, frame_area: Rect) -> bool {
+    /// Index into `filtered` of the list item drawn at `row`, if any.
+    fn list_idx_at_row(&self, row: u16, frame_area: Rect) -> Option<usize> {
         if !matches!(self.app_mode, AppMode::List)
             || self.dialog_mode != DialogMode::None
             || !self.readiness.list
         {
-            return false;
+            return None;
         }
 
         // Mirror the layout in render_list_mode: outer 1px border, then split
@@ -938,13 +936,13 @@ impl App {
         };
 
         if list_height == 0 || row < list_y || row >= list_y.saturating_add(list_height) {
-            return false;
+            return None;
         }
 
         let lines_per_item = list_lines_per_item(self.list_search_mode, &self.query);
         let items_per_page = (list_height as usize) / lines_per_item;
         if items_per_page == 0 {
-            return false;
+            return None;
         }
 
         let offset = match self.selected {
@@ -952,15 +950,35 @@ impl App {
             None => 0,
         };
         let relative_row = (row - list_y) as usize;
-        let relative_idx = relative_row / lines_per_item;
-        let new_idx = offset + relative_idx;
-        if new_idx < self.filtered.len() {
-            self.clear_selection_anchor();
-            self.selected = Some(new_idx);
-            true
-        } else {
-            false
+        let new_idx = offset + relative_row / lines_per_item;
+        (new_idx < self.filtered.len()).then_some(new_idx)
+    }
+
+    /// Handle a left-click in list mode: select the conversation under the cursor.
+    /// Returns true if the click landed on a list item — the caller is expected to
+    /// then transition into view mode (matching the Enter-key behavior).
+    pub fn handle_list_click(&mut self, row: u16, frame_area: Rect) -> bool {
+        let Some(idx) = self.list_idx_at_row(row, frame_area) else {
+            return false;
+        };
+        self.clear_selection_anchor();
+        self.selected = Some(idx);
+        true
+    }
+
+    /// Handle mouse movement in list mode: select the conversation under the
+    /// cursor so the highlight shows which one a click would open. Returns
+    /// true if the selection changed.
+    pub fn handle_list_mouse_move(&mut self, row: u16, frame_area: Rect) -> bool {
+        let Some(idx) = self.list_idx_at_row(row, frame_area) else {
+            return false;
+        };
+        if self.selected == Some(idx) {
+            return false;
         }
+        self.clear_selection_anchor();
+        self.selected = Some(idx);
+        true
     }
 }
 

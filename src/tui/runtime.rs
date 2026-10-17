@@ -222,6 +222,9 @@ where
                 }
                 MouseEventKind::Moved => {
                     app.handle_view_mouse_move(m.row, frame_state.frame_area);
+                    if allow_list_click_enter {
+                        app.handle_list_mouse_move(m.row, frame_state.frame_area);
+                    }
                 }
                 _ => {}
             }
