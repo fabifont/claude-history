@@ -5,6 +5,19 @@
 - New: While searching, the selected result is previewed next to or below the
   list, scrolled to a line that matches the query. The best match is
   highlighted brightly and other matches are shaded more softly
+- New: A calls mode in the viewer's `t` cycle (off, summary, calls, truncated,
+  full) lists each tool call on one line, such as `Bash: cargo test`, without
+  its result. Click a call to expand it with its result
+- Tool calls without their own formatting, such as MCP and Codex tools, show
+  as one line of JSON, and summary rows name them instead of "Called N tools"
+- Summary mode merges a run of tool calls into one row even when Claude Code
+  wrote hidden records or thinking between them
+- Pi's tool calls are formatted like Claude Code's, including diffs for edits,
+  instead of raw JSON
+- Tool results show images and documents as `[image: image/png]` in place of
+  base64 data, and errors as `Error: ...`. One-line JSON results are
+  pretty-printed
+- Hovering over the conversation list selects the row under the mouse
 
 ## v0.1.78 (2026-10-17)
 
