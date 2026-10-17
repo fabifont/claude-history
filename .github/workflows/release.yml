@@ -248,6 +248,37 @@ jobs:
             *.tar.gz
             *.sha256
 
+  publish-crates:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          CARGO_VERSION=$(cargo metadata --no-deps --format-version=1 \
+            | jq -r --arg name "$BIN_NAME" '.packages[] | select(.name==$name) | .version')
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$TAG" != "$CARGO_VERSION" ]; then
+            echo "Tag $TAG does not match Cargo.toml version $CARGO_VERSION" >&2
+            exit 1
+          fi
+
+          if out=$(cargo publish --locked 2>&1); then
+            printf '%s\n' "$out"
+          elif printf '%s\n' "$out" | grep -q "already exists"; then
+            echo "$BIN_NAME $CARGO_VERSION already published, skipping"
+          else
+            printf '%s\n' "$out" >&2
+            exit 1
+          fi
+
   update-tap:
     needs: release
     runs-on: ubuntu-latest

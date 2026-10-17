@@ -17,7 +17,11 @@ This will:
 1. Bump version in Cargo.toml
 2. Generate changelog entry using Claude
 3. Open editor to review changelog
-4. Commit, publish to crates.io, tag, and push
+4. Commit, tag, and push
+
+GitHub Actions then builds binaries, creates the GitHub release, publishes to
+crates.io (`publish-crates` job, using the `CARGO_REGISTRY_TOKEN` secret), and
+updates the Homebrew tap.
 
 ## Updating flake.lock
 

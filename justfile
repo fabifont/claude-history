@@ -100,4 +100,4 @@ release:
 
 # Internal release helper
 _release bump:
-    @cargo-release {{bump}}
+    @cargo-release --skip-publish {{bump}}
