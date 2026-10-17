@@ -1,5 +1,23 @@
 ## Unreleased
 
+- Semantic search no longer makes you wait for new conversations to be
+  embedded: results appear within about a second while indexing continues in
+  the background on several threads at low priority. It now uses the
+  snowflake-arctic-embed-xs model, which is faster and finds results more
+  reliably. Existing embeddings are rebuilt once in the background, newest
+  conversations first
+- New: Tool calls can be hidden entirely. Press `t` in the viewer to cycle
+  off, summary, truncated, and full, and `--no-tools` now starts with tools off
+  ([#46](https://github.com/raine/claude-history/issues/46))
+- New: Set `command` under `[resume]`, `[resume.pi]`, `[resume.omp]`, or
+  `[resume.codex]` to start an agent through a wrapper script or a differently
+  named program ([#73](https://github.com/raine/claude-history/pull/73))
+- Workspace scope includes sessions that worked in the current folder or below
+  it, even when they were started elsewhere, and the search prompt shows the
+  folder the scope is anchored to
+  ([#89](https://github.com/raine/claude-history/issues/89))
+- Fix: On Windows, workspace scope and `exclude_paths` ignore path case
+  ([#44](https://github.com/raine/claude-history/issues/44))
 - New: Claude `/btw` side questions are listed and searched as conversations of
   their own, tagged `fork`, and the question is searchable in the session it
   was asked in ([#82](https://github.com/raine/claude-history/pull/82))
