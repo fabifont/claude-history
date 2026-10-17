@@ -220,12 +220,10 @@ fn build(cache: &mut DocCache, want: &Want, stop: &dyn Fn() -> bool) -> Option<O
         Ok(doc) => doc,
         Err(error) => return Some(Outcome::Failed(error)),
     };
-    let anchor = want
-        .evidence
-        .as_deref()
-        .and_then(|evidence| evidence_anchor(&doc, evidence))
-        .or_else(|| query_anchor(&doc, &want.query));
-    Some(Outcome::Ready { doc, anchor })
+    Some(Outcome::Ready {
+        anchor: anchor(&doc, &want.query, want.evidence.as_deref()),
+        doc,
+    })
 }
 
 /// The conversation at `key` rendered, from the cache when its revision is
@@ -300,13 +298,22 @@ impl DocCache {
     }
 }
 
-/// First line matching `query`.
-fn query_anchor(doc: &PreviewDoc, query: &str) -> Option<usize> {
+/// Line the result is at. When lines match `query`, it is one of them: the
+/// one `evidence` points at, else the first. A semantic chunk can span many
+/// messages, and the one sharing most words with it need not mention the
+/// query at all. Only when no line matches does `evidence` alone decide.
+fn anchor(doc: &PreviewDoc, query: &str, evidence: Option<&str>) -> Option<usize> {
     let query = ViewSearchQuery::parse(query);
-    if query.is_empty() {
-        return None;
-    }
-    doc.texts.iter().position(|text| query.has_match(text))
+    let matching: Vec<bool> = doc
+        .texts
+        .iter()
+        .map(|text| !query.is_empty() && query.has_match(text))
+        .collect();
+    let first_match = matching.iter().position(|&m| m);
+    let eligible = |line: usize| first_match.is_none() || matching[line];
+    evidence
+        .and_then(|evidence| evidence_anchor(doc, evidence, &eligible))
+        .or(first_match)
 }
 
 /// Most words compared from evidence; more add little to telling passages
@@ -314,9 +321,14 @@ fn query_anchor(doc: &PreviewDoc, query: &str) -> Option<usize> {
 const EVIDENCE_WORDS: usize = 64;
 
 /// Line of the message sharing the most words with `evidence`, at the line
-/// of it sharing the most; earliest on ties. `None` when no message shares
+/// of it sharing the most; earliest on ties. Only `eligible` lines, and
+/// messages holding one, are considered. `None` when no message shares
 /// enough to be the passage the evidence was taken from.
-fn evidence_anchor(doc: &PreviewDoc, evidence: &str) -> Option<usize> {
+fn evidence_anchor(
+    doc: &PreviewDoc,
+    evidence: &str,
+    eligible: &dyn Fn(usize) -> bool,
+) -> Option<usize> {
     let mut wanted: HashMap<String, u32> = HashMap::new();
     for word in distinctive_words(evidence) {
         let next = wanted.len() as u32;
@@ -353,12 +365,14 @@ fn evidence_anchor(doc: &PreviewDoc, evidence: &str) -> Option<usize> {
     let (count, message) = doc
         .messages
         .iter()
+        .filter(|m| (m.start_line..m.end_line).any(eligible))
         .map(|m| (shared(m.start_line..m.end_line), m))
         .max_by_key(|(count, m)| (*count, std::cmp::Reverse(m.start_line)))?;
     if count == 0 || count < wanted.len().min(3) {
         return None;
     }
     (message.start_line..message.end_line)
+        .filter(|&line| eligible(line))
         .max_by_key(|&line| (masks[line].count_ones(), std::cmp::Reverse(line)))
 }
 
@@ -411,7 +425,11 @@ mod tests {
             &[(0, 1), (2, 4), (5, 6)],
         );
 
-        let anchor = evidence_anchor(&doc, "…a background daemon keeps semantic embeddings warm…");
+        let anchor = evidence_anchor(
+            &doc,
+            "…a background daemon keeps semantic embeddings warm…",
+            &|_| true,
+        );
 
         assert_eq!(anchor, Some(2));
     }
@@ -420,14 +438,20 @@ mod tests {
     fn evidence_matches_words_case_insensitively() {
         let doc = doc(&["intro", "Daemon Keeps Embeddings"], &[(0, 1), (1, 2)]);
 
-        assert_eq!(evidence_anchor(&doc, "daemon keeps embeddings"), Some(1));
+        assert_eq!(
+            evidence_anchor(&doc, "daemon keeps embeddings", &|_| true),
+            Some(1)
+        );
     }
 
     #[test]
     fn evidence_sharing_too_little_anchors_nowhere() {
         let doc = doc(&["the cache is warm", "unrelated reply"], &[(0, 1), (1, 2)]);
 
-        assert_eq!(evidence_anchor(&doc, "daemon embeddings reconcile"), None);
+        assert_eq!(
+            evidence_anchor(&doc, "daemon embeddings reconcile", &|_| true),
+            None
+        );
     }
 
     #[test]
@@ -437,8 +461,26 @@ mod tests {
             &[],
         );
 
-        assert_eq!(query_anchor(&doc, "token"), Some(1));
-        assert_eq!(query_anchor(&doc, "absent"), None);
+        assert_eq!(anchor(&doc, "token", None), Some(1));
+        assert_eq!(anchor(&doc, "absent", None), None);
+    }
+
+    #[test]
+    fn evidence_anchors_only_on_lines_matching_the_query() {
+        // The evidence shares most words with the summary, which never
+        // mentions the query; the anchor goes to the matching message.
+        let doc = doc(
+            &[
+                "What changed: sidebar containers hide horizontal overflow",
+                "progress card labels wrap inside the card",
+                "fixed the dark mode contrast in the sidebar",
+            ],
+            &[(0, 2), (2, 3)],
+        );
+        let evidence = "sidebar containers hide horizontal overflow progress card labels dark mode";
+
+        assert_eq!(anchor(&doc, "dark mode", Some(evidence)), Some(2));
+        assert_eq!(anchor(&doc, "zebra", Some(evidence)), Some(0));
     }
 
     #[test]
