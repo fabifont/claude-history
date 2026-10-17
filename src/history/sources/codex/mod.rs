@@ -54,6 +54,17 @@ impl CodexAdapter {
 
     /// The directory of the state database: the `sqlite_home` of the
     /// home's `config.toml`, else `CODEX_SQLITE_HOME`, else the home.
+    /// Directories whose files hold thread state beside the rollouts: the
+    /// home, with its session index, and the state database's directory.
+    pub fn state_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = vec![self.instance.root.clone()];
+        let sqlite = self.sqlite_home();
+        if sqlite != self.instance.root {
+            dirs.push(sqlite);
+        }
+        dirs
+    }
+
     fn sqlite_home(&self) -> PathBuf {
         let home = &self.instance.root;
         self.sqlite_home

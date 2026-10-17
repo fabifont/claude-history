@@ -332,6 +332,34 @@ impl Snapshot {
         self.generation.name()
     }
 
+    /// Doc of every card, newest first.
+    pub fn docs_newest_first(&self) -> Vec<u32> {
+        let rows = self.generation.rows();
+        let mut docs: Vec<u32> = (0..rows.len() as u32).collect();
+        docs.sort_by_key(|&doc| std::cmp::Reverse(rows[doc as usize].timestamp_ms));
+        docs
+    }
+
+    /// Paths of the session files whose recorded modification time is
+    /// `since` or later, or unknown.
+    pub fn paths_modified_since(&self, since: std::time::SystemTime) -> Vec<PathBuf> {
+        let since_ns = since
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_nanos()).unwrap_or(i64::MAX)
+            });
+        let rows = self.generation.rows();
+        self.generation
+            .fingerprints()
+            .iter()
+            .zip(rows)
+            .filter(|(fingerprint, _)| {
+                fingerprint.mtime_ns == 0 || fingerprint.mtime_ns >= since_ns
+            })
+            .map(|(_, row)| PathBuf::from(self.generation.str(row.path)))
+            .collect()
+    }
+
     /// Number of cards; doc ids are `0..len()`.
     pub fn len(&self) -> usize {
         self.generation.rows().len()
@@ -527,6 +555,37 @@ impl OwnText {
 impl search::TextSource for OwnText {
     fn full_text(&self, doc: u32) -> Cow<'_, str> {
         Cow::Owned(self.read(doc))
+    }
+}
+
+/// Reads single cards of a generation with their semantic data.
+pub struct SemanticReader {
+    cards: Snapshot,
+    segments: text::TextSegments,
+}
+
+impl SemanticReader {
+    /// `None` when the generation's semantic segments are missing or
+    /// invalid.
+    pub fn open(cards: Snapshot) -> Option<Self> {
+        let segments = cards.generation.open_semantic_files()?;
+        Some(Self { cards, segments })
+    }
+
+    pub fn cards(&self) -> &Snapshot {
+        &self.cards
+    }
+
+    /// Card `doc` as a conversation carrying its semantic data, as
+    /// `SemanticCards` holds it; `None` when its data cannot be read.
+    pub fn conversation(&self, doc: u32) -> Option<Conversation> {
+        let generation = &self.cards.generation;
+        let mut card = self.cards.card(doc);
+        let sem = generation.sems().get(doc as usize)?;
+        if sem.hash != 0 {
+            semantic::SemanticDoc::decode(&self.segments.read_bytes(sem.blob)?)?.apply(&mut card);
+        }
+        Some(card)
     }
 }
 

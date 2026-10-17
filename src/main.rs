@@ -4,6 +4,7 @@ mod case_fold;
 mod claude;
 mod cli;
 mod config;
+mod daemon;
 mod debug;
 mod debug_log;
 mod display;
@@ -153,6 +154,9 @@ fn run() -> Result<()> {
 
     // Handle subcommands
     if let Some(command) = args.command {
+        if !matches!(command, Commands::Daemon { .. } | Commands::Update) {
+            daemon::on_launch(false);
+        }
         return match command {
             Commands::Agent { command } => agent::service::execute(command).map(|output| {
                 print!("{output}");
@@ -161,8 +165,10 @@ fn run() -> Result<()> {
                 run_delete_empty_command(DeleteEmptyArgs { yes, local, all })
             }
             Commands::Update => update::run(),
+            Commands::Daemon { command } => daemon::execute(command),
         };
     }
+    daemon::on_launch(true);
 
     // Detect terminal theme before entering raw mode / alternate screen,
     // as terminal_light queries the terminal for background color

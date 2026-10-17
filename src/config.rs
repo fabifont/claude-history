@@ -22,6 +22,26 @@ pub struct ConfigFile {
     pub tui: Option<TuiConfig>,
     pub search: Option<SearchConfig>,
     pub agent: Option<AgentConfig>,
+    pub semantic: Option<SemanticConfig>,
+}
+
+#[derive(Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticConfig {
+    /// Keep the caches warm in a background process that any launch starts.
+    pub daemon: Option<bool>,
+    /// Whether the background process pauses embedding on battery power.
+    pub pause_on_battery: Option<bool>,
+}
+
+impl SemanticConfig {
+    pub fn daemon(&self) -> bool {
+        self.daemon.unwrap_or(false)
+    }
+
+    pub fn pause_on_battery(&self) -> bool {
+        self.pause_on_battery.unwrap_or(true)
+    }
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -143,6 +163,21 @@ semantic_search = true
         .unwrap();
 
         assert_eq!(config.tui.unwrap().semantic_search, Some(true));
+    }
+
+    #[test]
+    fn semantic_daemon_is_off_and_pauses_on_battery_by_default() {
+        let config: ConfigFile = toml::from_str("").unwrap();
+        let semantic = config.semantic.unwrap_or_default();
+        assert!(!semantic.daemon());
+        assert!(semantic.pause_on_battery());
+
+        let config: ConfigFile =
+            toml::from_str("[semantic]\ndaemon = true\npause_on_battery = false\n").unwrap();
+        let semantic = config.semantic.unwrap();
+        assert!(semantic.daemon());
+        assert!(!semantic.pause_on_battery());
+        assert!(toml::from_str::<ConfigFile>("[semantic]\ndeamon = true\n").is_err());
     }
 
     #[test]
@@ -639,7 +674,7 @@ impl KeyBindings {
 
 /// Returns the path to the configuration file: ~/.config/claude-history/config.toml
 /// This path is used for all platforms.
-fn get_config_path() -> Option<PathBuf> {
+pub fn get_config_path() -> Option<PathBuf> {
     home::home_dir().map(|mut path| {
         path.push(".config");
         path.push("claude-history");

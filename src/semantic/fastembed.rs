@@ -20,6 +20,9 @@ pub enum EmbedPriority {
     /// Indexing behind the TUI: half the cores at a lower scheduling
     /// priority, so the list and lexical search stay responsive.
     Background,
+    /// The daemon's embedding job: two threads at a lower scheduling
+    /// priority, since nobody waits on it.
+    Daemon,
 }
 
 impl EmbedPriority {
@@ -28,7 +31,12 @@ impl EmbedPriority {
         match self {
             Self::Foreground => cores,
             Self::Background => (cores / 2).max(1),
+            Self::Daemon => cores.min(2),
         }
+    }
+
+    fn lowered(self) -> bool {
+        self != Self::Foreground
     }
 }
 
@@ -42,10 +50,10 @@ impl FastembedEmbedder {
     }
 
     /// An embedder for the calling thread that shows no download progress.
-    /// With `EmbedPriority::Background` it also lowers the scheduling
+    /// Below `EmbedPriority::Foreground` it also lowers the scheduling
     /// priority of the calling thread, which takes part in inference.
     pub fn new_quiet(priority: EmbedPriority) -> Result<Self> {
-        if priority == EmbedPriority::Background {
+        if priority.lowered() {
             lower_current_thread_priority();
         }
         Self::new_with_download_progress(crate::semantic::cache::model_cache_dir(), false, priority)
@@ -167,12 +175,13 @@ fn initialize_onnx_runtime(priority: EmbedPriority) -> std::result::Result<(), S
     let builder = bundled_onnx_runtime()?;
     #[cfg(not(feature = "release-dynamic-ort"))]
     let builder = ort::init();
-    let builder = match priority {
-        EmbedPriority::Foreground => builder,
-        EmbedPriority::Background => builder.with_global_thread_pool(
+    let builder = if priority.lowered() {
+        builder.with_global_thread_pool(
             background_thread_pool(priority.threads())
                 .map_err(|error| format!("Failed to configure ONNX Runtime threads: {error}"))?,
-        ),
+        )
+    } else {
+        builder
     };
     if !builder.commit() {
         return Err(

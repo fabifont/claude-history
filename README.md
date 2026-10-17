@@ -515,6 +515,7 @@ Commands:
   agent         Run agent-oriented search and transcript commands
   delete-empty  Delete transcript files with no Claude messages
   update        Update claude-history to the latest version
+  daemon        Show or control the background daemon ([semantic] daemon = true)
 
 Arguments:
   [FILE]  JSONL conversation file to view directly

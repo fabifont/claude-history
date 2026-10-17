@@ -87,10 +87,21 @@ pub(crate) fn enabled() -> bool {
 /// threads.
 #[cfg(unix)]
 pub(crate) fn cpu_time() -> std::time::Duration {
+    rusage_time(libc::RUSAGE_SELF)
+}
+
+/// CPU time of this process and of its children that have been waited for.
+#[cfg(unix)]
+pub(crate) fn cpu_time_with_children() -> std::time::Duration {
+    rusage_time(libc::RUSAGE_SELF) + rusage_time(libc::RUSAGE_CHILDREN)
+}
+
+#[cfg(unix)]
+fn rusage_time(who: libc::c_int) -> std::time::Duration {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     // SAFETY: getrusage fully initializes `usage` when it returns 0.
     let usage = unsafe {
-        if libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) != 0 {
+        if libc::getrusage(who, usage.as_mut_ptr()) != 0 {
             return std::time::Duration::ZERO;
         }
         usage.assume_init()
@@ -103,6 +114,11 @@ pub(crate) fn cpu_time() -> std::time::Duration {
 
 #[cfg(not(unix))]
 pub(crate) fn cpu_time() -> std::time::Duration {
+    std::time::Duration::ZERO
+}
+
+#[cfg(not(unix))]
+pub(crate) fn cpu_time_with_children() -> std::time::Duration {
     std::time::Duration::ZERO
 }
 

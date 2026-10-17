@@ -232,7 +232,7 @@ pub fn read_embedding_cache(config: ChunkConfig) -> EmbeddingCache {
 /// Reads the embedding matrix in `dir`. When there is none yet, converts
 /// `embeddings-v1.bin`, the serialized map earlier versions kept, into one
 /// and removes it, so its embeddings are kept.
-fn read_embedding_cache_in(dir: &Path, config: ChunkConfig) -> EmbeddingCache {
+pub(crate) fn read_embedding_cache_in(dir: &Path, config: ChunkConfig) -> EmbeddingCache {
     let path = dir.join(MATRIX_FILE);
     if let Some(cache) = read_matrix(&path, config) {
         if cache.entries.len() > MAX_CACHE_ENTRIES {
@@ -356,7 +356,7 @@ pub fn write_embedding_cache(cache: &EmbeddingCache) {
 /// Writes `cache` as the matrix in `dir`. Embeddings another process wrote
 /// since this one read the matrix are kept, then the result is pruned to
 /// `MAX_CACHE_ENTRIES`.
-fn write_embedding_cache_in(cache: &EmbeddingCache, dir: &Path) {
+pub(crate) fn write_embedding_cache_in(cache: &EmbeddingCache, dir: &Path) {
     let Ok(_lock) = lock_cache_dir(dir) else {
         return;
     };
@@ -502,8 +502,68 @@ pub fn empty_embedding_cache(config: ChunkConfig) -> EmbeddingCache {
 const MATRIX_FILE: &str = "embeddings-v2.bin";
 const LEGACY_FILE: &str = "embeddings-v1.bin";
 
+/// Identifies one version of the matrix in a cache directory: writers
+/// replace the file, so its inode changes with each write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MatrixStamp {
+    ino: u64,
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+/// The stamp of the matrix in `dir`; `None` when there is none.
+pub fn matrix_stamp(dir: &Path) -> Option<MatrixStamp> {
+    let metadata = std::fs::metadata(dir.join(MATRIX_FILE)).ok()?;
+    #[cfg(unix)]
+    let ino = std::os::unix::fs::MetadataExt::ino(&metadata);
+    #[cfg(not(unix))]
+    let ino = 0;
+    Some(MatrixStamp {
+        ino,
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+/// Held while a process embeds passages into the cache in a directory, so
+/// that the TUI and the daemon never embed the same passages at once. The
+/// operating system releases it when its holder exits, however it exits.
+pub struct EmbedLock {
+    _file: std::fs::File,
+}
+
+impl EmbedLock {
+    /// The lock of `dir`; `None` while another process holds it.
+    pub fn try_acquire(dir: &Path) -> std::io::Result<Option<Self>> {
+        std::fs::create_dir_all(dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(EMBED_LOCK_FILE))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
+
+    /// Whether another process holds the lock of `dir`.
+    pub fn is_held(dir: &Path) -> bool {
+        let Ok(file) = std::fs::File::open(dir.join(EMBED_LOCK_FILE)) else {
+            return false;
+        };
+        matches!(
+            file.try_lock_shared(),
+            Err(std::fs::TryLockError::WouldBlock)
+        )
+    }
+}
+
+const EMBED_LOCK_FILE: &str = "EMBED";
+
 /// The semantic cache directory, which tests never use.
-fn semantic_cache_dir() -> Option<PathBuf> {
+pub(crate) fn semantic_cache_dir() -> Option<PathBuf> {
     if cfg!(test) {
         return None;
     }

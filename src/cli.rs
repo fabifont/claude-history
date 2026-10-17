@@ -64,6 +64,30 @@ pub enum Commands {
     },
     /// Update claude-history to the latest version
     Update,
+    /// Show or control the background daemon ([semantic] daemon = true)
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DaemonCommand {
+    /// Show whether the daemon runs, what it does and its last error
+    Status,
+    /// Stop the daemon; the next launch starts it again
+    Stop,
+    /// Start the daemon unless it runs
+    Start,
+    /// Run the daemon in the foreground (what launches start)
+    #[command(hide = true)]
+    Run,
+    /// Run one embedding job of the daemon
+    #[command(hide = true)]
+    Embed,
+    /// Run one reconcile pass of the daemon
+    #[command(hide = true)]
+    Pass,
 }
 
 #[derive(Debug, ClapArgs)]
