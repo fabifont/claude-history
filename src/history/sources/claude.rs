@@ -244,13 +244,20 @@ fn list_sessions(root: &Path, discovery: &mut Discovery) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for entry in entries {
         match entry {
-            Ok(entry) => dirs.push(entry.path()),
+            // The listing's file type saves a stat per project; a symlink
+            // is followed to see whether it leads to a directory.
+            Ok(entry) => match entry.file_type() {
+                Ok(kind) if kind.is_dir() => dirs.push(entry.path()),
+                Ok(kind) if kind.is_symlink() && entry.path().is_dir() => dirs.push(entry.path()),
+                Ok(_) => {}
+                Err(_) if entry.path().is_dir() => dirs.push(entry.path()),
+                Err(_) => {}
+            },
             Err(_) => discovery.completeness = Completeness::Degraded,
         }
     }
     let listed: Vec<(PathBuf, io::Result<Listed>)> = dirs
         .into_par_iter()
-        .filter(|dir| dir.is_dir())
         .map(|dir| {
             let files = list_project_dir(&dir);
             (dir, files)

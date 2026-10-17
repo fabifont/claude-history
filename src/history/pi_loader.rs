@@ -107,7 +107,13 @@ pub fn discover_files(root: &PiSessionRoot) -> Result<Vec<PathBuf>> {
         for entry in read_dir(&root.path)? {
             let entry = entry?;
             let path = entry.path();
-            if path.is_dir() {
+            // The listing's file type saves a stat per directory; a symlink
+            // is followed to see whether it leads to one.
+            let is_dir = match entry.file_type() {
+                Ok(kind) if !kind.is_symlink() => kind.is_dir(),
+                _ => path.is_dir(),
+            };
+            if is_dir {
                 collect_jsonl(&path, &mut files)?;
             }
         }

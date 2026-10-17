@@ -468,6 +468,11 @@ pub struct Args {
     #[arg(long = "reconcile", hide = true)]
     pub reconcile: bool,
 
+    /// Time the reconcile scan of every session file at several thread
+    /// counts and print the CPU each pass used, for benchmarking
+    #[arg(long = "bench-scan", hide = true)]
+    pub bench_scan: bool,
+
     /// Debug semantic search matching for a query
     #[arg(
         long = "debug-semantic-search",

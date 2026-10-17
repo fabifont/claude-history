@@ -146,6 +146,10 @@ fn run() -> Result<()> {
     if args.reconcile {
         return tui::reconcile();
     }
+    if args.bench_scan {
+        store::reconcile::bench_scan(&history::sources::Registry::from_env());
+        return Ok(());
+    }
 
     // Handle subcommands
     if let Some(command) = args.command {

@@ -181,9 +181,22 @@ impl Scan {
     }
 }
 
+/// Threads listing and stating session files. The scan is bound by the
+/// kernel's directory and inode work, which contends across threads: past
+/// a few, more threads add CPU time without making it finish sooner.
+const SCAN_THREADS: usize = 4;
+
 /// Every conversation of every instance. A file reachable through more than
 /// one instance is kept once, under the first in registry order.
 fn scan(sources: &Registry) -> Scan {
+    let threads = SCAN_THREADS.min(rayon::current_num_threads());
+    match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
+        Ok(pool) => pool.install(|| scan_on_current_pool(sources)),
+        Err(_) => scan_on_current_pool(sources),
+    }
+}
+
+fn scan_on_current_pool(sources: &Registry) -> Scan {
     let started = SystemTime::now();
     let mut scan = Scan::default();
     let discoveries: Vec<_> = sources
@@ -218,6 +231,52 @@ fn scan(sources: &Registry) -> Scan {
         }
     }
     scan
+}
+
+/// Times `scan` over `sources` on pools of several thread counts and prints
+/// the wall time and the CPU time of each pass.
+pub fn bench_scan(sources: &Registry) {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let single = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("pool");
+    for adapter in sources.adapters() {
+        for _ in 0..3 {
+            let (cpu, wall) = (crate::bench::cpu_time(), Instant::now());
+            let found = single.install(|| adapter.discover(SystemTime::now()).found.len());
+            eprintln!(
+                "bench discover {:?} threads=1 files={found} wall={:.1}ms cpu={:.1}ms",
+                adapter.instance().kind,
+                wall.elapsed().as_secs_f64() * 1e3,
+                (crate::bench::cpu_time() - cpu).as_secs_f64() * 1e3,
+            );
+        }
+    }
+    for run in 0..5 {
+        let (cpu, wall) = (crate::bench::cpu_time(), Instant::now());
+        let files = scan(sources).files.len();
+        eprintln!(
+            "bench scan default run={run} files={files} wall={:.1}ms cpu={:.1}ms",
+            wall.elapsed().as_secs_f64() * 1e3,
+            (crate::bench::cpu_time() - cpu).as_secs_f64() * 1e3,
+        );
+    }
+    for threads in [1, 2, 4, cores] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("bench scan pool");
+        for run in 0..5 {
+            let (cpu, wall) = (crate::bench::cpu_time(), Instant::now());
+            let files = pool.install(|| scan_on_current_pool(sources).files.len());
+            eprintln!(
+                "bench scan threads={threads} run={run} files={files} wall={:.1}ms cpu={:.1}ms",
+                wall.elapsed().as_secs_f64() * 1e3,
+                (crate::bench::cpu_time() - cpu).as_secs_f64() * 1e3,
+            );
+        }
+    }
 }
 
 /// Every conversation of every instance of `sources`, parsed in memory.

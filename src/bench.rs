@@ -83,6 +83,29 @@ pub(crate) fn enabled() -> bool {
     matches!(SINK.get(), Some(Some(_)))
 }
 
+/// CPU time this process has used so far, user and system, across all its
+/// threads.
+#[cfg(unix)]
+pub(crate) fn cpu_time() -> std::time::Duration {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: getrusage fully initializes `usage` when it returns 0.
+    let usage = unsafe {
+        if libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) != 0 {
+            return std::time::Duration::ZERO;
+        }
+        usage.assume_init()
+    };
+    let time = |value: libc::timeval| {
+        std::time::Duration::new(value.tv_sec as u64, value.tv_usec as u32 * 1000)
+    };
+    time(usage.ru_utime) + time(usage.ru_stime)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn cpu_time() -> std::time::Duration {
+    std::time::Duration::ZERO
+}
+
 #[cfg(unix)]
 fn peak_rss_bytes() -> Option<u64> {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
