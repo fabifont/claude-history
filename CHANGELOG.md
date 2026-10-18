@@ -14,6 +14,8 @@
   they go quiet, at low priority, and pauses on battery power. Check on it
   with `claude-history daemon status`, and stop it with
   `claude-history daemon stop`
+- Skill calls show as the slash command that invokes them, such as
+  `Skill: /consult-llm`, instead of raw JSON
 - Tool calls without their own formatting, such as MCP and Codex tools, show
   as one line of JSON, and summary rows name them instead of "Called N tools"
 - Summary mode merges a run of tool calls into one row even when Claude Code
