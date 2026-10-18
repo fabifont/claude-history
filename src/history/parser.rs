@@ -1634,6 +1634,28 @@ mod tests {
     }
 
     #[test]
+    fn counts_prompts_and_distinct_tool_calls() {
+        let content = [
+            r#"{"type":"user","message":{"role":"user","content":"Warmup"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"first question"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","id":"a1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","id":"a1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}},{"type":"tool_use","id":"t2","name":"Read","input":{}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2"}]}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","id":"a2","content":[{"type":"text","text":"done"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"second question"}}"#,
+        ]
+        .join("\n");
+
+        let conversation = parse_jsonl(&content).unwrap().unwrap();
+
+        assert_eq!(conversation.message_count, 6);
+        assert_eq!(conversation.prompt_count, 2);
+        assert_eq!(conversation.tool_call_count, 2);
+    }
+
+    #[test]
     fn clear_conversation_still_filtered_with_tool_results() {
         let content = [
             user_msg(

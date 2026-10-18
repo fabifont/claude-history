@@ -396,6 +396,8 @@ impl Generation {
             cwd: optional(card_flags::CWD, row.cwd).map(PathBuf::from),
             cwds: self.cwds(row).map(PathBuf::from).collect(),
             message_count: row.message_count as usize,
+            prompt_count: row.prompt_count as usize,
+            tool_call_count: row.tool_call_count as usize,
             parse_errors: Vec::new(),
             summary: optional(card_flags::SUMMARY, row.summary),
             custom_title: optional(card_flags::CUSTOM_TITLE, row.custom_title),
@@ -530,6 +532,8 @@ pub struct CardData {
     preview_first: String,
     preview_last: String,
     message_count: u32,
+    prompt_count: u32,
+    tool_call_count: u32,
     duration_minutes: u32,
     source: u8,
     /// `card_flags::PROVENANCE` bits.
@@ -580,6 +584,8 @@ impl CardData {
             preview_first: cap_preview(&conversation.preview_first).to_owned(),
             preview_last: cap_preview(&conversation.preview_last).to_owned(),
             message_count: u32::try_from(conversation.message_count).unwrap_or(u32::MAX),
+            prompt_count: u32::try_from(conversation.prompt_count).unwrap_or(u32::MAX),
+            tool_call_count: u32::try_from(conversation.tool_call_count).unwrap_or(u32::MAX),
             duration_minutes: conversation
                 .duration_minutes
                 .map_or(NO_DURATION, |minutes| {
@@ -619,6 +625,8 @@ impl CardData {
             preview_first: str(row.preview_first),
             preview_last: str(row.preview_last),
             message_count: row.message_count,
+            prompt_count: row.prompt_count,
+            tool_call_count: row.tool_call_count,
             duration_minutes: row.duration_minutes,
             source: row.source,
             provenance: row.flags & card_flags::PROVENANCE,
@@ -720,6 +728,8 @@ fn build_manifest(
                 .map_or_else(StrRef::default, |parent| heap.push(parent)),
             project_id: project_ids[&card.project],
             message_count: card.message_count,
+            prompt_count: card.prompt_count,
+            tool_call_count: card.tool_call_count,
             duration_minutes: card.duration_minutes,
             source: card.source,
             flags,

@@ -16,7 +16,7 @@ use crate::agent::transcript::{
 use crate::semantic::filter::{SemanticTurnRole, filter_turn};
 use crate::text_match::nfc;
 use chrono::{DateTime, Local, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// Why a transcript yields no conversation.
@@ -52,6 +52,9 @@ pub struct Indexer {
     preview_parts: Vec<String>,
     user_messages: Vec<String>,
     ordinals: MessageOrdinals,
+    prompt_count: usize,
+    /// Streamed assistant messages repeat their tool calls; ids dedupe them.
+    tool_call_ids: HashSet<String>,
     // Streamed assistant messages repeat their usage; the last one counts.
     usage_by_message: HashMap<String, Usage>,
     assistant_id_semantic_indices: HashMap<String, usize>,
@@ -94,12 +97,16 @@ impl Indexer {
                             return;
                         };
                         if message.parent_tool_use_id.is_none() {
+                            let before = self.own_parts.len();
                             self.own_parts.extend(message.parts.iter().filter_map(
                                 |part| match part {
                                     Part::Text(text) => authored_text(text),
                                     _ => None,
                                 },
                             ));
+                            if self.own_parts.len() > before {
+                                self.prompt_count += 1;
+                            }
                         }
                         // Skill invocations preview as the command line
                         // (e.g. "/consult how to do X?") instead of the tags.
@@ -120,6 +127,12 @@ impl Indexer {
                         else {
                             return;
                         };
+                        self.tool_call_ids.extend(message.parts.iter().filter_map(
+                            |part| match part {
+                                Part::ToolCall { id, .. } => Some(id.clone()),
+                                _ => None,
+                            },
+                        ));
                         let message_range = MessageRange::single(ordinal);
                         let semantic_turn = filter_turn(SemanticTurnRole::Assistant, &preview_text);
                         if let Some(id) = message.id.as_deref() {
@@ -198,6 +211,8 @@ impl Indexer {
             preview_parts,
             user_messages,
             ordinals,
+            prompt_count,
+            tool_call_ids,
             usage_by_message,
             anonymous_tokens,
             first_timestamp,
@@ -311,6 +326,8 @@ impl Indexer {
             cwd: meta.cwd.clone(),
             cwds: meta.cwds.clone(),
             message_count: ordinals.count(),
+            prompt_count,
+            tool_call_count: tool_call_ids.len(),
             parse_errors: transcript.diagnostics.clone(),
             summary: meta.summary.as_deref().map(|s| nfc(s).into_owned()),
             custom_title: meta.custom_title.as_deref().map(|s| nfc(s).into_owned()),

@@ -26,6 +26,8 @@ fn conversation(project: Option<&str>, project_dir: &str, uuid: &str, text: &str
         cwd: None,
         cwds: Vec::new(),
         message_count: 1,
+        prompt_count: 1,
+        tool_call_count: 0,
         parse_errors: Vec::new(),
         summary: None,
         custom_title: None,

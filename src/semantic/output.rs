@@ -99,6 +99,8 @@ mod tests {
             cwd: None,
             cwds: Vec::new(),
             message_count: 1,
+            prompt_count: 1,
+            tool_call_count: 0,
             parse_errors: vec![],
             summary: None,
             custom_title: Some("custom title".to_string()),

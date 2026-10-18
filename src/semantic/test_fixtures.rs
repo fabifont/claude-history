@@ -110,6 +110,8 @@ impl SemanticConversationFixture {
             cwds: self.cwd.iter().cloned().collect(),
             cwd: self.cwd,
             message_count: 1,
+            prompt_count: 1,
+            tool_call_count: 0,
             parse_errors: Vec::new(),
             summary: self.summary,
             custom_title: self.custom_title,

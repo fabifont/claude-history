@@ -91,6 +91,10 @@ pub struct Conversation {
     pub cwds: Vec<PathBuf>,
     /// Number of user and assistant messages in the conversation
     pub message_count: usize,
+    /// Number of top-level user messages with text the person typed
+    pub prompt_count: usize,
+    /// Number of distinct tool calls the assistant made
+    pub tool_call_count: usize,
     /// Parse errors encountered while processing this conversation file
     pub parse_errors: Vec<ParseError>,
     /// Summary/title of the conversation (from type=summary JSONL entry)

@@ -261,6 +261,8 @@ mod tests {
             cwd: Some(PathBuf::from("/cwd/sentinel")),
             cwds: vec![PathBuf::from("/cwd/sentinel")],
             message_count: 2,
+            prompt_count: 1,
+            tool_call_count: 0,
             parse_errors: Vec::new(),
             summary: Some("summary sentinel".to_string()),
             custom_title: Some("title sentinel".to_string()),

@@ -455,6 +455,21 @@ fn render_semantic_debug_popup(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
+}
+
+/// Prompts and, when there are any, tool calls, for the conversation header.
+fn header_counts(conv: &crate::history::Conversation) -> String {
+    let prompts = count_label(conv.prompt_count, "prompt", "prompts");
+    if conv.tool_call_count == 0 {
+        prompts
+    } else {
+        let tools = count_label(conv.tool_call_count, "tool call", "tool calls");
+        format!("{prompts} · {tools}")
+    }
+}
+
 /// Check if the header (with summary) fits on a single line given terminal width
 fn header_fits_single_line(conv: &crate::history::Conversation, terminal_width: u16) -> bool {
     let summary = match &conv.summary {
@@ -478,11 +493,7 @@ fn header_fits_single_line(conv: &crate::history::Conversation, terminal_width: 
         .map(|m| format_model_name(m).len() + 3) // + " · "
         .unwrap_or(0);
 
-    let msg_count_len = if conv.message_count == 1 {
-        "1 message".len()
-    } else {
-        format!("{} messages", conv.message_count).len()
-    };
+    let msg_count_len = UnicodeWidthStr::width(header_counts(conv).as_str());
 
     // Calculate tokens length if present (use long form for single-line check)
     let tokens_len = if conv.total_tokens > 0 {
@@ -781,11 +792,7 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
         let project = conv.project_name.as_deref().unwrap_or("Unknown");
         let custom_title = conv.custom_title.clone();
         let model = conv.model.as_ref().map(|m| format_model_name(m));
-        let msg_count = if conv.message_count == 1 {
-            "1 message".to_string()
-        } else {
-            format!("{} messages", conv.message_count)
-        };
+        let msg_count = header_counts(conv);
         // Format conversation duration
         let duration = conv.duration_minutes.map(|m| {
             if m >= 60 {
@@ -807,7 +814,7 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
             + 3
             + custom_title_len
             + model_len
-            + msg_count.len()
+            + UnicodeWidthStr::width(msg_count.as_str())
             + duration_len
             + 3
             + 16; // 16 = timestamp
@@ -1888,12 +1895,7 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
             // Format timestamp (hybrid: relative for recent, absolute for older)
             let (timestamp, recency) = format_timestamp(conv.timestamp, now);
 
-            // Format message count
-            let msg_count = if conv.message_count == 1 {
-                "1 msg".to_string()
-            } else {
-                format!("{} msgs", conv.message_count)
-            };
+            let msg_count = count_label(conv.prompt_count, "prompt", "prompts");
 
             // Format conversation duration (only if > 0 minutes)
             let duration = conv.duration_minutes.map(|m| {
@@ -3151,6 +3153,8 @@ mod tests {
             cwd: Some(PathBuf::from("/cwd/sentinel")),
             cwds: vec![PathBuf::from("/cwd/sentinel")],
             message_count: 1,
+            prompt_count: 1,
+            tool_call_count: 0,
             parse_errors: Vec::new(),
             summary: Some("summary sentinel".to_string()),
             custom_title: Some("title sentinel".to_string()),
@@ -3393,7 +3397,7 @@ mod tests {
 
         let first_row = row_text(&terminal, 0);
         assert!(
-            first_row.contains("claude-history/drop-semantic…"),
+            first_row.contains("claude-history/drop-semant…"),
             "{first_row:?}"
         );
         assert!(
@@ -3436,7 +3440,10 @@ mod tests {
             first_row.contains("generated summary remains visible"),
             "{first_row:?}"
         );
-        assert!(first_row.contains("1 msg · Jan 01, 00:00"), "{first_row:?}");
+        assert!(
+            first_row.contains("1 prompt · Jan 01, 00:00"),
+            "{first_row:?}"
+        );
     }
 
     #[test]
@@ -3464,10 +3471,13 @@ mod tests {
 
         let first_row = row_text(&terminal, 0);
         assert!(
-            first_row.contains("fork lineage alpha beta gamma delta e…"),
+            first_row.contains("fork lineage alpha beta gamma delt…"),
             "{first_row:?}"
         );
-        assert!(first_row.contains("1 msg · Jan 01, 00:00"), "{first_row:?}");
+        assert!(
+            first_row.contains("1 prompt · Jan 01, 00:00"),
+            "{first_row:?}"
+        );
         assert_eq!(
             UnicodeWidthStr::width(first_row.as_str()),
             72,

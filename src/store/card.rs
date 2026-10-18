@@ -65,6 +65,8 @@ pub struct CardRow {
     /// Index into the manifest's project table.
     pub project_id: u32,
     pub message_count: u32,
+    pub prompt_count: u32,
+    pub tool_call_count: u32,
     /// Duration in minutes, or `NO_DURATION`.
     pub duration_minutes: u32,
     /// `source_to_u8` encoding of `Source`.
@@ -232,7 +234,7 @@ pub struct Header {
 }
 
 pub const MAGIC: [u8; 8] = *b"CHGEN\0\0\0";
-pub const VERSION: u32 = 13;
+pub const VERSION: u32 = 14;
 
 pub fn source_to_u8(source: crate::history::model::SourceKind) -> u8 {
     match source {
@@ -271,7 +273,7 @@ mod tests {
 
     #[test]
     fn records_have_no_implicit_padding() {
-        assert_eq!(std::mem::size_of::<CardRow>(), 144);
+        assert_eq!(std::mem::size_of::<CardRow>(), 152);
         assert_eq!(std::mem::size_of::<ProjectRow>(), 32);
         assert_eq!(std::mem::size_of::<Fingerprint>(), 16);
         assert_eq!(std::mem::size_of::<IndexLoc>(), 8);
