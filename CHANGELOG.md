@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- The conversation list shows how many prompts you typed instead of a message
+  count that included every tool call and result. The viewer header shows both
+  prompts and tool calls, such as `113 prompts · 948 tool calls`
+
 ## v0.1.79 (2026-10-17)
 
 - New: While searching, the selected result is previewed next to or below the
