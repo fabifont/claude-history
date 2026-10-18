@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.79 (2026-10-17)
 
 - New: While searching, the selected result is previewed next to or below the
   list, scrolled to a line that matches the query. The best match is
