@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.80 (2026-10-18)
 
 - The conversation list shows how many prompts you typed instead of a message
   count that included every tool call and result. The viewer header shows both
